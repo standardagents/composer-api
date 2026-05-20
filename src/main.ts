@@ -114,8 +114,18 @@ const transcript = document.querySelector<HTMLElement>("#transcript");
 const status = document.querySelector<HTMLElement>("#status");
 
 const reqBody = document.querySelector<HTMLElement>("#req-body");
+const toolState = document.querySelector<HTMLElement>("#tool-state");
 
 let busy = false;
+
+type ToolState = "idle" | "run" | "wait" | "stream" | "err";
+
+function setToolState(state: ToolState, text: string) {
+  if (!toolState) return;
+  toolState.dataset.state = state;
+  const label = toolState.querySelector<HTMLElement>(".tool-state-text");
+  if (label) label.textContent = text;
+}
 
 function requestBody(extraUserMessage?: string): Record<string, unknown> {
   const outgoing = [...messages];
@@ -129,7 +139,7 @@ function requestBody(extraUserMessage?: string): Record<string, unknown> {
 
 function renderRequestPreview() {
   const draft = promptInput?.value.trim() || "";
-  if (reqBody) reqBody.textContent = JSON.stringify(requestBody(draft || undefined), null, 2);
+  if (reqBody) reqBody.innerHTML = highlightJson(JSON.stringify(requestBody(draft || undefined), null, 2));
 }
 
 function renderTranscript(streaming?: HTMLElement) {
@@ -209,11 +219,13 @@ chatForm?.addEventListener("submit", async (event) => {
   const prompt = promptInput?.value.trim() || "";
   if (!key) {
     setStatus("Enter your Cursor API key first.", "err");
+    setToolState("err", "missing key");
     keyInput?.focus();
     return;
   }
   if (!prompt) {
     setStatus("Type a prompt to send.", "err");
+    setToolState("err", "empty prompt");
     return;
   }
 
@@ -223,7 +235,8 @@ chatForm?.addEventListener("submit", async (event) => {
     autoGrow();
   }
   setBusy(true);
-  setStatus("Streaming from composer-2.5...");
+  setToolState("run", "starting run");
+  setStatus("Starting a Cursor Cloud Agent run. First token can take around 20 seconds.");
 
   const pending = messageNode("assistant", "");
   const pendingBody = pending.querySelector<HTMLElement>(".msg-body");
@@ -231,7 +244,12 @@ chatForm?.addEventListener("submit", async (event) => {
   renderTranscript(pending);
   renderRequestPreview();
 
-  let answer = "";
+  let received = "";
+  const typewriter = createTypewriter((text) => {
+    if (pendingBody) pendingBody.textContent = text;
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+  });
+
   try {
     const response = await fetch(endpoints.chatCompletions, {
       method: "POST",
@@ -247,19 +265,31 @@ chatForm?.addEventListener("submit", async (event) => {
       throw new Error(payload.error?.message || `Request failed with status ${response.status}`);
     }
 
+    setToolState("wait", "waiting token");
+    setStatus("Run created; waiting for composer-2.5 to send the first token.");
+
+    let sawFirstToken = false;
     for await (const delta of readChatStream(response.body)) {
-      answer += delta;
-      if (pendingBody) pendingBody.textContent = answer;
-      if (transcript) transcript.scrollTop = transcript.scrollHeight;
+      received += delta;
+      if (!sawFirstToken) {
+        sawFirstToken = true;
+        setToolState("stream", "streaming");
+        setStatus("Streaming response.");
+      }
+      typewriter.enqueue(delta);
     }
 
+    const answer = await typewriter.done();
     if (!answer.trim()) throw new Error("composer-2.5 returned an empty response.");
     messages.push({ role: "assistant", content: answer });
     renderTranscript();
+    setToolState("idle", "ready");
     setStatus("");
   } catch (error) {
-    if (answer.trim()) messages.push({ role: "assistant", content: answer });
+    const partial = typewriter.value || received;
+    if (partial.trim()) messages.push({ role: "assistant", content: partial });
     renderTranscript();
+    setToolState("err", "error");
     setStatus(error instanceof Error ? error.message : "Unexpected error", "err");
   } finally {
     setBusy(false);
@@ -268,37 +298,123 @@ chatForm?.addEventListener("submit", async (event) => {
   }
 });
 
+function createTypewriter(onUpdate: (text: string) => void) {
+  let rendered = "";
+  let queue = "";
+  let draining = false;
+  let drainPromise: Promise<void> = Promise.resolve();
+
+  const drain = async () => {
+    draining = true;
+    try {
+      while (queue.length) {
+        const size = queue.length > 120 ? 5 : queue.length > 48 ? 3 : 1;
+        rendered += queue.slice(0, size);
+        queue = queue.slice(size);
+        onUpdate(rendered);
+        await sleep(queue.length > 120 ? 6 : 12);
+      }
+    } finally {
+      draining = false;
+    }
+  };
+
+  return {
+    get value() {
+      return rendered;
+    },
+    enqueue(text: string) {
+      queue += text;
+      if (!draining) drainPromise = drain();
+    },
+    async done() {
+      while (draining || queue.length) {
+        if (!draining) drainPromise = drain();
+        await drainPromise;
+      }
+      return rendered;
+    }
+  };
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 async function* readChatStream(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let boundary = buffer.indexOf("\n\n");
-    while (boundary !== -1) {
-      const rawEvent = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-      boundary = buffer.indexOf("\n\n");
-      for (const line of rawEvent.split("\n")) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-        try {
-          const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
-          const content = chunk.choices?.[0]?.delta?.content;
-          if (content) yield content;
-        } catch {
-          /* skip malformed chunk */
-        }
+
+  const readEvent = function* (rawEvent: string): Generator<string> {
+    for (const line of rawEvent.split(/\r?\n/)) {
+      if (!line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      try {
+        const chunk = JSON.parse(data) as { choices?: Array<{ delta?: { content?: string } }> };
+        const content = chunk.choices?.[0]?.delta?.content;
+        if (content) yield content;
+      } catch {
+        /* skip malformed chunk */
       }
     }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      buffer += decoder.decode();
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = findSseBoundary(buffer);
+    while (boundary !== -1) {
+      const rawEvent = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + boundaryLength(buffer, boundary));
+      for (const content of readEvent(rawEvent)) yield content;
+      boundary = findSseBoundary(buffer);
+    }
   }
+
+  if (buffer.trim()) {
+    for (const content of readEvent(buffer)) yield content;
+  }
+}
+
+function findSseBoundary(buffer: string) {
+  const lf = buffer.indexOf("\n\n");
+  const crlf = buffer.indexOf("\r\n\r\n");
+  if (lf === -1) return crlf;
+  if (crlf === -1) return lf;
+  return Math.min(lf, crlf);
+}
+
+function boundaryLength(buffer: string, index: number) {
+  return buffer.startsWith("\r\n\r\n", index) ? 4 : 2;
+}
+
+function highlightJson(json: string) {
+  return json.replace(
+    /("(?:\\.|[^"\\])*")(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[{}\[\],]/g,
+    (match, stringToken: string | undefined, keySuffix: string | undefined) => {
+      if (stringToken) {
+        const className = keySuffix ? "j-key" : "j-str";
+        const suffix = keySuffix ? keySuffix.replace(":", '<span class="j-punc">:</span>') : "";
+        return `<span class="${className}">${escapeHtml(stringToken)}</span>${suffix}`;
+      }
+      if (match === "true" || match === "false" || match === "null") {
+        return `<span class="j-bool">${match}</span>`;
+      }
+      if (/^-?\d/.test(match)) return `<span class="j-num">${match}</span>`;
+      return `<span class="j-punc">${escapeHtml(match)}</span>`;
+    }
+  );
 }
 
 renderRequestPreview();
 renderTranscript();
+setToolState("idle", "ready");
 
 /* ---- shared helpers ---- */
 

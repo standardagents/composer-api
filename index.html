@@ -73,61 +73,73 @@
         </section>
 
         <section class="demo" aria-labelledby="demo-title">
-          <section class="panel demo-panel demo-chat">
-            <div class="panel-heading">
-              <span class="panel-kicker demo-kicker">
-                <i data-lucide="message-square"></i>
-                Live demo
+          <div class="demo-head">
+            <h2 id="demo-title">Try it out</h2>
+            <p>Live in your browser against <code>/v1/chat/completions</code>.</p>
+          </div>
+
+          <div class="tool">
+            <div class="tool-bar">
+              <span class="tool-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="tool-route">
+                <span class="tool-method">POST</span>
+                <span class="tool-path">/v1/chat/completions</span>
               </span>
-              <h2 id="demo-title">Chat with composer-2.5</h2>
-              <p>Runs entirely in your browser against <code>/v1/chat/completions</code>.</p>
+              <span id="tool-state" class="tool-state" data-state="idle">
+                <span class="tool-state-dot" aria-hidden="true"></span>
+                <span class="tool-state-text">idle</span>
+              </span>
             </div>
 
-            <label>
-              <span class="label-text">
-                <i data-lucide="key-round"></i>
-                Cursor API key
-              </span>
-              <input id="cursor-key" name="cursorKey" autocomplete="off" type="password" placeholder="key_..." />
-            </label>
+            <div class="tool-body">
+              <div class="tool-pane pane-chat">
+                <div class="pane-label">
+                  <i data-lucide="message-square"></i>
+                  <span>Chat</span>
+                </div>
 
-            <div id="transcript" class="transcript" aria-live="polite">
-              <div class="transcript-empty">
-                <i data-lucide="sparkles"></i>
-                <span>Enter a key and a prompt to start.</span>
+                <label class="key-field">
+                  <span class="label-text">
+                    <i data-lucide="key-round"></i>
+                    Cursor API key
+                  </span>
+                  <input id="cursor-key" name="cursorKey" autocomplete="off" type="password" placeholder="Paste Cursor key" />
+                </label>
+
+                <div id="transcript" class="transcript" aria-live="polite">
+                  <div class="transcript-empty">
+                    <i data-lucide="sparkles"></i>
+                    <span>Enter a key and a prompt to start.</span>
+                  </div>
+                </div>
+
+                <form id="chat-form" class="prompt-row">
+                  <textarea
+                    id="prompt"
+                    name="prompt"
+                    rows="1"
+                    placeholder="Ask composer-2.5..."
+                  ></textarea>
+                  <button id="send" class="primary send-button" type="submit" aria-label="Send">
+                    <i data-lucide="send"></i>
+                  </button>
+                </form>
+
+                <p id="status" class="status" role="status">
+                  <i data-lucide="lock" class="status-icon"></i>
+                  <span class="status-text">Your key stays in this tab &mdash; it is never written to storage.</span>
+                </p>
+              </div>
+
+              <div class="tool-pane pane-req" aria-labelledby="request-title">
+                <div class="pane-label" id="request-title">
+                  <i data-lucide="code"></i>
+                  <span>Request body</span>
+                </div>
+                <pre class="req-pre"><code id="req-body"></code></pre>
               </div>
             </div>
-
-            <form id="chat-form" class="prompt-row">
-              <textarea
-                id="prompt"
-                name="prompt"
-                rows="1"
-                placeholder="Ask composer-2.5 something..."
-              ></textarea>
-              <button id="send" class="primary send-button" type="submit" aria-label="Send">
-                <i data-lucide="send"></i>
-              </button>
-            </form>
-
-            <p id="status" class="status" role="status">
-              <i data-lucide="lock" class="status-icon"></i>
-              <span class="status-text">Your key stays in this tab &mdash; it is never written to storage.</span>
-            </p>
-          </section>
-
-          <section class="panel demo-panel demo-request" aria-labelledby="request-title">
-            <div class="panel-heading">
-              <span class="panel-kicker request-kicker">
-                <i data-lucide="code"></i>
-                Outgoing request
-              </span>
-              <h2 id="request-title">POST /v1/chat/completions</h2>
-              <p>The exact JSON body the demo sends when you hit send.</p>
-            </div>
-
-            <pre class="req-pre"><code id="req-body"></code></pre>
-          </section>
+          </div>
         </section>
 
         <footer class="site-footer">
