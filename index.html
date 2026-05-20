@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Composer API</title>
+    <meta name="description" content="OpenAI-compatible API endpoints for Cursor Composer." />
+  </head>
+  <body>
+    <main id="app">
+      <section class="shell">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Standard Agents</p>
+            <h1>Composer API</h1>
+          </div>
+          <a class="repo-link" href="https://github.com/standardagents/composer-api" target="_blank" rel="noreferrer">
+            <i data-lucide="github"></i>
+            <span>GitHub</span>
+          </a>
+        </header>
+
+        <div class="grid">
+          <form id="signup-form" class="panel form-panel">
+            <div class="panel-heading">
+              <h2>Connect Cursor</h2>
+              <p>Use a Cursor user API key from Dashboard > Integrations.</p>
+            </div>
+
+            <label>
+              <span>Name</span>
+              <input id="name" name="name" autocomplete="name" placeholder="Ada Lovelace" />
+            </label>
+
+            <label>
+              <span>Email</span>
+              <input id="email" name="email" autocomplete="email" type="email" placeholder="ada@example.com" />
+            </label>
+
+            <label>
+              <span>Cursor API key</span>
+              <input id="cursor-key" name="cursorKey" autocomplete="off" type="password" placeholder="key_..." required />
+            </label>
+
+            <label class="check-row">
+              <input id="waitlist" name="waitlist" type="checkbox" checked />
+              <span>Add me to the Standard Agents early access waitlist</span>
+            </label>
+
+            <button id="submit" class="primary" type="submit">
+              <i data-lucide="plug-zap"></i>
+              <span>Connect</span>
+            </button>
+
+            <p id="status" class="status" role="status"></p>
+          </form>
+
+          <section id="dashboard" class="panel dashboard is-empty" aria-live="polite">
+            <div class="empty-state">
+              <i data-lucide="key-round"></i>
+              <h2>Endpoints appear after connect.</h2>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
