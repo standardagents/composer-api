@@ -85,7 +85,7 @@ Required secret:
 wrangler secret put ENCRYPTION_KEY
 ```
 
-Optional secret:
+Optional secret for direct waitlist writes. If omitted, the Worker falls back to the deployed token-cost early-access endpoint.
 
 ```bash
 wrangler secret put WAITLIST_API_TOKEN
