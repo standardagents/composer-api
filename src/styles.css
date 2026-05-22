@@ -1281,10 +1281,11 @@ code {
 }
 
 .chat-image-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 8px;
-  max-width: 360px;
+  max-width: min(100%, 540px);
 }
 
 .chat-image {
@@ -1295,11 +1296,21 @@ code {
   background: var(--bg-soft);
 }
 
-.chat-image img {
+.chat-image-frame {
+  display: grid;
+  place-items: center;
+  width: min(var(--preview-width, 220px), 100%);
+  aspect-ratio: var(--image-aspect, 4 / 3);
+  max-width: 100%;
+  max-height: var(--preview-height, 180px);
+  background: var(--bg);
+}
+
+.chat-image-frame img {
   display: block;
   width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
+  height: 100%;
+  object-fit: contain;
 }
 
 .chat-image figcaption {
@@ -1432,7 +1443,7 @@ code {
 .attachment-chip {
   position: relative;
   display: grid;
-  grid-template-columns: 46px minmax(88px, 1fr) 22px;
+  grid-template-columns: 50px minmax(88px, 1fr) 22px;
   align-items: center;
   gap: 8px;
   min-width: 190px;
@@ -1444,10 +1455,24 @@ code {
   background: var(--panel);
 }
 
-.attachment-chip img {
-  width: 46px;
-  height: 38px;
-  object-fit: cover;
+.attachment-thumb {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 42px;
+  overflow: hidden;
+  border-radius: 5px;
+  background: var(--bg);
+}
+
+.attachment-thumb img {
+  display: block;
+  width: var(--preview-width, 48px);
+  height: var(--preview-height, 42px);
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: var(--image-aspect, 1 / 1);
+  object-fit: contain;
   border-radius: 5px;
 }
 

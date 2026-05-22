@@ -69,6 +69,8 @@ const MAX_ATTACHMENTS = 4;
 const IMAGE_MAX_DIMENSION = 1024;
 const IMAGE_TARGET_BYTES = 900 * 1024;
 const IMAGE_OUTPUT_TYPE = "image/jpeg";
+const CHAT_IMAGE_MAX_WIDTH = 260;
+const CHAT_IMAGE_MAX_HEIGHT = 180;
 const MOBILE_INSPECTOR_QUERY = "(max-width: 900px)";
 
 /* ============================================================ state */
@@ -584,9 +586,12 @@ function renderUserContent(content: string, images: ChatImage[]): string {
 
 function userImageHtml(image: ChatImage): string {
   const src = image.dataUrl.startsWith("data:image/") ? image.dataUrl : "";
+  const style = imagePreviewStyle(image, CHAT_IMAGE_MAX_WIDTH, CHAT_IMAGE_MAX_HEIGHT);
   return `
-    <figure class="chat-image">
-      <img src="${escapeAttr(src)}" alt="${escapeAttr(image.name || "Attached image")}" />
+    <figure class="chat-image" style="${style}">
+      <span class="chat-image-frame">
+        <img src="${escapeAttr(src)}" alt="${escapeAttr(image.name || "Attached image")}" />
+      </span>
       <figcaption>${escapeHtml(image.name || "Image")} · ${image.width}×${image.height}</figcaption>
     </figure>`;
 }
@@ -930,8 +935,10 @@ function renderPendingImages(): void {
   refs.attachmentTray.innerHTML = pendingImages
     .map(
       (image) => `
-      <figure class="attachment-chip" data-id="${escapeAttr(image.id)}">
-        <img src="${escapeAttr(image.dataUrl)}" alt="${escapeAttr(image.name)}" />
+      <figure class="attachment-chip" data-id="${escapeAttr(image.id)}" style="${imagePreviewStyle(image, 48, 42)}">
+        <span class="attachment-thumb">
+          <img src="${escapeAttr(image.dataUrl)}" alt="${escapeAttr(image.name)}" />
+        </span>
         <figcaption>${escapeHtml(image.name)} <span>${image.width}×${image.height}</span></figcaption>
         <button type="button" aria-label="Remove ${escapeAttr(image.name)}" data-remove-image="${escapeAttr(image.id)}">
           ${icon("X", { width: 13, height: 13 })}
@@ -947,6 +954,15 @@ function renderPendingImages(): void {
       refs.composer.focus();
     });
   }
+}
+
+function imagePreviewStyle(image: ChatImage, maxWidth: number, maxHeight: number): string {
+  const width = Math.max(1, image.width);
+  const height = Math.max(1, image.height);
+  const scale = Math.min(1, maxWidth / width, maxHeight / height);
+  const previewWidth = Math.max(1, Math.round(width * scale));
+  const previewHeight = Math.max(1, Math.round(height * scale));
+  return `--image-aspect: ${width} / ${height}; --preview-width: ${previewWidth}px; --preview-height: ${previewHeight}px;`;
 }
 
 async function resizeImageFile(file: File): Promise<ChatImage> {
