@@ -23,7 +23,7 @@
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "run_worker_first": ["/", "/api/*", "/v1/*", "/u/*"]
+    "run_worker_first": ["/", "/chat", "/api/*", "/v1/*", "/u/*"]
   },
   "d1_databases": [
     {
