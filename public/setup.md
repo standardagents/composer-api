@@ -90,27 +90,18 @@ print(response.output_text)
 
 ## OpenCode
 
-OpenCode should use the SDK-backed Responses bridge, not the hosted stateless `/v1` proxy. The bridge exposes an OpenAI Responses-compatible API on a separate `/sdk/v1` path and uses the Cursor SDK to run a stateful local agent against your project folder.
+OpenCode should use the hosted OpenCode route, not the generic `/v1` route. The OpenCode route is still a normal OpenAI-compatible Chat Completions API, but it preserves OpenCode's local tool loop: the proxy turns Cursor tool-call output into `tool_calls`, and OpenCode executes those tools in your project.
 
-Start the bridge from this repo, pointing it at the project you want OpenCode to edit:
-
-```bash
-export CURSOR_API_KEY="crsr_..."
-CURSOR_SDK_PROXY_CWD="/path/to/your/project" npm run sdk:responses
-```
-
-The bridge base URL is:
+The OpenCode base URL is:
 
 ```txt
-http://127.0.0.1:8791/sdk/v1
+https://cursor-api.standardagents.ai/opencode/v1
 ```
 
-OpenCode will use these bridge endpoints:
+OpenCode will use these endpoints:
 
-- `GET /sdk/v1/models`
-- `POST /sdk/v1/responses`
-- `GET /sdk/v1/responses/{response_id}`
-- `GET /sdk/v1/health`
+- `GET /opencode/v1/models`
+- `POST /opencode/v1/chat/completions`
 
 Add a custom provider to `~/.config/opencode/opencode.json`:
 
@@ -120,15 +111,15 @@ Add a custom provider to `~/.config/opencode/opencode.json`:
   "model": "cursor/composer-2.5",
   "provider": {
     "cursor": {
-      "npm": "@ai-sdk/openai",
-      "name": "Cursor SDK via Standard Agents",
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Cursor API via Standard Agents",
       "options": {
-        "baseURL": "http://127.0.0.1:8791/sdk/v1",
+        "baseURL": "https://cursor-api.standardagents.ai/opencode/v1",
         "apiKey": "{env:CURSOR_API_KEY}"
       },
       "models": {
         "composer-2.5": {
-          "name": "Composer 2.5",
+          "name": "Composer 2.5 via Cursor API",
           "limit": {
             "context": 200000,
             "output": 65536
@@ -147,7 +138,7 @@ export CURSOR_API_KEY="crsr_..."
 opencode
 ```
 
-If you do not set `model`, run `/models` inside OpenCode and choose `cursor/composer-2.5`, displayed as **Composer 2.5**.
+If you do not set `model`, run `/models` inside OpenCode and choose `cursor/composer-2.5`, displayed as **Composer 2.5 via Cursor API**.
 
 ## cURL
 

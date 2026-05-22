@@ -73,29 +73,24 @@ Token usage is estimated from character counts because Cursor's stream does not 
 
 ## OpenCode
 
-OpenCode should use the SDK-backed Responses bridge, not the hosted stateless
-`/v1` proxy. Configure provider id `cursor` with `@ai-sdk/openai`, set the base
-URL to the bridge's separate `/sdk/v1` path, and select `cursor/composer-2.5`.
+OpenCode should use the hosted OpenCode route, not the generic `/v1` route. The
+OpenCode route keeps tool execution local to OpenCode: the Worker translates
+Cursor tool-call output into OpenAI-compatible `tool_calls`, then OpenCode runs
+the file and shell tools in your project.
 
 Base URL:
 
 ```txt
-http://127.0.0.1:8791/sdk/v1
+https://cursor-api.standardagents.ai/opencode/v1
 ```
 
-OpenCode uses these bridge endpoints:
+OpenCode uses these endpoints:
 
-- `GET /sdk/v1/models`
-- `POST /sdk/v1/responses`
-- `GET /sdk/v1/responses/{response_id}`
-- `GET /sdk/v1/health`
+- `GET /opencode/v1/models`
+- `POST /opencode/v1/chat/completions`
 
-Start the bridge before launching OpenCode:
-
-```bash
-export CURSOR_API_KEY="crsr_..."
-CURSOR_SDK_PROXY_CWD="/path/to/project" npm run sdk:responses
-```
+Configure the provider with `@ai-sdk/openai-compatible` and select
+`cursor/composer-2.5`, displayed as **Composer 2.5 via Cursor API**.
 
 ## Local development
 

@@ -271,6 +271,69 @@ describe("Worker", () => {
     });
   });
 
+  it("serves a separate OpenCode chat route with tool calls", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const response = await handleRequest(
+      new Request("https://composer.test/opencode/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: JSON.stringify({
+          model: "composer-2.5",
+          stream: true,
+          messages: [{ role: "user", content: "List files" }],
+          tools: [{ type: "function", function: { name: "glob" } }]
+        })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).toContain('"object":"chat.completion.chunk"');
+    expect(body).toContain('"tool_calls"');
+    expect(body).toContain('"name":"glob"');
+    expect(body).toContain('"finish_reason":"tool_calls"');
+    expect(db.requestLogs.size).toBe(0);
+  });
+
+  it("labels the OpenCode model without changing the standard model list", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const standard = await handleRequest(
+      new Request("https://composer.test/v1/models", {
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    const opencode = await handleRequest(
+      new Request("https://composer.test/opencode/v1/models", {
+        headers: { Authorization: "Bearer cursor_direct_key" }
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+
+    expect(standard.status).toBe(200);
+    expect(opencode.status).toBe(200);
+    const standardBody = (await standard.json()) as { data: Array<{ id: string; name: string }> };
+    const opencodeBody = (await opencode.json()) as { data: Array<{ id: string; name: string }> };
+    expect(standardBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Cursor Composer 2.5");
+    expect(opencodeBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Composer 2.5 via Cursor API");
+  });
+
   it("streams SSE response events in direct mode for /v1/responses", async () => {
     const db = new FakeD1();
     const env = makeEnv(db);

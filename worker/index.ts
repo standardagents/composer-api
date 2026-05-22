@@ -178,7 +178,7 @@ async function handleOpenAiRoute(
     const auth = await authenticate(request, env, route);
     if (!auth) return unauthorized();
     if (request.method !== "GET") return notFound();
-    return json(modelList());
+    return json(modelList({ opencode: route.surface === "opencode" }));
   }
 
   if (request.method !== "POST") return notFound();
@@ -377,9 +377,14 @@ async function authenticate(request: Request, env: Env, route: OpenAiRoute): Pro
 interface OpenAiRoute {
   kind: "chat" | "responses" | "models";
   accountId?: string;
+  surface?: "standard" | "opencode";
 }
 
 function matchOpenAiRoute(pathname: string): OpenAiRoute | null {
+  const opencodePath = pathname.startsWith("/opencode/v1/") ? pathname.slice("/opencode/v1".length) : "";
+  if (opencodePath === "/chat/completions") return { kind: "chat", surface: "opencode" };
+  if (opencodePath === "/models") return { kind: "models", surface: "opencode" };
+
   const accountMatch = /^\/u\/([^/]+)\/v1\/(.+)$/.exec(pathname);
   const accountId = accountMatch?.[1];
   const path = accountMatch ? `/${accountMatch[2]}` : pathname.startsWith("/v1/") ? pathname.slice(3) : "";
