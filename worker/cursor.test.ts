@@ -37,6 +37,36 @@ describe("Cursor stream adapter", () => {
     expect(bytesField(image, 3)).toEqual(new TextEncoder().encode("image-test"));
   });
 
+  it("encodes Agent mode for tool-capable requests", () => {
+    const body = cursorTestExports.encodeCursorChatRequest({
+      prompt: { text: "List files.", mode: "agent" },
+      model: "composer-2.5",
+      requestId: "request-test",
+      conversationId: "conversation-test",
+      messageId: "message-test"
+    });
+
+    const outer = fields(body);
+    const request = fields(bytesField(outer, 1));
+
+    expect(new TextDecoder().decode(bytesField(request, 54))).toBe("Agent");
+  });
+
+  it("defaults to Ask mode for plain chat requests", () => {
+    const body = cursorTestExports.encodeCursorChatRequest({
+      prompt: { text: "Say hello." },
+      model: "composer-2.5",
+      requestId: "request-test",
+      conversationId: "conversation-test",
+      messageId: "message-test"
+    });
+
+    const outer = fields(body);
+    const request = fields(bytesField(outer, 1));
+
+    expect(new TextDecoder().decode(bytesField(request, 54))).toBe("Ask");
+  });
+
   it("extracts final text from raw Cursor Connect/protobuf frames", async () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
@@ -198,6 +228,22 @@ describe("Cursor stream adapter", () => {
         "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>\nglob\n<｜tool▁sep｜>glob_pattern\n*\n<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
       )
     ).toEqual([{ name: "glob", arguments: { glob_pattern: "*" } }]);
+  });
+
+  it("parses inline Composer tool-call arguments", () => {
+    expect(
+      cursorTestExports.parseComposerToolCalls(
+        "<|tool_calls_begin|><|tool_call_begin|>\nGlob [targeting=/Users/example/project/**, glob_pattern=*]\n<|tool_call_end|><|tool_calls_end|>"
+      )
+    ).toEqual([{ name: "Glob", arguments: { targeting: "/Users/example/project/**", glob_pattern: "*" } }]);
+  });
+
+  it("parses JSON Composer tool-call bodies", () => {
+    expect(
+      cursorTestExports.parseComposerToolCalls(
+        '<|tool_calls_begin|><|tool_call_begin|>{"name":"read","arguments":{"filePath":"README.md"}}<|tool_call_end|><|tool_calls_end|>'
+      )
+    ).toEqual([{ name: "read", arguments: { filePath: "README.md" } }]);
   });
 
   it("does not emit leading whitespace before split tool-call markers", async () => {

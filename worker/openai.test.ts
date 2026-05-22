@@ -81,8 +81,69 @@ describe("OpenAI compatibility adapter", () => {
         parameters: { type: "object", properties: { pattern: { type: "string" } } }
       }
     ]);
-    expect(prepared.prompt.text).toContain("TOOLS:");
-    expect(prepared.prompt.text).toContain("glob: Find files");
+    expect(prepared.prompt.mode).toBe("agent");
+    expect(prepared.prompt.text).toContain("already in Agent mode");
+    expect(prepared.prompt.text).toContain("Never claim that tools are unavailable");
+    expect(prepared.prompt.text).toContain("CLIENT TOOL INVENTORY:");
+    expect(prepared.prompt.text).toContain("Allowed tool names: glob");
+    expect(prepared.prompt.text).toContain("Switched to agent mode successfully");
+    expect(prepared.prompt.text).toContain('"name":"glob"');
+  });
+
+  it("requires workspace tools for create/build style requests", () => {
+    const prepared = prepareChatRequest(
+      {
+        model: "composer-2.5",
+        messages: [{ role: "user", content: "make me a simple landing page" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "write",
+              description: "Write a file",
+              parameters: { type: "object", properties: { filePath: { type: "string" }, content: { type: "string" } } }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.prompt.text).toContain("WORKSPACE MUTATION REQUIRED:");
+    expect(prepared.prompt.text).toContain("Do not output a standalone file for the user to save");
+    expect(prepared.prompt.text).toContain("Your next assistant response must be a write/edit/bash tool call");
+    expect(prepared.prompt.text).toContain("Workspace action required");
+  });
+
+  it("does not force another mutation tool after one has been called", () => {
+    const prepared = prepareChatRequest(
+      {
+        model: "composer-2.5",
+        messages: [
+          { role: "user", content: "make me a simple landing page" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [{ id: "call_1", type: "function", function: { name: "write", arguments: "{\"filePath\":\"index.html\"}" } }]
+          },
+          { role: "tool", tool_call_id: "call_1", name: "write", content: "Wrote file successfully." }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "write",
+              description: "Write a file",
+              parameters: { type: "object", properties: { filePath: { type: "string" }, content: { type: "string" } } }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5" }
+    );
+
+    expect(prepared.prompt.text).toContain("A file-mutating tool call has already been made");
+    expect(prepared.prompt.text).not.toContain("Your next assistant response must be a write/edit/bash tool call");
   });
 
   it("converts Responses input arrays", () => {
@@ -129,7 +190,7 @@ describe("OpenAI compatibility adapter", () => {
   it("returns OpenAI-shaped tool call responses", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
-      tools: [{ name: "glob" }],
+      tools: [{ name: "glob", parameters: { type: "object", properties: { pattern: { type: "string" } } } }],
       toolCalls: [{ name: "Glob", arguments: { glob_pattern: "*" } }]
     });
     const chat = chatCompletionResponse({
@@ -146,7 +207,7 @@ describe("OpenAI compatibility adapter", () => {
           message: {
             role: "assistant",
             content: null,
-            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"glob_pattern\":\"*\"}" } }]
+            tool_calls: [{ type: "function", function: { name: "glob", arguments: "{\"pattern\":\"*\"}" } }]
           },
           finish_reason: "tool_calls"
         }

@@ -62,6 +62,7 @@ export type CursorImage =
 export interface CursorPrompt {
   text: string;
   images?: CursorImage[];
+  mode?: "ask" | "agent";
 }
 
 export interface CursorToolCall {

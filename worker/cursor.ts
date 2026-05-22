@@ -417,6 +417,7 @@ function encodeCursorChatRequest(input: {
   messageId: string;
 }): Uint8Array {
   const messageId = input.messageId;
+  const composerMode = input.prompt.mode === "agent" ? "Agent" : "Ask";
   const imageFields = (input.images ?? []).map((image) => protoField(10, 2, encodeImageProto(image)));
   const userMessage = protoMessage([
     protoField(1, 2, input.prompt.text),
@@ -463,7 +464,7 @@ function encodeCursorChatRequest(input: {
     protoField(49, 0, 0),
     protoField(51, 0, 0),
     protoField(53, 0, 1),
-    protoField(54, 2, "Ask")
+    protoField(54, 2, composerMode)
   ]);
   return protoMessage([protoField(1, 2, request)]);
 }
@@ -744,9 +745,18 @@ function parseComposerToolCalls(value: string): CursorToolCall[] {
 }
 
 function parseComposerToolCallBody(value: string): CursorToolCall | null {
+  const trimmedBody = value.trim();
+  const jsonBody = parseJsonToolCallBody(trimmedBody);
+  if (jsonBody) return jsonBody;
+
   const parts = value.split(TOOL_SEP);
   const name = (parts.shift() || "").trim();
   if (!name) return null;
+
+  if (!parts.length) {
+    const inline = parseInlineToolCall(name);
+    return inline ?? { name, arguments: {} };
+  }
 
   const args: Record<string, unknown> = {};
   for (const part of parts) {
@@ -761,6 +771,70 @@ function parseComposerToolCallBody(value: string): CursorToolCall | null {
   }
 
   return { name, arguments: args };
+}
+
+function parseJsonToolCallBody(value: string): CursorToolCall | null {
+  if (!value.startsWith("{") || !value.endsWith("}")) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isRecord(parsed) || typeof parsed.name !== "string" || !parsed.name.trim()) return null;
+    const rawArguments = parsed.arguments;
+    let args: Record<string, unknown> = {};
+    if (isRecord(rawArguments)) {
+      args = rawArguments;
+    } else if (typeof rawArguments === "string" && rawArguments.trim()) {
+      const decoded = JSON.parse(rawArguments) as unknown;
+      if (isRecord(decoded)) args = decoded;
+    }
+    return { name: parsed.name.trim(), arguments: args };
+  } catch {
+    return null;
+  }
+}
+
+function parseInlineToolCall(value: string): CursorToolCall | null {
+  const match = /^([A-Za-z0-9_.-]+)\s*(?:\(([\s\S]*)\)|\[([\s\S]*)\])?$/.exec(value.trim());
+  if (!match) return null;
+  const name = match[1].trim();
+  const rawArgs = (match[2] ?? match[3] ?? "").trim();
+  const args = rawArgs ? parseInlineToolArguments(rawArgs) : {};
+  return { name, arguments: args };
+}
+
+function parseInlineToolArguments(value: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  for (const part of splitInlineArguments(value)) {
+    const match = /^([A-Za-z0-9_.-]+)\s*[:=]\s*([\s\S]*)$/.exec(part.trim());
+    if (!match) continue;
+    args[match[1]] = parseComposerToolArgument(match[2].trim());
+  }
+  return args;
+}
+
+function splitInlineArguments(value: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let quote: string | null = null;
+  let depth = 0;
+  for (let i = 0; i < value.length; i += 1) {
+    const char = value[i];
+    if (quote) {
+      if (char === quote && value[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "{" || char === "[") depth += 1;
+    if (char === "}" || char === "]") depth = Math.max(0, depth - 1);
+    if (char === "," && depth === 0) {
+      parts.push(value.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(value.slice(start));
+  return parts;
 }
 
 function parseComposerToolArgument(value: string): unknown {
