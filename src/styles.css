@@ -1289,6 +1289,9 @@ code {
 }
 
 .chat-image {
+  flex: 0 0 auto;
+  width: var(--preview-width, 220px);
+  max-width: 100%;
   margin: 0;
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1299,10 +1302,8 @@ code {
 .chat-image-frame {
   display: grid;
   place-items: center;
-  width: min(var(--preview-width, 220px), 100%);
-  aspect-ratio: var(--image-aspect, 4 / 3);
-  max-width: 100%;
-  max-height: var(--preview-height, 180px);
+  width: 100%;
+  height: var(--preview-height, 180px);
   background: var(--bg);
 }
 
