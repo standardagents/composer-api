@@ -2,6 +2,27 @@ import { describe, expect, it } from "vitest";
 import { cursorTestExports, resolveCursorModel, streamCursorText } from "./cursor";
 import { encodeSse } from "./sse";
 
+describe("cursorIdentityCache eviction", () => {
+  it("evicts expired entries when evictExpiredCacheEntries is called", () => {
+    const { cursorIdentityCache, evictExpiredCacheEntries } = cursorTestExports;
+    const past = Date.now() - 1;
+    const future = Date.now() + 3_600_000;
+
+    cursorIdentityCache.set("expired-key", { identity: "expired", expiresAt: past });
+    cursorIdentityCache.set("valid-key", { identity: "valid", expiresAt: future });
+
+    evictExpiredCacheEntries(Date.now());
+
+    expect(cursorIdentityCache.has("expired-key")).toBe(false);
+    expect(cursorIdentityCache.has("valid-key")).toBe(true);
+  });
+
+  it("handles an empty cache without error", () => {
+    const { evictExpiredCacheEntries } = cursorTestExports;
+    expect(() => evictExpiredCacheEntries(Date.now())).not.toThrow();
+  });
+});
+
 describe("Cursor stream adapter", () => {
   it("maps public default aliases to a concrete internal Composer model", () => {
     expect(resolveCursorModel("default")).toEqual({ id: "composer-2.5" });
