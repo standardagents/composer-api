@@ -632,6 +632,29 @@ describe("Worker", () => {
     // An invalid cmp_ token is never forwarded to Cursor as a Cursor key.
     expect(exchangeAuthHeaders).toHaveLength(0);
   });
+
+  it("returns 400 for malformed JSON body instead of 500", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const response = await handleRequest(
+      new Request("https://composer.test/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer cursor_direct_key"
+        },
+        body: "{ invalid json }"
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("invalid_request_error");
+  });
 });
 
 function fakeDeps(): {

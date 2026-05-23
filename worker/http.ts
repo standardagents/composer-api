@@ -70,12 +70,16 @@ export function bearerToken(request: Request): string | undefined {
   return apiKey?.trim() || undefined;
 }
 
-export function parseJsonBody<T = unknown>(request: Request): Promise<T> {
+export async function parseJsonBody<T = unknown>(request: Request): Promise<T> {
   const contentType = request.headers.get("content-type") || "";
   if (contentType && !contentType.toLowerCase().includes("application/json")) {
     throw new HttpError("Content-Type must be application/json", 415);
   }
-  return request.json() as Promise<T>;
+  try {
+    return (await request.json()) as T;
+  } catch {
+    throw new HttpError("Invalid JSON in request body", 400, "invalid_request_error");
+  }
 }
 
 export class HttpError extends Error {
