@@ -17,6 +17,7 @@ public struct PreparedChatRequest: Equatable, Sendable {
     public var requestedSessionKey: String?
     public var previousResponseID: String?
     public var storeResponse: Bool
+    public var responseInputItems: [JSONValue]
 }
 
 public enum OpenAICompatibility {
@@ -95,7 +96,8 @@ public enum OpenAICompatibility {
             sessionKey: nil,
             requestedSessionKey: nil,
             previousResponseID: nil,
-            storeResponse: false
+            storeResponse: false,
+            responseInputItems: []
         )
     }
 
@@ -123,7 +125,8 @@ public enum OpenAICompatibility {
         transcript.append("")
         transcript.append("INPUT:")
         var rememberedToolCalls: [String: (name: String, arguments: [String: Any])] = [:]
-        let appendedInput = appendResponsesInput(raw["input"], to: &transcript, remembered: &rememberedToolCalls)
+        let input = raw["input"]
+        let appendedInput = appendResponsesInput(input, to: &transcript, remembered: &rememberedToolCalls)
         if !appendedInput {
             transcript.append("[empty]")
         }
@@ -139,8 +142,22 @@ public enum OpenAICompatibility {
             sessionKey: nil,
             requestedSessionKey: responseSessionHint(raw),
             previousResponseID: previousResponseID,
-            storeResponse: raw["store"] as? Bool ?? true
+            storeResponse: raw["store"] as? Bool ?? true,
+            responseInputItems: normalizedResponseInputItems(input)
         )
+    }
+
+    public static func responseInputItemsObject(_ inputItems: [JSONValue]) -> [String: Any] {
+        let data = inputItems.map(\.foundationValue)
+        let firstID = inputItems.first.flatMap(responseInputItemID) as Any? ?? NSNull()
+        let lastID = inputItems.last.flatMap(responseInputItemID) as Any? ?? NSNull()
+        return [
+            "object": "list",
+            "data": data,
+            "first_id": firstID,
+            "last_id": lastID,
+            "has_more": false
+        ]
     }
 
     public static func chatCompletionResponse(
@@ -548,6 +565,53 @@ public enum OpenAICompatibility {
             return ""
         }
         return String(describing: value!)
+    }
+
+    private static func normalizedResponseInputItems(_ value: Any?) -> [JSONValue] {
+        if let value = value as? String {
+            return [responseInputMessage(text: value, id: "item_0")]
+        }
+        if let items = value as? [[String: Any]] {
+            return items.enumerated().map { index, item in
+                var copy = item
+                if copy["id"] == nil {
+                    copy["id"] = "item_\(index)"
+                }
+                return .object(copy.mapValues(JSONValue.from))
+            }
+        }
+        if let items = value as? [Any] {
+            return items.enumerated().map { index, item in
+                if let object = item as? [String: Any] {
+                    var copy = object
+                    if copy["id"] == nil {
+                        copy["id"] = "item_\(index)"
+                    }
+                    return .object(copy.mapValues(JSONValue.from))
+                }
+                return responseInputMessage(text: responseInputText(item), id: "item_\(index)")
+            }
+        }
+        let text = responseInputText(value)
+        return text.isEmpty ? [] : [responseInputMessage(text: text, id: "item_0")]
+    }
+
+    private static func responseInputMessage(text: String, id: String) -> JSONValue {
+        .object([
+            "id": .string(id),
+            "type": .string("message"),
+            "role": .string("user"),
+            "content": .array([
+                .object([
+                    "type": .string("input_text"),
+                    "text": .string(text)
+                ])
+            ])
+        ])
+    }
+
+    private static func responseInputItemID(_ item: JSONValue) -> String? {
+        item.objectValue?["id"]?.stringValue
     }
 
     @discardableResult

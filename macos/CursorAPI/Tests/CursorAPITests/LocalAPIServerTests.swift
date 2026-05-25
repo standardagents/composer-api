@@ -108,6 +108,62 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(retrieved?["model"] as? String, "composer-2.5")
     }
 
+    func testResponsesEndpointStoresInputItemsForRetrieval() async throws {
+        let port = UInt16(Int.random(in: 29_000...38_999))
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let created = try await postResponse(port: port, body: #"{"model":"composer-2.5","input":"hello"}"#)
+        let responseID = try XCTUnwrap(created["id"] as? String)
+        let (status, list) = try await getResponseInputItems(port: port, responseID: responseID)
+
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(list?["object"] as? String, "list")
+        XCTAssertEqual(list?["has_more"] as? Bool, false)
+        XCTAssertEqual(list?["first_id"] as? String, "item_0")
+        XCTAssertEqual(list?["last_id"] as? String, "item_0")
+        let data = try XCTUnwrap(list?["data"] as? [[String: Any]])
+        let item = try XCTUnwrap(data.first)
+        XCTAssertEqual(item["id"] as? String, "item_0")
+        XCTAssertEqual(item["type"] as? String, "message")
+        XCTAssertEqual(item["role"] as? String, "user")
+        let content = try XCTUnwrap(item["content"] as? [[String: Any]])
+        XCTAssertEqual(content.first?["type"] as? String, "input_text")
+        XCTAssertEqual(content.first?["text"] as? String, "hello")
+    }
+
+    func testResponsesEndpointInputItemsPreserveStructuredToolOutputs() async throws {
+        let port = UInt16(Int.random(in: 29_000...38_999))
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let created = try await postResponse(port: port, body: #"""
+        {
+          "model":"composer-2.5",
+          "input":[
+            {"type":"function_call","call_id":"call_1","name":"shell","arguments":"{\"command\":\"pwd\"}"},
+            {"type":"function_call_output","call_id":"call_1","output":"/tmp/project"}
+          ]
+        }
+        """#)
+        let responseID = try XCTUnwrap(created["id"] as? String)
+        let (status, list) = try await getResponseInputItems(port: port, responseID: responseID)
+
+        XCTAssertEqual(status, 200)
+        let data = try XCTUnwrap(list?["data"] as? [[String: Any]])
+        XCTAssertEqual(data.count, 2)
+        XCTAssertEqual(data[0]["id"] as? String, "item_0")
+        XCTAssertEqual(data[0]["type"] as? String, "function_call")
+        XCTAssertEqual(data[0]["call_id"] as? String, "call_1")
+        XCTAssertEqual(data[1]["id"] as? String, "item_1")
+        XCTAssertEqual(data[1]["type"] as? String, "function_call_output")
+        XCTAssertEqual(data[1]["output"] as? String, "/tmp/project")
+    }
+
     func testResponsesStoreFalseDoesNotPersistForRetrieval() async throws {
         let port = UInt16(Int.random(in: 29_000...38_999))
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
@@ -118,9 +174,12 @@ final class LocalAPIServerTests: XCTestCase {
         let created = try await postResponse(port: port, body: #"{"model":"composer-2.5","store":false,"input":"hello"}"#)
         let responseID = try XCTUnwrap(created["id"] as? String)
         let (status, retrieved) = try await getResponse(port: port, responseID: responseID)
+        let (inputItemsStatus, inputItems) = try await getResponseInputItems(port: port, responseID: responseID)
 
         XCTAssertEqual(status, 404)
         XCTAssertNil(retrieved?["id"])
+        XCTAssertEqual(inputItemsStatus, 404)
+        XCTAssertNil(inputItems?["data"])
     }
 
     func testStreamingResponsesStoreCompletedResponseForRetrieval() async throws {
@@ -140,10 +199,13 @@ final class LocalAPIServerTests: XCTestCase {
         let text = String(data: data, encoding: .utf8) ?? ""
         let responseID = try XCTUnwrap(text.firstMatch(of: /"id":"(resp_[A-Za-z0-9]+)"/)?.1)
         let (status, retrieved) = try await getResponse(port: port, responseID: String(responseID))
+        let (inputItemsStatus, inputItems) = try await getResponseInputItems(port: port, responseID: String(responseID))
 
         XCTAssertEqual(status, 200)
         XCTAssertEqual(retrieved?["id"] as? String, String(responseID))
         XCTAssertEqual(retrieved?["object"] as? String, "response")
+        XCTAssertEqual(inputItemsStatus, 200)
+        XCTAssertEqual(inputItems?["object"] as? String, "list")
     }
 
     func testResponsesPreviousResponseIDContinuesSameSDKSession() async throws {
@@ -529,6 +591,14 @@ private extension LocalAPIServerTests {
 
     func getResponse(port: UInt16, responseID: String) async throws -> (Int, [String: Any]?) {
         let url = URL(string: "http://127.0.0.1:\(port)/v1/responses/\(responseID)")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (status, object)
+    }
+
+    func getResponseInputItems(port: UInt16, responseID: String) async throws -> (Int, [String: Any]?) {
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/responses/\(responseID)/input_items")!
         let (data, response) = try await URLSession.shared.data(from: url)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
