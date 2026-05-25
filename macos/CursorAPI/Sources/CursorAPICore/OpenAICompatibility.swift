@@ -58,8 +58,7 @@ public enum OpenAICompatibility {
             throw CursorAPIError.badRequest("messages must be an array.")
         }
         let tools = parseTools(raw["tools"], disabled: (raw["tool_choice"] as? String) == "none")
-        let requestedModel = (raw["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = requestedModel?.isEmpty == false ? requestedModel! : "composer-2.5"
+        let model = try ComposerModels.resolvedModelID(for: raw["model"] as? String)
         var transcript = [
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
@@ -100,7 +99,7 @@ public enum OpenAICompatibility {
         let prompt = transcript.joined(separator: "\n")
         return PreparedChatRequest(
             model: model,
-            cursorModelID: ComposerModels.cursorModelID(for: model),
+            cursorModelID: model,
             prompt: prompt,
             stream: raw["stream"] as? Bool == true,
             promptCharacters: prompt.count,
@@ -118,8 +117,7 @@ public enum OpenAICompatibility {
         guard let prompt = raw["prompt"] else {
             throw CursorAPIError.badRequest("prompt is required.")
         }
-        let requestedModel = (raw["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = requestedModel?.isEmpty == false ? requestedModel! : "composer-2.5"
+        let model = try ComposerModels.resolvedModelID(for: raw["model"] as? String)
         var transcript = [
             "You are running through a local Cursor SDK-compatible harness.",
             "Respond to the following legacy completions prompt as plain assistant text.",
@@ -132,7 +130,7 @@ public enum OpenAICompatibility {
         let joined = transcript.joined(separator: "\n")
         return PreparedChatRequest(
             model: model,
-            cursorModelID: ComposerModels.cursorModelID(for: model),
+            cursorModelID: model,
             prompt: joined,
             stream: raw["stream"] as? Bool == true,
             promptCharacters: joined.count,
@@ -151,8 +149,7 @@ public enum OpenAICompatibility {
 
     static func prepareResponsesRequest(_ body: Data, rememberedToolCalls: [String: ResponseToolCallMemory]) throws -> PreparedChatRequest {
         let raw = try jsonObject(body)
-        let requestedModel = (raw["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = requestedModel?.isEmpty == false ? requestedModel! : "composer-2.5"
+        let model = try ComposerModels.resolvedModelID(for: raw["model"] as? String)
         let instructions = (raw["instructions"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let tools = parseTools(raw["tools"], disabled: (raw["tool_choice"] as? String) == "none")
         let previousResponseID = (raw["previous_response_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
@@ -182,7 +179,7 @@ public enum OpenAICompatibility {
         let prompt = transcript.joined(separator: "\n")
         return PreparedChatRequest(
             model: model,
-            cursorModelID: ComposerModels.cursorModelID(for: model),
+            cursorModelID: model,
             prompt: prompt,
             stream: raw["stream"] as? Bool == true,
             promptCharacters: prompt.count,

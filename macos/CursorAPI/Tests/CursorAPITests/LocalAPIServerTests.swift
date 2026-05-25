@@ -106,6 +106,54 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 404)
     }
 
+    func testRequestModelAliasesNormalizeToComposerModels() async throws {
+        let port = UInt16(Int.random(in: 49_001...59_000))
+        let recorder = PreparedRequestRecorder()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"{"model":"cursorapi/composer-2.5-fast-sdk","input":"hello"}"#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        XCTAssertEqual(object["model"] as? String, "composer-2.5-fast")
+        let models = await recorder.models()
+        let cursorModelIDs = await recorder.cursorModelIDs()
+        XCTAssertEqual(models, ["composer-2.5-fast"])
+        XCTAssertEqual(cursorModelIDs, ["composer-2.5-fast"])
+    }
+
+    func testUnknownRequestModelsReturn404() async throws {
+        let port = UInt16(Int.random(in: 49_001...59_000))
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let requests = [
+            ("/v1/completions", #"{"model":"not-a-model","prompt":"hello"}"#),
+            ("/v1/chat/completions", #"{"model":"not-a-model","messages":[{"role":"user","content":"hello"}]}"#),
+            ("/v1/responses", #"{"model":"not-a-model","input":"hello"}"#)
+        ]
+
+        for (path, body) in requests {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+            request.httpMethod = "POST"
+            request.httpBody = Data(body.utf8)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 404, path)
+            let text = String(data: data, encoding: .utf8) ?? ""
+            XCTAssertTrue(text.contains(#""code":"not_found""#) || text.contains(#""code" : "not_found""#), path)
+        }
+    }
+
     func testCORSPreflightAllowsSessionHeaders() async throws {
         let port = UInt16(Int.random(in: 63_001...64_000))
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
@@ -919,6 +967,14 @@ private actor PreparedRequestRecorder {
 
     func sessionKeys() -> [String] {
         requests.map { $0.sessionKey ?? "" }
+    }
+
+    func models() -> [String] {
+        requests.map(\.model)
+    }
+
+    func cursorModelIDs() -> [String] {
+        requests.map(\.cursorModelID)
     }
 
     func prompts() -> [String] {

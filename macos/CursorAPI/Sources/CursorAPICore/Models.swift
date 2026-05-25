@@ -166,15 +166,38 @@ public enum ComposerModels {
     ]
 
     public static func model(for id: String) -> ComposerModel? {
-        let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidates = modelIDCandidates(for: id)
         return all.first { model in
-            model.id.lowercased() == normalized
-                || model.id.replacingOccurrences(of: ".", with: "-").lowercased() == normalized
+            candidates.contains(model.id.lowercased())
+                || candidates.contains(model.id.replacingOccurrences(of: ".", with: "-").lowercased())
         }
     }
 
-    public static func cursorModelID(for model: String) -> String {
-        Self.model(for: model)?.id ?? "composer-2.5"
+    public static func resolvedModelID(for requestedModel: String?) throws -> String {
+        guard let requestedModel = requestedModel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !requestedModel.isEmpty else {
+            return "composer-2.5"
+        }
+        guard let model = Self.model(for: requestedModel) else {
+            throw CursorAPIError.notFound
+        }
+        return model.id
+    }
+
+    private static func modelIDCandidates(for id: String) -> Set<String> {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty else { return [] }
+        let strippedProvider = trimmed.split(separator: "/", omittingEmptySubsequences: true).last.map(String.init) ?? trimmed
+        var candidates = Set([trimmed, strippedProvider])
+        for candidate in Array(candidates) {
+            candidates.insert(candidate.replacingOccurrences(of: ".", with: "-"))
+            if candidate.hasSuffix("-sdk") {
+                let base = String(candidate.dropLast(4))
+                candidates.insert(base)
+                candidates.insert(base.replacingOccurrences(of: ".", with: "-"))
+            }
+        }
+        return candidates
     }
 }
 
