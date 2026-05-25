@@ -53,8 +53,8 @@ public final class AgentProvisioner: @unchecked Sendable {
             return AgentIntegrationStatus(id: .opencode, installed: false, configPath: url.path, detail: "OpenCode config not found")
         }
         let text = fileText(url)
-        let installed = text.contains(settings.baseURL.absoluteString)
-        let detail = installed ? "Composer models installed" : text.contains("cursorapi") ? "Provider found with a different local URL" : "Ready to install"
+        let installed = opencodeConfigMatches(settings: settings)
+        let detail = installed ? "Composer models installed" : providerStatusDetail(text: text, settings: settings)
         return AgentIntegrationStatus(id: .opencode, installed: installed, configPath: url.path, detail: detail)
     }
 
@@ -158,12 +158,14 @@ public final class AgentProvisioner: @unchecked Sendable {
         if id == .cline {
             let url = clineGlobalStateURL()
             let installed = clineConfigMatches(settings: settings)
-            return AgentIntegrationStatus(id: id, installed: installed, configPath: url.path, detail: installed ? "Provider profile installed" : "Ready to install")
+            let detail = installed ? "Provider profile installed" : providerStatusDetail(text: fileText(url), settings: settings)
+            return AgentIntegrationStatus(id: id, installed: installed, configPath: url.path, detail: detail)
         }
         if id == .kilo {
             let url = kiloConfigURL()
-            let installed = fileManager.fileExists(atPath: url.path) && jsonFileContains(url, needle: settings.baseURL.absoluteString)
-            return AgentIntegrationStatus(id: id, installed: installed, configPath: url.path, detail: installed ? "Provider profile installed" : "Ready to install")
+            let installed = kiloConfigMatches(settings: settings)
+            let detail = installed ? "Provider profile installed" : providerStatusDetail(text: fileText(url), settings: settings)
+            return AgentIntegrationStatus(id: id, installed: installed, configPath: url.path, detail: detail)
         }
         let roots = vscodeExtensionStateRoots(for: id)
         let existing = roots.first { fileManager.fileExists(atPath: $0.path) }
@@ -176,9 +178,20 @@ public final class AgentProvisioner: @unchecked Sendable {
 
     private func piStatus(settings: CursorAPISettings) -> AgentIntegrationStatus {
         let url = piModelsURL()
-        let exists = fileManager.fileExists(atPath: url.path)
-        let installed = exists && jsonFileContains(url, needle: settings.baseURL.absoluteString)
-        return AgentIntegrationStatus(id: .pi, installed: installed, configPath: url.path, detail: installed ? "Custom models installed" : "Ready to install")
+        let installed = piConfigMatches(settings: settings)
+        let detail = installed ? "Custom models installed" : providerStatusDetail(text: fileText(url), settings: settings)
+        return AgentIntegrationStatus(id: .pi, installed: installed, configPath: url.path, detail: detail)
+    }
+
+    private func opencodeConfigMatches(settings: CursorAPISettings) -> Bool {
+        let url = opencodeConfigURL()
+        guard fileManager.fileExists(atPath: url.path),
+              let root = try? readJSONObject(url, defaultValue: [:]),
+              let providers = root["provider"] as? [String: Any],
+              let provider = providers["cursorapi"] as? [String: Any] else {
+            return false
+        }
+        return localProviderMatches(provider, settings: settings)
     }
 
     private func clineConfigMatches(settings: CursorAPISettings) -> Bool {
@@ -193,7 +206,38 @@ public final class AgentProvisioner: @unchecked Sendable {
             && globalState["actModeOpenAiModelId"] as? String == "composer-2.5"
             && globalState["planModeOpenAiModelId"] as? String == "composer-2.5-fast"
             && globalState["openAiBaseUrl"] as? String == settings.baseURL.absoluteString
+            && clineModelInfoMatches(globalState["actModeOpenAiModelInfo"], model: ComposerModels.all[0])
+            && clineModelInfoMatches(globalState["planModeOpenAiModelInfo"], model: ComposerModels.all[1])
             && jsonFileContains(secretsURL, needle: "cursor-local")
+    }
+
+    private func kiloConfigMatches(settings: CursorAPISettings) -> Bool {
+        let url = kiloConfigURL()
+        guard fileManager.fileExists(atPath: url.path),
+              let root = try? readJSONObject(url, defaultValue: [:]),
+              let providers = root["provider"] as? [String: Any],
+              let provider = providers["cursorapi"] as? [String: Any] else {
+            return false
+        }
+        return localProviderMatches(provider, settings: settings)
+    }
+
+    private func piConfigMatches(settings: CursorAPISettings) -> Bool {
+        let url = piModelsURL()
+        guard fileManager.fileExists(atPath: url.path),
+              let root = try? readJSONObject(url, defaultValue: [:]),
+              let providers = root["providers"] as? [String: Any],
+              let provider = providers["cursorapi"] as? [String: Any],
+              stringValue(provider["baseUrl"]) == settings.baseURL.absoluteString,
+              stringValue(provider["apiKey"]) == "cursor-local",
+              boolValue(provider["authHeader"]) == true,
+              stringValue(provider["api"]) == "openai-completions",
+              let models = provider["models"] as? [[String: Any]] else {
+            return false
+        }
+        return ComposerModels.all.allSatisfy { model in
+            models.contains { piModelDefinitionMatches($0, model: model) }
+        }
     }
 
     private func installCline(settings: CursorAPISettings) throws {
@@ -344,6 +388,99 @@ public final class AgentProvisioner: @unchecked Sendable {
                 "output": model.outputLimit
             ]
         ]
+    }
+
+    private func localProviderMatches(_ provider: [String: Any], settings: CursorAPISettings) -> Bool {
+        guard let options = provider["options"] as? [String: Any],
+              stringValue(options["baseURL"]) == settings.baseURL.absoluteString,
+              stringValue(options["apiKey"]) == "cursor-local",
+              let models = provider["models"] as? [String: Any] else {
+            return false
+        }
+        return ComposerModels.all.allSatisfy { model in
+            modelDefinitionMatches(models[model.id], model: model)
+        }
+    }
+
+    private func modelDefinitionMatches(_ value: Any?, model: ComposerModel) -> Bool {
+        guard let definition = value as? [String: Any],
+              stringValue(definition["name"]) == model.name,
+              let cost = definition["cost"] as? [String: Any],
+              doubleValue(cost["input"]) == model.inputCost,
+              doubleValue(cost["output"]) == model.outputCost,
+              let limit = definition["limit"] as? [String: Any],
+              intValue(limit["context"]) == model.contextWindow,
+              intValue(limit["output"]) == model.outputLimit else {
+            return false
+        }
+        return true
+    }
+
+    private func piModelDefinitionMatches(_ definition: [String: Any], model: ComposerModel) -> Bool {
+        modelDefinitionMatches(definition, model: model)
+            && stringValue(definition["id"]) == model.id
+            && stringValue(definition["api"]) == "openai-completions"
+            && boolValue(definition["reasoning"]) == false
+            && intValue(definition["contextWindow"]) == model.contextWindow
+            && intValue(definition["maxTokens"]) == model.outputLimit
+    }
+
+    private func clineModelInfoMatches(_ value: Any?, model: ComposerModel) -> Bool {
+        guard let info = value as? [String: Any] else { return false }
+        return intValue(info["maxTokens"]) == model.outputLimit
+            && intValue(info["contextWindow"]) == model.contextWindow
+            && doubleValue(info["inputPrice"]) == model.inputCost
+            && doubleValue(info["outputPrice"]) == model.outputCost
+            && boolValue(info["supportsTools"]) == true
+            && boolValue(info["supportsStreaming"]) == true
+    }
+
+    private func providerStatusDetail(text: String, settings: CursorAPISettings) -> String {
+        if text.contains(settings.baseURL.absoluteString) {
+            return "Provider needs update"
+        }
+        if text.contains("cursorapi") || text.contains(CursorAPIBrand.displayName) || text.contains("CursorAPI") {
+            return "Provider found with a different local URL"
+        }
+        return "Ready to install"
+    }
+
+    private func stringValue(_ value: Any?) -> String? {
+        (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+        if let string = stringValue(value) {
+            return Double(string)
+        }
+        return nil
+    }
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let string = stringValue(value) {
+            return Int(string)
+        }
+        return nil
+    }
+
+    private func boolValue(_ value: Any?) -> Bool? {
+        if let bool = value as? Bool {
+            return bool
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        if let string = stringValue(value)?.lowercased() {
+            if ["true", "yes", "1"].contains(string) { return true }
+            if ["false", "no", "0"].contains(string) { return false }
+        }
+        return nil
     }
 
     private func vscodeExtensionStateRoots(for id: AgentIntegrationID) -> [URL] {

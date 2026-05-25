@@ -240,6 +240,36 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(provisioner.status(for: .vscode, settings: moved).detail.contains("different local URL"))
     }
 
+    func testStatusesRequireCurrentModelMetadata() throws {
+        let home = try temporaryHome()
+        let provisioner = AgentProvisioner(homeDirectory: home)
+        let settings = CursorAPISettings(port: 8787)
+
+        for id in [AgentIntegrationID.opencode, .cline, .kilo, .pi] {
+            try provisioner.install(id, settings: settings)
+            XCTAssertTrue(provisioner.status(for: id, settings: settings).installed)
+        }
+
+        let metadataFiles = [
+            home.appending(path: ".config/opencode/opencode.json"),
+            home.appending(path: ".cline/data/globalState.json"),
+            home.appending(path: ".config/kilo/kilo.jsonc"),
+            home.appending(path: ".pi/agent/models.json")
+        ]
+        for url in metadataFiles {
+            try replaceText(in: url, matching: "65536", with: "16384")
+        }
+
+        for id in [AgentIntegrationID.opencode, .cline, .kilo, .pi] {
+            let status = provisioner.status(for: id, settings: settings)
+            XCTAssertFalse(status.installed, "\(id.displayName) should require current model limits")
+            XCTAssertTrue(status.detail.contains("update"), "\(id.displayName) should explain stale metadata")
+
+            try provisioner.install(id, settings: settings)
+            XCTAssertTrue(provisioner.status(for: id, settings: settings).installed)
+        }
+    }
+
     private func temporaryHome() throws -> URL {
         let url = FileManager.default.temporaryDirectory.appending(path: "CursorAPITests-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
@@ -253,6 +283,11 @@ final class AgentProvisionerTests: XCTestCase {
     private func readJSONObject(_ url: URL) throws -> [String: Any] {
         let data = try Data(contentsOf: url)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    private func replaceText(in url: URL, matching oldValue: String, with newValue: String) throws {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        try text.replacingOccurrences(of: oldValue, with: newValue).write(to: url, atomically: true, encoding: .utf8)
     }
 
     private func assertComposerMetadata(
