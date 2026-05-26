@@ -122,6 +122,28 @@ final class CursorAPIAppModel: ObservableObject {
         return isRunning ? action : "Start & \(action)"
     }
 
+    func actionTitle(for status: AgentIntegrationStatus) -> String {
+        Self.actionTitle(
+            for: status,
+            isRunning: isRunning,
+            needsKeychainPermission: needsKeychainPermission
+        )
+    }
+
+    nonisolated static func actionTitle(
+        for status: AgentIntegrationStatus,
+        isRunning: Bool,
+        needsKeychainPermission: Bool
+    ) -> String {
+        if status.installed || !status.canInstall {
+            return status.actionTitle
+        }
+        if needsKeychainPermission {
+            return "Unlock & \(status.actionTitle)"
+        }
+        return isRunning ? status.actionTitle : "Start & \(status.actionTitle)"
+    }
+
     var canPrepareAgentConfigs: Bool {
         hasCursorAPIKey && sdkConfigured
     }

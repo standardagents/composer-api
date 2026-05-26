@@ -108,7 +108,11 @@ struct ContentView: View {
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                 ForEach(model.integrations) { status in
-                    IntegrationRow(status: status, canPrepareAgentConfigs: model.canPrepareAgentConfigs) {
+                    IntegrationRow(
+                        status: status,
+                        actionTitle: model.actionTitle(for: status),
+                        canPrepareAgentConfigs: model.canPrepareAgentConfigs
+                    ) {
                         model.install(status.id)
                     }
                 }
@@ -1093,6 +1097,7 @@ struct SectionTitle: View {
 
 struct IntegrationRow: View {
     var status: AgentIntegrationStatus
+    var actionTitle: String
     var canPrepareAgentConfigs: Bool
     var install: () -> Void
 
@@ -1103,7 +1108,7 @@ struct IntegrationRow: View {
                 Text(status.id.displayName)
                     .font(.body.weight(.semibold))
                 Spacer()
-                PillActionButton(status.actionTitle) {
+                PillActionButton(actionTitle) {
                     install()
                 }
                 .disabled(status.installed || !status.canInstall || !canPrepareAgentConfigs)
