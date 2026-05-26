@@ -495,9 +495,138 @@ struct ConnectionPage: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
+            APIActivityPanel(activity: model.apiActivity) {
+                model.clearAPIActivity()
+            }
+
             if model.hasCursorAPIKey && !model.needsKeychainPermission {
                 SDKConnectivityPanel(model: model)
             }
+        }
+    }
+}
+
+struct APIActivityPanel: View {
+    var activity: LocalAPIActivitySnapshot
+    var clear: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "waveform.path.ecg")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(activity.totalRequests == 0 ? Color.secondary : Color.green)
+                    .frame(width: 24, height: 24)
+                    .background((activity.totalRequests == 0 ? Color.secondary : Color.green).opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Local API Activity")
+                        .font(.callout.weight(.semibold))
+                    Text(activitySummary)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                HStack(spacing: 8) {
+                    ActivityMetric(label: "OK", value: activity.successfulRequests, tone: .green)
+                    ActivityMetric(label: "Errors", value: activity.failedRequests, tone: .orange)
+                    ActivityMetric(label: "Streams", value: activity.streamingRequests, tone: .blue)
+                }
+
+                PillActionButton("Clear") {
+                    clear()
+                }
+                .disabled(activity.totalRequests == 0)
+            }
+
+            if !activity.recentRequests.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(activity.recentRequests.enumerated()), id: \.offset) { _, event in
+                        APIRequestRow(event: event)
+                    }
+                }
+                .background(AppTheme.panelBackground)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(AppTheme.separator, lineWidth: 0.5)
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+        }
+        .padding(12)
+        .background(AppTheme.controlBackground)
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.separator, lineWidth: 0.5)
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var activitySummary: String {
+        guard let last = activity.lastRequest else {
+            return "No local requests yet."
+        }
+        let mode = last.streaming ? "stream" : "json"
+        return "\(last.method) \(last.path) returned \(last.status) in \(last.durationMilliseconds) ms (\(mode))."
+    }
+}
+
+struct ActivityMetric: View {
+    var label: String
+    var value: Int
+    var tone: Color
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text("\(value)")
+                .font(.system(.callout, design: .rounded).weight(.semibold))
+                .foregroundStyle(value == 0 ? Color.secondary : tone)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 42, alignment: .trailing)
+    }
+}
+
+struct APIRequestRow: View {
+    var event: LocalAPIRequestEvent
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(event.method)
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 42, alignment: .leading)
+            Text(event.path)
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            if event.streaming {
+                Image(systemName: "dot.radiowaves.left.and.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .help("Streaming response")
+            }
+            Text("\(event.status)")
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .foregroundStyle(event.status >= 400 ? Color.orange : Color.green)
+                .frame(width: 34, alignment: .trailing)
+            Text("\(event.durationMilliseconds) ms")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 58, alignment: .trailing)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .overlay(alignment: .bottom) {
+            Divider()
+                .padding(.leading, 10)
         }
     }
 }

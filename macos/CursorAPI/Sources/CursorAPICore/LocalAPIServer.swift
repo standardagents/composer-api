@@ -4,6 +4,22 @@ import Network
 private enum RoutedHTTPResponse {
     case response(HTTPResponse)
     case stream(HTTPStreamResponse)
+
+    var status: Int {
+        switch self {
+        case .response(let response):
+            return response.status
+        case .stream(let response):
+            return response.status
+        }
+    }
+
+    var isStreaming: Bool {
+        if case .stream = self {
+            return true
+        }
+        return false
+    }
 }
 
 private struct HTTPStreamResponse {
@@ -12,13 +28,33 @@ private struct HTTPStreamResponse {
     var chunks: AsyncThrowingStream<Data, any Error>
 }
 
+public struct LocalAPIRequestEvent: Equatable, Sendable {
+    public var method: String
+    public var path: String
+    public var status: Int
+    public var durationMilliseconds: Int
+    public var streaming: Bool
+    public var finishedAt: Date
+
+    public init(method: String, path: String, status: Int, durationMilliseconds: Int, streaming: Bool, finishedAt: Date = Date()) {
+        self.method = method
+        self.path = path
+        self.status = status
+        self.durationMilliseconds = durationMilliseconds
+        self.streaming = streaming
+        self.finishedAt = finishedAt
+    }
+}
+
 public final class LocalAPIServer: @unchecked Sendable {
     public typealias SettingsProvider = @Sendable () -> CursorAPISettings
+    public typealias RequestObserver = @Sendable (LocalAPIRequestEvent) -> Void
 
     private let queue = DispatchQueue(label: "CursorAPI.LocalAPIServer")
     private let settingsProvider: SettingsProvider
     private let harness: any CursorSDKHarness
     private let responseSessions: LocalResponseSessionStore
+    private let requestObserver: RequestObserver?
     private var listener: NWListener?
 
     public private(set) var port: UInt16?
@@ -26,11 +62,13 @@ public final class LocalAPIServer: @unchecked Sendable {
     public init(
         settingsProvider: @escaping SettingsProvider,
         harness: any CursorSDKHarness = LocalCursorSDKHarness(),
-        responseStateLimit: Int = 512
+        responseStateLimit: Int = 512,
+        requestObserver: RequestObserver? = nil
     ) {
         self.settingsProvider = settingsProvider
         self.harness = harness
         self.responseSessions = LocalResponseSessionStore(maxEntries: responseStateLimit)
+        self.requestObserver = requestObserver
     }
 
     public func start(port: UInt16) throws {
@@ -129,9 +167,22 @@ public final class LocalAPIServer: @unchecked Sendable {
     }
 
     private func route(_ request: HTTPRequest) async -> RoutedHTTPResponse {
+        let started = Date()
         let method = request.method.uppercased()
+        let path = normalizedAPIPath(request.path)
+        let routed = await routedResponse(for: request, method: method, path: path)
+        requestObserver?(LocalAPIRequestEvent(
+            method: method,
+            path: path,
+            status: routed.status,
+            durationMilliseconds: max(0, Int(Date().timeIntervalSince(started) * 1000)),
+            streaming: routed.isStreaming
+        ))
+        return routed
+    }
+
+    private func routedResponse(for request: HTTPRequest, method: String, path: String) async -> RoutedHTTPResponse {
         do {
-            let path = normalizedAPIPath(request.path)
             if method == "OPTIONS" {
                 return .response(HTTPResponse(status: 204, headers: corsHeaders(), body: Data()))
             }

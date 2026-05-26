@@ -3,9 +3,22 @@ import CursorAPICore
 import Foundation
 import ServiceManagement
 
+struct LocalAPIActivitySnapshot: Equatable {
+    var totalRequests = 0
+    var successfulRequests = 0
+    var failedRequests = 0
+    var streamingRequests = 0
+    var recentRequests: [LocalAPIRequestEvent] = []
+
+    var lastRequest: LocalAPIRequestEvent? {
+        recentRequests.first
+    }
+}
+
 @MainActor
 final class CursorAPIAppModel: ObservableObject {
     private static let portFallbackLimit = 20
+    private static let recentRequestLimit = 6
 
     @Published var settings: CursorAPISettings
     @Published var isRunning = false
@@ -15,6 +28,7 @@ final class CursorAPIAppModel: ObservableObject {
     @Published var needsKeychainPermission = false
     @Published var sdkCheckState: SDKCheckState = .idle
     @Published var isCheckingSDK = false
+    @Published var apiActivity = LocalAPIActivitySnapshot()
 
     private let store = AppSettingsStore()
     private let provisioner = AgentProvisioner()
@@ -22,6 +36,10 @@ final class CursorAPIAppModel: ObservableObject {
     private lazy var server = LocalAPIServer(settingsProvider: { [weak self] in
         DispatchQueue.main.sync {
             self?.settings ?? CursorAPISettings()
+        }
+    }, requestObserver: { [weak self] event in
+        Task { @MainActor [weak self] in
+            self?.recordRequest(event)
         }
     })
 
@@ -255,6 +273,10 @@ final class CursorAPIAppModel: ObservableObject {
         lastError = nil
     }
 
+    func clearAPIActivity() {
+        apiActivity = LocalAPIActivitySnapshot()
+    }
+
     func checkSDKConnectivity() {
         guard canCheckSDK else {
             sdkCheckState = .failure(sdkConfigured ? "Enter a Cursor API key before checking Composer." : "This app build is missing bundled Composer transport.")
@@ -298,6 +320,24 @@ final class CursorAPIAppModel: ObservableObject {
         } else {
             statusText = "Ready to start local API"
         }
+    }
+
+    private func recordRequest(_ event: LocalAPIRequestEvent) {
+        var activity = apiActivity
+        activity.totalRequests += 1
+        if event.status >= 400 {
+            activity.failedRequests += 1
+        } else {
+            activity.successfulRequests += 1
+        }
+        if event.streaming {
+            activity.streamingRequests += 1
+        }
+        activity.recentRequests.insert(event, at: 0)
+        if activity.recentRequests.count > Self.recentRequestLimit {
+            activity.recentRequests.removeLast(activity.recentRequests.count - Self.recentRequestLimit)
+        }
+        apiActivity = activity
     }
 
     private func prepareLocalAPIForAgentConfigs() -> Bool {

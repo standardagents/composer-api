@@ -204,6 +204,35 @@ final class LocalAPIServerTests: XCTestCase {
         }
     }
 
+    func testRequestObserverRecordsJSONStreamingAndErrorRequests() async throws {
+        let port = try unusedTCPPort()
+        let recorder = LocalAPIRequestEventRecorder()
+        let server = LocalAPIServer(
+            settingsProvider: { CursorAPISettings(port: port) },
+            harness: MockHarness(),
+            requestObserver: { recorder.record($0) }
+        )
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        _ = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/v1/models")!)
+
+        var streaming = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        streaming.httpMethod = "POST"
+        streaming.httpBody = Data(#"{"model":"composer-2.5","messages":[{"role":"user","content":"hello"}],"stream":true}"#.utf8)
+        streaming.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        _ = try await URLSession.shared.data(for: streaming)
+
+        _ = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(port)/missing")!)
+
+        let events = recorder.events()
+        XCTAssertEqual(events.map(\.path), ["/v1/models", "/v1/chat/completions", "/missing"])
+        XCTAssertEqual(events.map(\.status), [200, 200, 404])
+        XCTAssertEqual(events.map(\.streaming), [false, true, false])
+        XCTAssertTrue(events.allSatisfy { $0.durationMilliseconds >= 0 })
+    }
+
     func testStartFailsWhenPortIsAlreadyInUse() throws {
         let port = try unusedTCPPort()
         let first = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
@@ -1592,6 +1621,24 @@ private actor PreparedRequestRecorder {
 
     func prompts() -> [String] {
         requests.map(\.prompt)
+    }
+}
+
+private final class LocalAPIRequestEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [LocalAPIRequestEvent] = []
+
+    func record(_ event: LocalAPIRequestEvent) {
+        lock.lock()
+        values.append(event)
+        lock.unlock()
+    }
+
+    func events() -> [LocalAPIRequestEvent] {
+        lock.lock()
+        let snapshot = values
+        lock.unlock()
+        return snapshot
     }
 }
 
