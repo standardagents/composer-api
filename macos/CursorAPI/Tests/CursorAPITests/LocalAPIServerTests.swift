@@ -187,9 +187,11 @@ final class LocalAPIServerTests: XCTestCase {
             XCTAssertEqual(endpoints["models"], "/v1/models", path)
             XCTAssertEqual(endpoints["chat_completions"], "/v1/chat/completions", path)
             XCTAssertEqual(endpoints["responses"], "/v1/responses", path)
+            XCTAssertEqual(endpoints["response_input_tokens"], "POST /v1/responses/input_tokens", path)
             XCTAssertEqual(endpoints["delete_response"], "DELETE /v1/responses/{response_id}", path)
             XCTAssertEqual(endpoints["cancel_response"], "POST /v1/responses/{response_id}/cancel", path)
             XCTAssertEqual(features["stateful_responses"], true, path)
+            XCTAssertEqual(features["response_input_tokens"], true, path)
             XCTAssertEqual(features["response_deletion"], true, path)
             XCTAssertEqual(features["response_cancellation"], false, path)
             XCTAssertEqual(features["tool_calls"], true, path)
@@ -799,6 +801,29 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(cancelText.contains(#""code":"invalid_request""#) || cancelText.contains(#""code" : "invalid_request""#))
         XCTAssertEqual(statusAfterCancel, 200)
         XCTAssertEqual(retrievedAfterCancel?["id"] as? String, responseID)
+    }
+
+    func testResponsesInputTokensEndpointReturnsLocalEstimate() async throws {
+        let port = try unusedTCPPort()
+        let recorder = PreparedRequestRecorder()
+        let harness = MockHarness(recorder: recorder)
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: harness)
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses/input_tokens")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"{"model":"composer-2.5","input":"hello"}"#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let models = await recorder.models()
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(object["object"] as? String, "response.input_tokens")
+        XCTAssertGreaterThan((object["input_tokens"] as? NSNumber)?.intValue ?? 0, 0)
+        XCTAssertEqual(models, [])
     }
 
     func testResponsesCancelUnknownResponseReturns404() async throws {

@@ -224,6 +224,14 @@ public enum OpenAICompatibility {
         ]
     }
 
+    public static func responseInputTokenCountObject(_ body: Data) throws -> [String: Any] {
+        let prepared = try prepareResponsesRequest(body)
+        return [
+            "object": "response.input_tokens",
+            "input_tokens": inputTokenEstimate(characters: prepared.promptCharacters)
+        ]
+    }
+
     public static func chatCompletionResponse(
         id: String,
         created: Int,
@@ -1255,13 +1263,17 @@ public enum OpenAICompatibility {
     }
 
     private static func usage(promptCharacters: Int, completionCharacters: Int) -> [String: Any] {
-        let promptTokens = max(1, Int(ceil(Double(promptCharacters) / 4.0)))
+        let promptTokens = inputTokenEstimate(characters: promptCharacters)
         let completionTokens = max(0, Int(ceil(Double(completionCharacters) / 4.0)))
         return [
             "prompt_tokens": promptTokens,
             "completion_tokens": completionTokens,
             "total_tokens": promptTokens + completionTokens
         ]
+    }
+
+    private static func inputTokenEstimate(characters: Int) -> Int {
+        max(1, Int(ceil(Double(characters) / 4.0)))
     }
 
     private static func serializedLength(_ value: Any) -> Int {

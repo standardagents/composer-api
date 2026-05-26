@@ -57,7 +57,7 @@ final class CursorAPIAppModel: ObservableObject {
 
     var sdkStatusText: String {
         if !sdkConfigured {
-            return "Build Incomplete"
+            return "Transport Missing"
         }
         if needsKeychainPermission {
             return "Needs Unlock"

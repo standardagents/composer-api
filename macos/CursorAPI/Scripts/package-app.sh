@@ -29,7 +29,7 @@ while [ "$#" -gt 0 ]; do
 Usage: $0 [--development|--release]
 
   --development  Build a local development app. Missing bundled transport defaults
-                 are allowed and the app will show Build Incomplete. This is the
+                 are allowed and the app will show Transport Missing. This is the
                  default.
   --release      Refuse to package unless complete bundled Composer transport
                  defaults are available from local environment files or the
@@ -202,7 +202,7 @@ if hasCompleteRouting {
         FileHandle.standardError.write(Data("\(message) Refusing release package.\n".utf8))
         exit(2)
     }
-    print("\(message) This build will show Build Incomplete.")
+    print("\(message) This build will show Transport Missing.")
 }
 SWIFT
 mkdir -p "$ICONSET_DIR"

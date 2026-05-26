@@ -154,6 +154,9 @@ public final class LocalAPIServer: @unchecked Sendable {
                 }
                 return try readResponse(withCORS(HTTPResponse.json(OpenAICompatibility.modelObject(model))), method: method)
             }
+            if method == "POST", path == "/v1/responses/input_tokens" {
+                return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.responseInputTokenCountObject(request.body))))
+            }
             if method == "POST", path == "/v1/completions" {
                 var prepared = try OpenAICompatibility.prepareCompletionRequest(request.body)
                 prepared.sessionKey = sessionAffinity(request)
@@ -720,6 +723,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 "models": "/v1/models",
                 "chat_completions": "/v1/chat/completions",
                 "responses": "/v1/responses",
+                "response_input_tokens": "POST /v1/responses/input_tokens",
                 "delete_response": "DELETE /v1/responses/{response_id}",
                 "cancel_response": "POST /v1/responses/{response_id}/cancel",
                 "completions": "/v1/completions",
@@ -729,6 +733,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 "chat_completions": true,
                 "responses": true,
                 "stateful_responses": true,
+                "response_input_tokens": true,
                 "response_deletion": true,
                 "response_cancellation": false,
                 "streaming": true,

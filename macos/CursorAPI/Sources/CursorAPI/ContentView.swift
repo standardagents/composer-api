@@ -610,7 +610,7 @@ struct SettingsPage: View {
                 )
                 SettingsSummaryTile(
                     icon: model.isRunning ? (model.needsKeychainPermission ? "lock.circle.fill" : "checkmark.circle.fill") : "power.circle",
-                    title: model.isRunning ? (model.needsKeychainPermission ? "API Locked" : "API Running") : (model.sdkConfigured ? (model.hasCursorAPIKey ? "Ready to Start" : "Needs Key") : "Build Incomplete"),
+                    title: model.isRunning ? (model.needsKeychainPermission ? "API Locked" : "API Running") : (model.sdkConfigured ? (model.hasCursorAPIKey ? "Ready to Start" : "Needs Key") : "Transport Missing"),
                     detail: model.isRunning ? (model.needsKeychainPermission ? "Unlock saved key" : model.baseURL) : (model.sdkConfigured ? "Bundled transport" : "Transport missing"),
                     tone: model.isRunning && model.sdkConfigured && !model.needsKeychainPermission ? .ok : (model.sdkConfigured && !model.needsKeychainPermission ? .muted : .warning)
                 )
