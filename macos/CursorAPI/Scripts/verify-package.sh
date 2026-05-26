@@ -43,7 +43,7 @@ plist_has_nonempty_value() {
 [ -s "$RESOURCES_DIR/cursor-sdk-opencode-bridge.mjs" ] || fail "SDK bridge script is missing"
 [ -s "$RESOURCES_DIR/APIForCursor.icns" ] || fail "app icon is missing"
 [ -s "$RESOURCES_DIR/APIForCursor.png" ] || fail "runtime app icon PNG is missing"
-swift - "$RESOURCES_DIR/APIForCursor.icns" <<'SWIFT' || fail "app icon does not contain the bridge artwork"
+swift - "$RESOURCES_DIR/APIForCursor.icns" <<'SWIFT' || fail "app icon does not contain the packaged artwork"
 import AppKit
 import Foundation
 
@@ -75,7 +75,7 @@ guard let context = CGContext(
 context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
 var visiblePixels = 0
-var bridgeBluePixels = 0
+var bridgeGreenPixels = 0
 var brightBridgePixels = 0
 
 for offset in stride(from: 0, to: pixels.count, by: 4) {
@@ -87,8 +87,8 @@ for offset in stride(from: 0, to: pixels.count, by: 4) {
     guard alpha > 32 else { continue }
     visiblePixels += 1
 
-    if blue > 150, green > 80, red < 80 {
-        bridgeBluePixels += 1
+    if green > 140, red > 90, blue < 130 {
+        bridgeGreenPixels += 1
     }
     if red > 220, green > 220, blue > 220 {
         brightBridgePixels += 1
@@ -97,8 +97,8 @@ for offset in stride(from: 0, to: pixels.count, by: 4) {
 
 let totalPixels = width * height
 guard visiblePixels > totalPixels * 7 / 10,
-      bridgeBluePixels > totalPixels / 15,
-      brightBridgePixels > totalPixels / 10 else {
+      bridgeGreenPixels > totalPixels / 120,
+      brightBridgePixels > totalPixels / 120 else {
     exit(1)
 }
 SWIFT

@@ -518,6 +518,28 @@ for spec in specs {
 SWIFT
 iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/APIForCursor.icns"
 rm -rf "$ICONSET_DIR"
+
+# Use the checked-in 1024px app icon master for the final bundle icon.
+# The Swift renderer above remains a deterministic fallback for development,
+# but product builds should reflect the curated artwork in APIForCursor.png.
+mkdir -p "$ICONSET_DIR"
+source_icon() {
+  local pixels="$1"
+  local output="$2"
+  sips -z "$pixels" "$pixels" "$APP_ICON_SOURCE" --out "$ICONSET_DIR/$output" >/dev/null
+}
+source_icon 16 icon_16x16.png
+source_icon 32 icon_16x16@2x.png
+source_icon 32 icon_32x32.png
+source_icon 64 icon_32x32@2x.png
+source_icon 128 icon_128x128.png
+source_icon 256 icon_128x128@2x.png
+source_icon 256 icon_256x256.png
+source_icon 512 icon_256x256@2x.png
+source_icon 512 icon_512x512.png
+source_icon 1024 icon_512x512@2x.png
+iconutil -c icns "$ICONSET_DIR" -o "$RESOURCES_DIR/APIForCursor.icns"
+rm -rf "$ICONSET_DIR"
 xml_escape() {
   printf '%s' "$1" | sed \
     -e 's/&/\&amp;/g' \
