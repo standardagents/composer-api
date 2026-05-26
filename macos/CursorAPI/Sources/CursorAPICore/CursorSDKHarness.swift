@@ -188,7 +188,7 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         request.setValue(requestID, forHTTPHeaderField: "x-original-request-id")
         request.setValue(requestID, forHTTPHeaderField: "x-request-id")
 
-        return try await CursorSDKHTTP2Transport().runStreaming(request: request, initialFrame: framedBody, onFrame: onFrame)
+        return try await CursorSDKHTTP2Transport.shared.runStreaming(request: request, initialFrame: framedBody, onFrame: onFrame)
     }
 
     private func endpointURL(settings: CursorAPISettings) throws -> URL {

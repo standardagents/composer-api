@@ -1,19 +1,91 @@
 import Foundation
 
 public final class CursorSDKHTTP2Transport: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Data, any Error>?
-    private var outputStream: OutputStream?
-    private var inputStream: InputStream?
-    private var responseData = Data()
-    private var parser = IncrementalConnectFrameParser()
-    private var requestContextSent = false
-    private var statusCode = 0
-    private var contentType = ""
-    private var networkProtocolName: String?
-    private var frameHandler: (@Sendable (Data) -> Void)?
-    private var completed = false
-    private var session: URLSession?
+    public static let shared = CursorSDKHTTP2Transport()
+
+    private final class RequestState: @unchecked Sendable {
+        let lock = NSLock()
+        var continuation: CheckedContinuation<Data, any Error>?
+        var outputStream: OutputStream?
+        var inputStream: InputStream?
+        var task: URLSessionTask?
+        var responseData = Data()
+        var parser = IncrementalConnectFrameParser()
+        var requestContextSent = false
+        var statusCode = 0
+        var contentType = ""
+        var networkProtocolName: String?
+        var frameHandler: (@Sendable (Data) -> Void)?
+        var completed = false
+
+        init(
+            continuation: CheckedContinuation<Data, any Error>,
+            inputStream: InputStream,
+            outputStream: OutputStream,
+            frameHandler: @escaping @Sendable (Data) -> Void
+        ) {
+            self.continuation = continuation
+            self.inputStream = inputStream
+            self.outputStream = outputStream
+            self.frameHandler = frameHandler
+        }
+
+        func write(_ data: Data) throws {
+            guard let outputStream = lock.withLock({ self.outputStream }) else {
+                throw CursorAPIError.transport("SDK upload stream is closed.")
+            }
+            try data.withUnsafeBytes { buffer in
+                guard let base = buffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                var sent = 0
+                while sent < data.count {
+                    let written = outputStream.write(base.advanced(by: sent), maxLength: data.count - sent)
+                    if written < 0 {
+                        throw outputStream.streamError ?? CursorAPIError.transport("Could not write SDK upload stream.")
+                    }
+                    if written == 0 {
+                        Thread.sleep(forTimeInterval: 0.005)
+                        continue
+                    }
+                    sent += written
+                }
+            }
+        }
+
+        func closeUpload() {
+            lock.withLock {
+                outputStream?.close()
+                outputStream = nil
+            }
+        }
+
+        func closeStreams() {
+            lock.withLock {
+                outputStream?.close()
+                inputStream?.close()
+                outputStream = nil
+                inputStream = nil
+            }
+        }
+    }
+
+    private let statesLock = NSLock()
+    private var states: [Int: RequestState] = [:]
+    private var session: URLSession!
+
+    public override init() {
+        super.init()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 180
+        configuration.timeoutIntervalForResource = 180
+        configuration.httpShouldUsePipelining = true
+        configuration.httpMaximumConnectionsPerHost = 1
+        configuration.waitsForConnectivity = true
+        session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
 
     public func run(request originalRequest: URLRequest, initialFrame: Data) async throws -> Data {
         try await runStreaming(request: originalRequest, initialFrame: initialFrame, onFrame: { _ in })
@@ -25,157 +97,153 @@ public final class CursorSDKHTTP2Transport: NSObject, URLSessionDataDelegate, UR
         onFrame: @escaping @Sendable (Data) -> Void
     ) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
-            lock.withLock {
-                self.continuation = continuation
-                self.responseData = Data()
-                self.parser = IncrementalConnectFrameParser()
-                self.requestContextSent = false
-                self.statusCode = 0
-                self.contentType = ""
-                self.networkProtocolName = nil
-                self.frameHandler = onFrame
-                self.completed = false
-            }
-
             var readStream: InputStream?
             var writeStream: OutputStream?
             Stream.getBoundStreams(withBufferSize: 1024 * 1024, inputStream: &readStream, outputStream: &writeStream)
             guard let readStream, let writeStream else {
-                finish(.failure(CursorAPIError.transport("Could not create SDK request stream.")))
+                continuation.resume(throwing: CursorAPIError.transport("Could not create SDK request stream."))
                 return
             }
-            inputStream = readStream
-            outputStream = writeStream
-            outputStream?.open()
+            writeStream.open()
 
             var request = originalRequest
             request.httpBodyStream = readStream
             request.httpBody = nil
-
-            let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = 180
-            configuration.timeoutIntervalForResource = 180
-            configuration.httpShouldUsePipelining = true
-            configuration.httpMaximumConnectionsPerHost = 1
-            let session = URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
-            self.session = session
             let task = session.dataTask(with: request)
+            let state = RequestState(
+                continuation: continuation,
+                inputStream: readStream,
+                outputStream: writeStream,
+                frameHandler: onFrame
+            )
+            state.task = task
+            statesLock.withLock {
+                states[task.taskIdentifier] = state
+            }
             task.resume()
 
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 do {
-                    try self?.write(initialFrame)
+                    try state.write(initialFrame)
                 } catch {
-                    self?.finish(.failure(error))
+                    self?.finish(taskIdentifier: task.taskIdentifier, result: .failure(error))
                 }
             }
         }
     }
 
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse) async -> URLSession.ResponseDisposition {
-        if let http = response as? HTTPURLResponse {
-            lock.withLock {
-                statusCode = http.statusCode
-                contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+        if let http = response as? HTTPURLResponse, let state = state(for: dataTask) {
+            state.lock.withLock {
+                state.statusCode = http.statusCode
+                state.contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
             }
         }
         return .allow
     }
 
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        lock.withLock {
-            responseData.append(data)
-        }
-        guard statusCode == 200, contentType.contains("application/connect+proto") else {
+        guard let state = state(for: dataTask) else {
             return
         }
-        for payload in parser.push(data) {
-            frameHandler?(payload)
-            if !requestContextSent, let context = CursorSDKRequestContext.decode(payload) {
-                requestContextSent = true
+        state.lock.withLock {
+            state.responseData.append(data)
+        }
+        let canParseFrames = state.lock.withLock {
+            state.statusCode == 200 && state.contentType.contains("application/connect+proto")
+        }
+        guard canParseFrames else {
+            return
+        }
+        let parsed = state.lock.withLock {
+            state.parser.push(data)
+        }
+        for payload in parsed {
+            state.lock.withLock {
+                state.frameHandler
+            }?(payload)
+            let shouldSendContext = state.lock.withLock { () -> CursorSDKRequestContext? in
+                guard !state.requestContextSent, let context = CursorSDKRequestContext.decode(payload) else {
+                    return nil
+                }
+                state.requestContextSent = true
+                return context
+            }
+            if let context = shouldSendContext {
                 let frame = ConnectProto.frame(CursorSDKProto.requestContextResult(id: context.id, execID: context.execID))
                 do {
-                    try write(frame)
-                    closeUpload()
+                    try state.write(frame)
+                    state.closeUpload()
                 } catch {
-                    finish(.failure(error))
+                    finish(taskIdentifier: dataTask.taskIdentifier, result: .failure(error))
                 }
             }
         }
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, needNewBodyStream completionHandler: @escaping (InputStream?) -> Void) {
-        completionHandler(inputStream)
+        completionHandler(state(for: task)?.inputStream)
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
         let name = metrics.transactionMetrics.last?.networkProtocolName
-        lock.withLock {
-            networkProtocolName = name
+        if let state = state(for: task) {
+            state.lock.withLock {
+                state.networkProtocolName = name
+            }
         }
     }
 
     public func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: (any Error)?) {
         if let error {
-            finish(.failure(error))
+            finish(taskIdentifier: task.taskIdentifier, result: .failure(error))
             return
         }
-        let data = lock.withLock { responseData }
-        let status = lock.withLock { statusCode }
+        guard let state = state(for: task) else {
+            return
+        }
+        let data = state.lock.withLock { state.responseData }
+        let status = state.lock.withLock { state.statusCode }
         guard (200..<300).contains(status) else {
             let text = String(data: data, encoding: .utf8) ?? "status \(status)"
-            finish(.failure(status == 401 ? CursorAPIError.unauthorized : CursorAPIError.upstream(text)))
+            finish(taskIdentifier: task.taskIdentifier, result: .failure(status == 401 ? CursorAPIError.unauthorized : CursorAPIError.upstream(text)))
             return
         }
-        let protocolName = lock.withLock { networkProtocolName }
+        let protocolName = state.lock.withLock { state.networkProtocolName }
         guard protocolName == "h2" else {
-            finish(.failure(CursorAPIError.transport("Cursor SDK transport did not negotiate HTTP/2\(protocolName.map { " (got \($0))" } ?? "").")))
+            finish(taskIdentifier: task.taskIdentifier, result: .failure(CursorAPIError.transport("Cursor SDK transport did not negotiate HTTP/2\(protocolName.map { " (got \($0))" } ?? "").")))
             return
         }
-        finish(.success(data))
+        finish(taskIdentifier: task.taskIdentifier, result: .success(data))
     }
 
-    private func write(_ data: Data) throws {
-        guard let outputStream else {
-            throw CursorAPIError.transport("SDK upload stream is closed.")
-        }
-        try data.withUnsafeBytes { buffer in
-            guard let base = buffer.bindMemory(to: UInt8.self).baseAddress else { return }
-            var sent = 0
-            while sent < data.count {
-                let written = outputStream.write(base.advanced(by: sent), maxLength: data.count - sent)
-                if written < 0 {
-                    throw outputStream.streamError ?? CursorAPIError.transport("Could not write SDK upload stream.")
-                }
-                if written == 0 {
-                    Thread.sleep(forTimeInterval: 0.005)
-                    continue
-                }
-                sent += written
-            }
+    private func state(for task: URLSessionTask) -> RequestState? {
+        statesLock.withLock {
+            states[task.taskIdentifier]
         }
     }
 
-    private func closeUpload() {
-        outputStream?.close()
-    }
-
-    private func finish(_ result: Result<Data, any Error>) {
-        let continuation: CheckedContinuation<Data, any Error>? = lock.withLock {
-            if completed { return nil }
-            completed = true
-            let current = self.continuation
-            self.continuation = nil
-            self.frameHandler = nil
+    private func finish(taskIdentifier: Int, result: Result<Data, any Error>) {
+        guard let state = statesLock.withLock({ states[taskIdentifier] }) else {
+            return
+        }
+        let continuation: CheckedContinuation<Data, any Error>? = state.lock.withLock {
+            if state.completed { return nil }
+            state.completed = true
+            let current = state.continuation
+            state.continuation = nil
+            state.frameHandler = nil
             return current
         }
-        closeUpload()
-        inputStream?.close()
-        session?.finishTasksAndInvalidate()
+        statesLock.withLock {
+            states[taskIdentifier] = nil
+        }
+        state.closeStreams()
         switch result {
         case .success(let data):
             continuation?.resume(returning: data)
         case .failure(let error):
+            state.task?.cancel()
             continuation?.resume(throwing: error)
         }
     }
