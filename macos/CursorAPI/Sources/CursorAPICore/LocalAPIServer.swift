@@ -189,6 +189,9 @@ public final class LocalAPIServer: @unchecked Sendable {
             if method == "POST", path == "/v1/responses" {
                 var prepared = try OpenAICompatibility.prepareResponsesRequest(request.body)
                 if let previousResponseID = prepared.previousResponseID {
+                    guard await responseSessions.knowsResponse(responseID: previousResponseID) else {
+                        throw CursorAPIError.notFound
+                    }
                     let rememberedToolCalls = await responseSessions.responseToolCalls(responseID: previousResponseID)
                     if !rememberedToolCalls.isEmpty {
                         prepared = try OpenAICompatibility.prepareResponsesRequest(request.body, rememberedToolCalls: rememberedToolCalls)
@@ -785,6 +788,17 @@ private actor LocalResponseSessionStore {
         guard let toolCalls = storedResponseToolCalls[responseID] else { return [:] }
         touch(responseID)
         return toolCalls
+    }
+
+    func knowsResponse(responseID: String) -> Bool {
+        let exists = responseSessions[responseID] != nil
+            || storedResponses[responseID] != nil
+            || storedResponseInputItems[responseID] != nil
+            || storedResponseToolCalls[responseID] != nil
+        if exists {
+            touch(responseID)
+        }
+        return exists
     }
 
     func deleteResponse(responseID: String) -> Bool {

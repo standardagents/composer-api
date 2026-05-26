@@ -768,6 +768,60 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(sessionKeys[0].hasPrefix("response:"))
     }
 
+    func testResponsesPreviousResponseIDRejectsUnknownAndDeletedResponses() async throws {
+        let port = try unusedTCPPort()
+        let recorder = PreparedRequestRecorder()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let (unknownStatus, unknownBody) = try await postResponseStatus(
+            port: port,
+            body: #"{"model":"composer-2.5","previous_response_id":"resp_missing","input":"second"}"#
+        )
+
+        XCTAssertEqual(unknownStatus, 404)
+        XCTAssertTrue(unknownBody.contains(#""code":"not_found""#) || unknownBody.contains(#""code" : "not_found""#))
+        let sessionKeysAfterUnknown = await recorder.sessionKeys()
+        XCTAssertEqual(sessionKeysAfterUnknown, [])
+
+        let created = try await postResponse(port: port, body: #"{"model":"composer-2.5","input":"first"}"#)
+        let responseID = try XCTUnwrap(created["id"] as? String)
+        var deleteRequest = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses/\(responseID)")!)
+        deleteRequest.httpMethod = "DELETE"
+        let (_, deleteResponse) = try await URLSession.shared.data(for: deleteRequest)
+        XCTAssertEqual((deleteResponse as? HTTPURLResponse)?.statusCode, 200)
+
+        let (deletedStatus, deletedBody) = try await postResponseStatus(
+            port: port,
+            body: #"{"model":"composer-2.5","previous_response_id":"\#(responseID)","input":"second"}"#
+        )
+
+        XCTAssertEqual(deletedStatus, 404)
+        XCTAssertTrue(deletedBody.contains(#""code":"not_found""#) || deletedBody.contains(#""code" : "not_found""#))
+        let sessionKeysAfterDeleted = await recorder.sessionKeys()
+        XCTAssertEqual(sessionKeysAfterDeleted.count, 1)
+    }
+
+    func testResponsesPreviousResponseIDCanContinueStoreFalseInMemorySession() async throws {
+        let port = try unusedTCPPort()
+        let recorder = PreparedRequestRecorder()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(recorder: recorder))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let first = try await postResponse(port: port, body: #"{"model":"composer-2.5","store":false,"input":"first"}"#)
+        let firstID = try XCTUnwrap(first["id"] as? String)
+        let second = try await postResponse(port: port, body: #"{"model":"composer-2.5","previous_response_id":"\#(firstID)","input":"second"}"#)
+
+        XCTAssertEqual(second["previous_response_id"] as? String, firstID)
+        let sessionKeys = await recorder.sessionKeys()
+        XCTAssertEqual(sessionKeys.count, 2)
+        XCTAssertEqual(sessionKeys[0], sessionKeys[1])
+    }
+
     func testResponsesPreviousResponseIDCarriesFunctionCallMemory() async throws {
         let port = try unusedTCPPort()
         let recorder = PreparedRequestRecorder()
@@ -1280,6 +1334,16 @@ private extension LocalAPIServerTests {
         let (data, response) = try await URLSession.shared.data(for: request)
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    func postResponseStatus(port: UInt16, body: String) async throws -> (Int, String) {
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/responses")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(body.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        return (status, String(data: data, encoding: .utf8) ?? "")
     }
 
     func getResponse(port: UInt16, responseID: String) async throws -> (Int, [String: Any]?) {
