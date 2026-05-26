@@ -18,8 +18,8 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         app.setActivationPolicy(.regular)
         delegate.installMainMenu()
         app.finishLaunching()
-        delegate.revealMainWindow()
         DispatchQueue.main.async {
+            delegate.revealMainWindow()
             delegate.model.startServerWithoutPromptIfReady()
         }
         app.run()

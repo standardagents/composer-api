@@ -1181,6 +1181,8 @@ private extension AgentIntegrationID {
             return "pi"
         case .continueDev:
             return "continue"
+        case .aider:
+            return "aider"
         }
     }
 

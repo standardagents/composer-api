@@ -4,6 +4,8 @@ public final class AgentProvisioner: @unchecked Sendable {
     private static let backupMarker = "api-for-cursor-backup"
     private static let continueBlockStart = "# api-for-cursor-start"
     private static let continueBlockEnd = "# api-for-cursor-end"
+    private static let aiderBlockStart = "# api-for-cursor-aider-start"
+    private static let aiderBlockEnd = "# api-for-cursor-aider-end"
 
     private let homeDirectory: URL
     private let fileManager: FileManager
@@ -39,6 +41,8 @@ public final class AgentProvisioner: @unchecked Sendable {
             return piStatus(settings: settings)
         case .continueDev:
             return continueStatus(settings: settings)
+        case .aider:
+            return aiderStatus(settings: settings)
         }
     }
 
@@ -58,6 +62,8 @@ public final class AgentProvisioner: @unchecked Sendable {
             try installPi(settings: settings)
         case .continueDev:
             try installContinue(settings: settings)
+        case .aider:
+            try installAider(settings: settings)
         }
     }
 
@@ -218,6 +224,17 @@ public final class AgentProvisioner: @unchecked Sendable {
         return AgentIntegrationStatus(id: .continueDev, installed: installed, configPath: url.path, detail: detail)
     }
 
+    private func aiderStatus(settings: CursorAPISettings) -> AgentIntegrationStatus {
+        let url = aiderConfigURL()
+        guard fileManager.fileExists(atPath: url.path) else {
+            return AgentIntegrationStatus(id: .aider, installed: false, configPath: url.path, detail: "Aider config not found")
+        }
+        let text = fileText(url)
+        let installed = aiderConfigMatches(text, settings: settings)
+        let detail = installed ? "OpenAI-compatible provider installed" : providerStatusDetail(text: text, settings: settings)
+        return AgentIntegrationStatus(id: .aider, installed: installed, configPath: url.path, detail: detail)
+    }
+
     private func codexConfigMatches(_ text: String, settings: CursorAPISettings) -> Bool {
         text.contains("[model_providers.cursorapi]")
             && text.contains("name = \"\(CursorAPIBrand.displayName)\"")
@@ -317,6 +334,14 @@ public final class AgentProvisioner: @unchecked Sendable {
                 text.contains("name: \(model.name)")
                     && text.contains("model: \(model.id)")
             }
+    }
+
+    private func aiderConfigMatches(_ text: String, settings: CursorAPISettings) -> Bool {
+        topLevelYAMLValue("model", in: text) == "openai/composer-2.5"
+            && topLevelYAMLValue("weak-model", in: text) == "openai/composer-2.5-fast"
+            && topLevelYAMLValue("editor-model", in: text) == "openai/composer-2.5-fast"
+            && topLevelYAMLValue("openai-api-base", in: text) == settings.baseURL.absoluteString
+            && topLevelYAMLValue("openai-api-key", in: text) == "cursor-local"
     }
 
     private func installCline(settings: CursorAPISettings) throws {
@@ -422,6 +447,22 @@ public final class AgentProvisioner: @unchecked Sendable {
         try writeText(text, to: url)
     }
 
+    private func installAider(settings: CursorAPISettings) throws {
+        let url = aiderConfigURL()
+        var text = removeMarkedAiderBlock(from: fileText(url))
+        text = removeTopLevelYAMLKeys(
+            ["model", "weak-model", "editor-model", "openai-api-base", "openai-api-key"],
+            from: text
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if !text.isEmpty {
+            text += "\n\n"
+        }
+        text += aiderConfigBlock(settings: settings)
+        text += "\n"
+        try writeText(text, to: url)
+    }
+
     private func opencodeConfigURL() -> URL {
         configHomeDirectory().appending(path: "opencode/opencode.json")
     }
@@ -480,6 +521,10 @@ public final class AgentProvisioner: @unchecked Sendable {
 
     private func continueConfigURL() -> URL {
         homeDirectory.appending(path: ".continue/config.yaml")
+    }
+
+    private func aiderConfigURL() -> URL {
+        homeDirectory.appending(path: ".aider.conf.yml")
     }
 
     private func configHomeDirectory() -> URL {
@@ -559,16 +604,36 @@ public final class AgentProvisioner: @unchecked Sendable {
         return lines.joined(separator: "\n")
     }
 
+    private func aiderConfigBlock(settings: CursorAPISettings) -> String {
+        [
+            Self.aiderBlockStart,
+            "model: openai/composer-2.5",
+            "weak-model: openai/composer-2.5-fast",
+            "editor-model: openai/composer-2.5-fast",
+            "openai-api-base: \(settings.baseURL.absoluteString)",
+            "openai-api-key: cursor-local",
+            Self.aiderBlockEnd
+        ].joined(separator: "\n")
+    }
+
     private func removeMarkedContinueBlock(from text: String) -> String {
+        removeMarkedBlock(from: text, start: Self.continueBlockStart, end: Self.continueBlockEnd)
+    }
+
+    private func removeMarkedAiderBlock(from text: String) -> String {
+        removeMarkedBlock(from: text, start: Self.aiderBlockStart, end: Self.aiderBlockEnd)
+    }
+
+    private func removeMarkedBlock(from text: String, start: String, end: String) -> String {
         var output: [String] = []
         var skipping = false
         for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed == Self.continueBlockStart {
+            if trimmed == start {
                 skipping = true
                 continue
             }
-            if trimmed == Self.continueBlockEnd {
+            if trimmed == end {
                 skipping = false
                 continue
             }
@@ -577,6 +642,56 @@ public final class AgentProvisioner: @unchecked Sendable {
             }
         }
         return output.joined(separator: "\n")
+    }
+
+    private func removeTopLevelYAMLKeys(_ keys: Set<String>, from text: String) -> String {
+        text.split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .filter { line in
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                guard !trimmed.isEmpty,
+                      !trimmed.hasPrefix("#"),
+                      !line.hasPrefix(" "),
+                      !line.hasPrefix("\t"),
+                      let colon = trimmed.firstIndex(of: ":") else {
+                    return true
+                }
+                let key = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+                return !keys.contains(key)
+            }
+            .joined(separator: "\n")
+    }
+
+    private func topLevelYAMLValue(_ key: String, in text: String) -> String? {
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard !trimmed.hasPrefix("#"),
+                  !line.hasPrefix(" "),
+                  !line.hasPrefix("\t"),
+                  let colon = trimmed.firstIndex(of: ":") else {
+                continue
+            }
+            let currentKey = String(trimmed[..<colon]).trimmingCharacters(in: .whitespaces)
+            guard currentKey == key else { continue }
+            let rawValue = String(trimmed[trimmed.index(after: colon)...])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return unquotedYAMLScalar(rawValue)
+        }
+        return nil
+    }
+
+    private func unquotedYAMLScalar(_ value: String) -> String {
+        var value = value
+        if let comment = value.range(of: " #") {
+            value = String(value[..<comment.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if value.count >= 2,
+           let first = value.first,
+           let last = value.last,
+           (first == "\"" && last == "\"" || first == "'" && last == "'") {
+            return String(value.dropFirst().dropLast())
+        }
+        return value
     }
 
     private func localProviderMatches(_ provider: [String: Any], settings: CursorAPISettings) -> Bool {
@@ -631,7 +746,7 @@ public final class AgentProvisioner: @unchecked Sendable {
         if text.contains("http://127.0.0.1:") || text.contains("http://localhost:") {
             return "Provider found with a different local URL"
         }
-        if text.contains("cursorapi") || text.contains(CursorAPIBrand.displayName) || text.contains("CursorAPI") {
+        if text.contains("cursorapi") || text.contains("api-for-cursor") || text.contains(CursorAPIBrand.displayName) || text.contains("CursorAPI") {
             return "Provider found with a different local URL"
         }
         return "Ready to install"

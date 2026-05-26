@@ -180,6 +180,44 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(provisioner.status(for: .continueDev, settings: settings).installed)
     }
 
+    func testInstallsAiderOpenAICompatibleConfig() throws {
+        let home = try temporaryHome()
+        let provisioner = AgentProvisioner(homeDirectory: home)
+        let settings = CursorAPISettings(port: 8787)
+        let config = home.appending(path: ".aider.conf.yml")
+        try """
+        dark-mode: true
+        model: openai/old-model
+        weak-model: openai/old-fast
+        openai-api-base: http://127.0.0.1:9999/v1
+        openai-api-key: old-key
+        show-model-warnings: false
+        """.write(to: config, atomically: true, encoding: .utf8)
+
+        try provisioner.install(.aider, settings: settings)
+        try provisioner.install(.aider, settings: settings)
+
+        let text = try String(contentsOf: config, encoding: .utf8)
+        XCTAssertTrue(text.contains("dark-mode: true"))
+        XCTAssertTrue(text.contains("show-model-warnings: false"))
+        XCTAssertTrue(text.contains("# api-for-cursor-aider-start"))
+        XCTAssertTrue(text.contains("model: openai/composer-2.5"))
+        XCTAssertTrue(text.contains("weak-model: openai/composer-2.5-fast"))
+        XCTAssertTrue(text.contains("editor-model: openai/composer-2.5-fast"))
+        XCTAssertTrue(text.contains("openai-api-base: http://127.0.0.1:8787/v1"))
+        XCTAssertTrue(text.contains("openai-api-key: cursor-local"))
+        XCTAssertFalse(text.contains("old-model"))
+        XCTAssertFalse(text.contains("old-key"))
+        XCTAssertEqual(countOccurrences(of: "# api-for-cursor-aider-start", in: text), 1)
+        XCTAssertEqual(countOccurrences(of: "# api-for-cursor-aider-end", in: text), 1)
+        XCTAssertEqual(countOccurrences(of: "openai-api-base:", in: text), 1)
+        XCTAssertTrue(provisioner.status(for: .aider, settings: settings).installed)
+
+        let backups = try FileManager.default.contentsOfDirectory(at: config.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".aider.conf.yml.api-for-cursor-backup.") }
+        XCTAssertEqual(backups.count, 1)
+    }
+
     func testInstallsClineAndKiloProfiles() throws {
         let home = try temporaryHome()
         let provisioner = AgentProvisioner(homeDirectory: home)
@@ -383,13 +421,15 @@ final class AgentProvisionerTests: XCTestCase {
         let kilo = try String(contentsOf: home.appending(path: ".config/kilo/kilo.jsonc"), encoding: .utf8)
         let pi = try String(contentsOf: home.appending(path: ".pi/agent/models.json"), encoding: .utf8)
         let continueConfig = try String(contentsOf: home.appending(path: ".continue/config.yaml"), encoding: .utf8)
+        let aiderConfig = try String(contentsOf: home.appending(path: ".aider.conf.yml"), encoding: .utf8)
 
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: opencode), 1)
         XCTAssertEqual(countOccurrences(of: "[model_providers.cursorapi]", in: codex), 1)
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: kilo), 1)
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: pi), 1)
         XCTAssertEqual(countOccurrences(of: "# api-for-cursor-start", in: continueConfig), 1)
-        for currentConfig in [opencode, codex, kilo, pi, continueConfig] {
+        XCTAssertEqual(countOccurrences(of: "# api-for-cursor-aider-start", in: aiderConfig), 1)
+        for currentConfig in [opencode, codex, kilo, pi, continueConfig, aiderConfig] {
             XCTAssertFalse(currentConfig.contains("http://127.0.0.1:8787/v1"))
             XCTAssertTrue(currentConfig.contains("http://127.0.0.1:9999/v1"))
         }
@@ -408,6 +448,7 @@ final class AgentProvisionerTests: XCTestCase {
         try provisioner.install(.kilo, settings: original)
         try provisioner.install(.pi, settings: original)
         try provisioner.install(.continueDev, settings: original)
+        try provisioner.install(.aider, settings: original)
 
         for id in AgentIntegrationID.allCases {
             let status = provisioner.status(for: id, settings: moved)
