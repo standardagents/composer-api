@@ -120,6 +120,42 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(object["missing"] as? [String], [])
     }
 
+    func testStreamingRequestsReturnHTTPErrorWhenSavedKeyIsLocked() async throws {
+        let port = try unusedTCPPort()
+        let settings = CursorAPISettings(
+            port: port,
+            keychainCursorAPIKeyAvailable: true,
+            cursorAPIBaseURL: "https://exchange.example",
+            backendBaseURL: "https://private-backend.example",
+            localAgentEndpoint: "/private/sdk/run"
+        )
+        let server = LocalAPIServer(settingsProvider: { settings })
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let cases = [
+            ("/v1/chat/completions", #"{"model":"composer-2.5","stream":true,"messages":[{"role":"user","content":"hello"}]}"#),
+            ("/v1/responses", #"{"model":"composer-2.5","stream":true,"input":"hello"}"#)
+        ]
+
+        for (path, body) in cases {
+            var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)\(path)")!)
+            request.httpMethod = "POST"
+            request.httpBody = Data(body.utf8)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer cursor-local", forHTTPHeaderField: "Authorization")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let http = try XCTUnwrap(response as? HTTPURLResponse, path)
+            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], path)
+            let error = try XCTUnwrap(object["error"] as? [String: Any], path)
+
+            XCTAssertEqual(http.statusCode, 401, path)
+            XCTAssertEqual(error["code"] as? String, "keychain_locked", path)
+            XCTAssertTrue((error["message"] as? String)?.contains("Unlock Key") == true, path)
+        }
+    }
+
     func testRootEndpointReportsLocalOpenAICompatibilityMetadata() async throws {
         let port = try unusedTCPPort()
         let settings = CursorAPISettings(

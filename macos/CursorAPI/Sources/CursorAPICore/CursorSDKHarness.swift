@@ -2,6 +2,7 @@ import Foundation
 import CryptoKit
 
 public protocol CursorSDKHarness: Sendable {
+    func validate(settings: CursorAPISettings, authorization: String?) throws
     func stream(prepared: PreparedChatRequest, settings: CursorAPISettings, authorization: String?) -> AsyncThrowingStream<CursorSDKStreamEvent, any Error>
 }
 
@@ -12,6 +13,8 @@ public enum CursorSDKStreamEvent: Sendable, Equatable {
 }
 
 public extension CursorSDKHarness {
+    func validate(settings: CursorAPISettings, authorization: String?) throws {}
+
     func complete(prepared: PreparedChatRequest, settings: CursorAPISettings, authorization: String?) async throws -> CursorSDKOutput {
         var text = ""
         var toolCalls: [CursorToolCall] = []
@@ -45,18 +48,22 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
 
     public init() {}
 
+    public func validate(settings: CursorAPISettings, authorization: String?) throws {
+        guard settings.hasCursorSDKConfiguration else {
+            throw CursorAPIError.invalidConfiguration("This \(CursorAPIBrand.displayName) build is missing its bundled Composer transport. Repackage the app with release defaults or inspect Settings > Advanced Transport Overrides.")
+        }
+        let apiKey = try Self.resolvedCursorAPIKeyForRequest(from: authorization, settings: settings)
+        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw CursorAPIError.unauthorized
+        }
+    }
+
     public func stream(prepared: PreparedChatRequest, settings: CursorAPISettings, authorization: String?) -> AsyncThrowingStream<CursorSDKStreamEvent, any Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    guard settings.hasCursorSDKConfiguration else {
-                        throw CursorAPIError.invalidConfiguration("This \(CursorAPIBrand.displayName) build is missing its bundled Composer transport. Repackage the app with release defaults or inspect Settings > Advanced Transport Overrides.")
-                    }
-
+                    try validate(settings: settings, authorization: authorization)
                     let apiKey = try Self.resolvedCursorAPIKeyForRequest(from: authorization, settings: settings)
-                    guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                        throw CursorAPIError.unauthorized
-                    }
                     let agentID = await Self.sessionStore.agentID(for: prepared.sessionKey)
                     let runID = "msg-\(UUID().uuidString.lowercased())"
                     let tokenOrigin = settings.cursorAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)

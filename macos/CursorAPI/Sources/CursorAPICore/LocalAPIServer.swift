@@ -158,6 +158,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 var prepared = try OpenAICompatibility.prepareCompletionRequest(request.body)
                 prepared.sessionKey = sessionAffinity(request)
                 let settings = settingsProvider()
+                try harness.validate(settings: settings, authorization: request.header("authorization"))
                 let id = "cmpl_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
                 let created = Int(Date().timeIntervalSince1970)
                 if prepared.stream {
@@ -174,6 +175,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 var prepared = try OpenAICompatibility.prepareChatRequest(request.body)
                 prepared.sessionKey = sessionAffinity(request)
                 let settings = settingsProvider()
+                try harness.validate(settings: settings, authorization: request.header("authorization"))
                 let id = "chatcmpl_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
                 let created = Int(Date().timeIntervalSince1970)
                 if prepared.stream {
@@ -198,6 +200,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                     }
                 }
                 let settings = settingsProvider()
+                try harness.validate(settings: settings, authorization: request.header("authorization"))
                 let id = "resp_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
                 prepared.sessionKey = await responseSessions.sessionKey(
                     responseID: id,
