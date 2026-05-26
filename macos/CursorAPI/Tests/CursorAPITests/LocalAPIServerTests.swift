@@ -327,6 +327,27 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(text.contains("composer-2.5-fast"))
     }
 
+    func testModelsEndpointAcceptsAbsoluteFormRequestTarget() async throws {
+        let port = try unusedTCPPort()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        let request = [
+            "GET http://127.0.0.1:\(port)/v1/models HTTP/1.1",
+            "Host: 127.0.0.1:\(port)",
+            "Connection: close",
+            "",
+            ""
+        ].joined(separator: "\r\n")
+        let response = try await sendRawHTTPRequest(port: port, request: request)
+
+        XCTAssertTrue(response.hasPrefix("HTTP/1.1 200 OK"), response)
+        XCTAssertTrue(response.contains("composer-2.5"), response)
+        XCTAssertTrue(response.contains("composer-2.5-fast"), response)
+    }
+
     func testModelRetrieveEndpoint() async throws {
         let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness())

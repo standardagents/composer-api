@@ -1048,8 +1048,7 @@ enum HTTPParser {
         guard let requestLine = lines.first else { return nil }
         let parts = requestLine.split(separator: " ", maxSplits: 2)
         guard parts.count >= 2 else { return nil }
-        let target = String(parts[1])
-        let targetParts = target.split(separator: "?", maxSplits: 1).map(String.init)
+        let target = requestTarget(String(parts[1]))
         let headerFields = headerFields(lines)
         let bodyStart = headers.bodyStart
         let body: Data
@@ -1065,8 +1064,8 @@ enum HTTPParser {
         }
         return HTTPRequest(
             method: String(parts[0]),
-            path: targetParts[0],
-            query: targetParts.count > 1 ? targetParts[1] : nil,
+            path: target.path,
+            query: target.query,
             headers: headerFields,
             body: body
         )
@@ -1107,6 +1106,20 @@ enum HTTPParser {
             headers[key] = value
         }
         return headers
+    }
+
+    private static func requestTarget(_ raw: String) -> (path: String, query: String?) {
+        if raw.hasPrefix("http://") || raw.hasPrefix("https://"),
+           let components = URLComponents(string: raw) {
+            let path = components.percentEncodedPath.isEmpty ? "/" : components.percentEncodedPath
+            return (path, components.percentEncodedQuery)
+        }
+
+        let targetParts = raw.split(separator: "?", maxSplits: 1).map(String.init)
+        return (
+            targetParts.first ?? "/",
+            targetParts.count > 1 ? targetParts[1] : nil
+        )
     }
 
     private static func transferEncodingIsChunked(_ value: String?) -> Bool {
