@@ -54,6 +54,7 @@ const SDK_SESSION_TTL_MS = 6 * 60 * 60 * 1000;
 const AGENT_MODE_AGENT = 1;
 const DEFAULT_SDK_CLIENT_VERSION = "sdk-1.0.13";
 const SDK_STREAM_START_TIMEOUT_MS = 25_000;
+const SDK_TOOL_RETRY_ATTEMPTS = 3;
 
 const TOOL_CALL_SPECS: Record<number, ToolSpec> = {
   1: { name: "shell", argsKind: "shell" },
@@ -259,55 +260,69 @@ async function* streamCursorLocalSdkRunWithRetry(
     return;
   }
 
-  const firstEvents: CursorTextEvent[] = [];
-  let sawToolCall = false;
-  let rejectedToolCall: CursorToolCall | undefined;
-  let rejectedToolReason: string | undefined;
-  for await (const event of streamCursorLocalSdkRun(env, deps, accessToken, input)) {
-    firstEvents.push(event);
-    if (event.type === "tool_call") sawToolCall = true;
-    if (event.type === "rejected_tool_call") {
-      rejectedToolCall = event.toolCall;
-      rejectedToolReason = event.reason;
+  let attemptInput = input;
+  let lastEvents: CursorTextEvent[] = [];
+  for (let attempt = 1; attempt <= SDK_TOOL_RETRY_ATTEMPTS; attempt += 1) {
+    const events: CursorTextEvent[] = [];
+    let sawToolCall = false;
+    let rejectedToolCall: CursorToolCall | undefined;
+    let rejectedToolReason: string | undefined;
+    for await (const event of streamCursorLocalSdkRun(env, deps, accessToken, attemptInput)) {
+      events.push(event);
+      if (event.type === "tool_call") sawToolCall = true;
+      if (event.type === "rejected_tool_call") {
+        rejectedToolCall = event.toolCall;
+        rejectedToolReason = event.reason;
+      }
     }
-  }
-  if (sawToolCall) {
-    for (const event of firstEvents) yield event;
-    return;
-  }
 
-  if (rejectedToolCall || input.requiresLocalTool) {
-    yield* streamCursorLocalSdkRun(env, deps, accessToken, {
+    if (sawToolCall) {
+      for (const event of events) yield event;
+      return;
+    }
+
+    lastEvents = events;
+    const shouldRetry = rejectedToolCall || input.requiresLocalTool;
+    if (!shouldRetry || attempt >= SDK_TOOL_RETRY_ATTEMPTS) break;
+    attemptInput = {
       ...input,
       runId: newLocalSdkRunId(deps.randomUUID()),
       prompt: rejectedToolCall
-        ? retryPromptAfterUnsupportedTool(input.prompt, rejectedToolCall, rejectedToolReason)
-        : retryPromptAfterMissingTool(input.prompt)
-    });
-    return;
+        ? retryPromptAfterUnsupportedTool(input.prompt, rejectedToolCall, rejectedToolReason, attempt + 1, SDK_TOOL_RETRY_ATTEMPTS)
+        : retryPromptAfterMissingTool(input.prompt, attempt + 1, SDK_TOOL_RETRY_ATTEMPTS)
+    };
   }
 
-  for (const event of firstEvents) yield event;
+  for (const event of lastEvents) yield event;
 }
 
-function retryPromptAfterMissingTool(prompt: string): string {
+function retryPromptAfterMissingTool(prompt: string, attempt = 2, maxAttempts = SDK_TOOL_RETRY_ATTEMPTS): string {
   return [
     prompt,
     "",
-    "TOOL CALL RETRY:",
+    `TOOL CALL RETRY (attempt ${attempt} of ${maxAttempts}):`,
     "Your previous SDK response did not emit a local tool call, but the latest user request requires local OpenCode execution.",
+    "The next response is invalid unless it contains a tool_call.",
     "Do not answer in prose. Emit exactly one SDK tool call now using the allowed OpenCode tool inventory above, then wait for the local tool result.",
+    "Use SDK mcp for an exact client tool route, or SDK shell/write when the routing map says those built-ins map to the client schema.",
     "If a specific client tool was named in the request, use that exact tool mapping and do not substitute shell, glob, or prose."
   ].join("\n");
 }
 
-function retryPromptAfterUnsupportedTool(prompt: string, toolCall: CursorToolCall, reason?: string): string {
+function retryPromptAfterUnsupportedTool(
+  prompt: string,
+  toolCall: CursorToolCall,
+  reason?: string,
+  attempt = 2,
+  maxAttempts = SDK_TOOL_RETRY_ATTEMPTS
+): string {
   return [
     prompt,
     "",
-    "TOOL CALL RETRY:",
+    `TOOL CALL RETRY (attempt ${attempt} of ${maxAttempts}):`,
     `Your previous SDK response requested ${toolCall.name}, but that tool could not be mapped to the allowed OpenCode tool inventory above.`,
     ...(reason ? [`Mapping failure detail: ${reason}`] : []),
+    "The next response is invalid unless it contains a mappable tool_call.",
     "Do not answer in prose. Emit exactly one SDK tool call that maps to an allowed client tool.",
     "For filesystem mutations, prefer SDK write with path and fileText or SDK shell with command when those capabilities are present.",
     "For OpenCode MCP/server tools exposed as provider_tool names, use SDK mcp with providerIdentifier, toolName, and args."

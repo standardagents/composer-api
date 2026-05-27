@@ -195,8 +195,14 @@ public enum OpenAICompatibility {
             if let toolCalls = item["tool_calls"] as? [[String: Any]] {
                 appendToolCallTranscript(&transcript, role: role, toolCalls: toolCalls)
                 rememberToolCalls(toolCalls, into: &rememberedToolCalls)
+                let requestedTool = explicitlyRequestedToolName(in: latestUserText, tools: tools)
                 if !latestUserText.isEmpty,
-                   toolCalls.contains(where: { isWorkspaceMutationToolCall($0, tools: tools) }) {
+                   toolCalls.contains(where: { toolCall in
+                       isWorkspaceMutationToolCall(toolCall, tools: tools)
+                           || (requestedTool.map { requested in
+                               isSpecificToolCall(toolCall, requestedTool: requested, tools: tools)
+                           } ?? false)
+                   }) {
                     mutationToolCallAfterLatestUser = true
                 }
             }
@@ -1182,8 +1188,8 @@ public enum OpenAICompatibility {
         transcript.append("Client tool targets: \(tools.map(\.name).joined(separator: ", "))")
         transcript.append("These are client execution targets, not the names you should emit.")
         transcript.append("For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching client tool names and schemas.")
-        transcript.append("Prefer each tool's SDK mcp route when you need exact client schema arguments. Built-in SDK routes are fallback compatibility routes.")
-        transcript.append("When the user names a specific allowed client tool, use its SDK mcp route and do not substitute a different tool.")
+        transcript.append("Prefer built-in SDK routes for shell/read/write/edit/glob/grep/ls-style client tools. Use SDK mcp for unique client tools and MCP/server tools.")
+        transcript.append("When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route and do not substitute a different tool.")
         transcript.append("If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool.")
         if hasCompatibleTool("shell", in: tools) {
             transcript.append("A shell client tool is available. For general file creation or overwrite requests, prefer an SDK shell call using mkdir -p and a quoted heredoc.")
@@ -1218,8 +1224,16 @@ public enum OpenAICompatibility {
 
     private static func sdkRoutingRecords(tools: [OpenAIToolSpec], context: ToolCallContext?) -> [[String: Any]] {
         var routes: [[String: Any]] = []
+        for sample in sdkRoutingSamples() {
+            guard let resolved = resolveToolCall(sample, tools: tools, context: context) else { continue }
+            routes.append([
+                "sdk": sample.name,
+                "client": resolved.name,
+                "clientArgs": resolved.arguments.mapValues(\.foundationValue)
+            ])
+        }
         for tool in tools {
-            guard let target = mcpTarget(forClientToolName: tool.name, includeMapped: true) else { continue }
+            guard let target = mcpTarget(forClientToolName: tool.name, includeMapped: false) else { continue }
             routes.append([
                 "sdk": "mcp",
                 "client": tool.name,
@@ -1228,14 +1242,6 @@ public enum OpenAICompatibility {
                     "toolName": target.toolName,
                     "args": "match client schema"
                 ]
-            ])
-        }
-        for sample in sdkRoutingSamples() {
-            guard let resolved = resolveToolCall(sample, tools: tools, context: context) else { continue }
-            routes.append([
-                "sdk": sample.name,
-                "client": resolved.name,
-                "clientArgs": resolved.arguments.mapValues(\.foundationValue)
             ])
         }
         return Array(routes.prefix(24))
@@ -1263,7 +1269,7 @@ public enum OpenAICompatibility {
         var record: [String: Any] = ["name": tool.name]
         if let description = tool.description { record["description"] = description }
         if let parameters = tool.parameters { record["parameters"] = parameters.foundationValue }
-        if let target = mcpTarget(forClientToolName: tool.name, includeMapped: true) {
+        if let target = mcpTarget(forClientToolName: tool.name, includeMapped: false) {
             record["sdk_mcp"] = [
                 "providerIdentifier": target.provider,
                 "toolName": target.toolName,
@@ -1282,22 +1288,22 @@ public enum OpenAICompatibility {
             return
         }
         if hasCompatibleTool("shell", in: tools) {
-            transcript.append("Use the SDK mcp route for the client shell/bash tool when available, or SDK shell as fallback. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("Use SDK shell when it maps to the client shell/bash tool. For unique shell-like client tools, use the SDK mcp route. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
         } else {
-            transcript.append("For creating or overwriting a file, use the SDK mcp route for the client write tool when available, or SDK write as fallback with path and fileText. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("For creating or overwriting a file, use SDK write when it maps to the client write tool. For unique writer tools, use the SDK mcp route with matching arguments. After the client returns a LOCAL TOOL RESULT, continue.")
         }
     }
 
     private static func requestedToolHint(for toolName: String) -> String {
-        if let mcpTarget = mcpTarget(forClientToolName: toolName, includeMapped: true) {
-            return "Use SDK mcp now with providerIdentifier \"\(mcpTarget.provider)\", toolName \"\(mcpTarget.toolName)\", and args matching the \(toolName) schema. Do not use SDK shell/write as a substitute for this explicitly requested client tool."
-        }
         if canonicalToolName(toolName) == "glob", normalizedName(toolName) != "glob" {
             return "Use SDK glob now; it will be forwarded to client tool \(toolName) with arguments matching its schema. Do not substitute shell or prose for this explicitly requested client tool."
         }
         let canonical = canonicalToolName(toolName)
         if isKnownMappedToolName(toolName) {
             return "Use SDK \(canonical) now; it will be forwarded to client tool \(toolName) with arguments matching its schema. Do not substitute a different tool."
+        }
+        if let mcpTarget = mcpTarget(forClientToolName: toolName, includeMapped: false) {
+            return "Use SDK mcp now with providerIdentifier \"\(mcpTarget.provider)\", toolName \"\(mcpTarget.toolName)\", and args matching the \(toolName) schema. Do not use SDK shell/write as a substitute for this explicitly requested client tool."
         }
         return "Use SDK mcp now with providerIdentifier \"client\", toolName \"\(toolName)\", and args matching the \(toolName) schema. Do not substitute a different tool."
     }
@@ -1357,6 +1363,9 @@ public enum OpenAICompatibility {
 
     private static func shouldRequireLocalTool(for text: String, tools: [OpenAIToolSpec]) -> Bool {
         guard !tools.isEmpty else { return false }
+        if explicitlyRequestedToolName(in: text, tools: tools) != nil {
+            return true
+        }
         let lower = text.lowercased()
         let hasPathSignal = lower.contains("~/")
             || lower.contains("/")
@@ -1391,18 +1400,22 @@ public enum OpenAICompatibility {
         guard let items = input as? [Any] else { return false }
         var sawLatestUser = false
         var mutationAfterLatestUser = false
+        var latestUserText = ""
         for item in items {
             if let text = item as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 sawLatestUser = true
                 mutationAfterLatestUser = false
+                latestUserText = text
                 continue
             }
             guard let object = item as? [String: Any] else { continue }
             let type = (object["type"] as? String) ?? ""
             if type == "function_call" {
+                let requestedTool = explicitlyRequestedToolName(in: latestUserText, tools: tools)
                 if sawLatestUser,
                    let name = stringValue(object["name"]),
-                   isWorkspaceMutationToolCall(name: name, arguments: jsonArguments(from: object["arguments"]), tools: tools) {
+                   (isWorkspaceMutationToolCall(name: name, arguments: jsonArguments(from: object["arguments"]), tools: tools)
+                       || requestedTool.map { toolCallMatchesClientTool(name: name, arguments: jsonArguments(from: object["arguments"]), requestedTool: $0, tools: tools) } == true) {
                     mutationAfterLatestUser = true
                 }
                 continue
@@ -1413,10 +1426,26 @@ public enum OpenAICompatibility {
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     sawLatestUser = true
                     mutationAfterLatestUser = false
+                    latestUserText = text
                 }
             }
         }
         return mutationAfterLatestUser
+    }
+
+    private static func isSpecificToolCall(_ toolCall: [String: Any], requestedTool: String, tools: [OpenAIToolSpec]) -> Bool {
+        guard let function = toolCall["function"] as? [String: Any],
+              let name = stringValue(function["name"]) else {
+            return false
+        }
+        return toolCallMatchesClientTool(name: name, arguments: jsonArguments(from: function["arguments"]), requestedTool: requestedTool, tools: tools)
+    }
+
+    private static func toolCallMatchesClientTool(name: String, arguments: [String: JSONValue], requestedTool: String, tools: [OpenAIToolSpec]) -> Bool {
+        if normalizedName(name) == normalizedName(requestedTool) {
+            return true
+        }
+        return resolveToolSpec(name, arguments: arguments, tools: tools).map { normalizedName($0.name) == normalizedName(requestedTool) } ?? false
     }
 
     private static func isWorkspaceMutationToolCall(name: String, arguments: [String: JSONValue], tools: [OpenAIToolSpec]) -> Bool {
@@ -2671,8 +2700,12 @@ public enum OpenAICompatibility {
     private static func absolutizeToolPath(_ value: String, context: ToolCallContext?) -> String {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return trimmed }
-        if trimmed.hasPrefix("~") || trimmed.hasPrefix("$") || trimmed.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#, options: .regularExpression) != nil {
+        if trimmed.hasPrefix("$") || trimmed.range(of: #"^[A-Za-z][A-Za-z0-9+.-]*:"#, options: .regularExpression) != nil {
             return trimmed
+        }
+        if trimmed == "~" || trimmed.hasPrefix("~/") {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            return normalizePosixPath(trimmed == "~" ? home : "\(home)/\(trimmed.dropFirst(2))")
         }
         if trimmed.hasPrefix("/") {
             return normalizePosixPath(trimmed)

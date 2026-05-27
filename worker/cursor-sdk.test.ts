@@ -105,6 +105,8 @@ describe("Cursor SDK harness", () => {
 
     expect(prompt).toContain("Original prompt");
     expect(prompt).toContain("TOOL CALL RETRY");
+    expect(prompt).toContain("attempt 2 of 3");
+    expect(prompt).toContain("The next response is invalid unless it contains a tool_call.");
     expect(prompt).toContain("Do not answer in prose");
     expect(prompt).toContain("Emit exactly one SDK tool call");
   });
@@ -119,6 +121,7 @@ describe("Cursor SDK harness", () => {
     expect(prompt).toContain("shell");
     expect(prompt).toContain("could not be mapped");
     expect(prompt).toContain("Required client arguments");
+    expect(prompt).toContain("mappable tool_call");
     expect(prompt).toContain("allowed OpenCode tool inventory");
   });
 });

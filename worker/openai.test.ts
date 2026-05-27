@@ -149,7 +149,7 @@ describe("OpenAI compatibility adapter", () => {
     expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "src" });
   });
 
-  it("advertises pi find as exact SDK MCP while retaining glob fallback mapping", () => {
+  it("advertises pi find through the native SDK glob route", () => {
     const prepared = prepareOpencodeSdkChatRequest(
       {
         model: "composer-2.5-sdk",
@@ -176,9 +176,9 @@ describe("OpenAI compatibility adapter", () => {
     );
 
     expect(prepared.prompt.text).toContain('"name":"find"');
-    expect(prepared.prompt.text).toContain('"sdk_mcp":{"providerIdentifier":"client","toolName":"find","args":"match this tool schema"}');
-    expect(prepared.prompt.text).toContain('"sdk":"mcp","client":"find","sdkArgs":{"providerIdentifier":"client","toolName":"find","args":"match client schema"}');
-    expect(prepared.prompt.text).toContain('Use SDK mcp now with providerIdentifier "client", toolName "find"');
+    expect(prepared.prompt.text).not.toContain('"sdk_mcp":{"providerIdentifier":"client","toolName":"find"');
+    expect(prepared.prompt.text).toContain('"sdk":"glob","client":"find"');
+    expect(prepared.prompt.text).toContain('Use SDK glob now; it will be forwarded to client tool find');
 
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
@@ -476,6 +476,35 @@ describe("OpenAI compatibility adapter", () => {
       { filePath: "/tmp/project/src/App.tsx" },
       { filePath: "/tmp/project/src/App.tsx", oldString: "return null", newString: "return <main />" },
       { pattern: "**/*.tsx", path: "/tmp/project/src" }
+    ]);
+  });
+
+  it("expands home-relative SDK paths for absolute OpenCode file schemas", () => {
+    const tools = [
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to write" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_home_path",
+      tools,
+      context: { workingDirectory: "/Users/example/project" },
+      toolCalls: [
+        { name: "write", arguments: { path: "~/Desktop/rain-in-spain.html", fileText: "<main>Rain</main>" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { filePath: "/Users/example/Desktop/rain-in-spain.html", content: "<main>Rain</main>" }
     ]);
   });
 
@@ -1002,6 +1031,102 @@ describe("OpenAI compatibility adapter", () => {
     expect(prepared.prompt.text).not.toContain("A file-mutating tool call has already been made");
   });
 
+  it("requires SDK local tools for explicit desktop file writes", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "Please save rain-in-spain.html on ~/Desktop with a short paragraph." }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "bash",
+              description: "Run a shell command",
+              parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.requiresLocalTool).toBe(true);
+    expect(prepared.prompt.text).toContain("SDK WORKSPACE MUTATION REQUIRED:");
+    expect(prepared.prompt.text).toContain("Your next tool call must be write or shell");
+  });
+
+  it("requires SDK local tools for server start requests", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "start the local dev server" }],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "bash",
+              description: "Run a shell command",
+              parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.requiresLocalTool).toBe(true);
+    expect(prepared.prompt.text).toContain("When starting a dev server or other long-running watcher");
+  });
+
+  it("requires SDK local tools for explicitly requested non-mutating tools", () => {
+    const tools = [
+      {
+        type: "function",
+        function: {
+          name: "glob",
+          description: "Find files",
+          parameters: {
+            type: "object",
+            properties: { pattern: { type: "string" }, path: { type: "string" } },
+            required: ["pattern"]
+          }
+        }
+      }
+    ];
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [{ role: "user", content: "Use the glob tool, not bash, to find **/*.tsx files." }],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.requiresLocalTool).toBe(true);
+    expect(prepared.prompt.text).toContain("Use SDK glob now; it will be forwarded to client tool glob");
+
+    const generated = toOpenAiToolCalls({
+      responseId: "chatcmpl_explicit_glob",
+      tools: prepared.tools,
+      toolCalls: [{ name: "mcp", arguments: { providerIdentifier: "client", toolName: "glob", args: { pattern: "**/*.tsx" } } }]
+    });
+    const continued = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "Use the glob tool, not bash, to find **/*.tsx files." },
+          { role: "assistant", content: null, tool_calls: generated },
+          { role: "tool", tool_call_id: generated[0].id, name: "glob", content: "{\"files\":[\"src/App.tsx\"]}" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(continued.requiresLocalTool).toBe(false);
+    expect(continued.prompt.text).not.toContain("No file-mutating tool call has been made yet");
+  });
+
   it("requires SDK workspace mutation for schema-compatible custom writers", () => {
     const prepared = prepareOpencodeSdkChatRequest(
       {
@@ -1165,7 +1290,7 @@ describe("OpenAI compatibility adapter", () => {
 
     expect(prepared.prompt.text).toContain('Use SDK mcp now with providerIdentifier "probe", toolName "write_file"');
     expect(prepared.prompt.text).toContain("Do not use SDK shell/write as a substitute");
-    expect(prepared.prompt.text).toContain("When the user names a specific allowed client tool, use its SDK mcp route");
+    expect(prepared.prompt.text).toContain("When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route");
     expect(prepared.prompt.text).not.toContain('"sdk":"read","client":"probe_write_file"');
     expect(prepared.prompt.text).not.toContain("Your next tool call must be write or shell");
     expect(prepared.requiresLocalTool).toBe(true);

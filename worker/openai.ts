@@ -126,8 +126,9 @@ export function prepareChatRequest(body: unknown, cursorModel: { id: string } | 
   const toolContext = toolCallContextFromMessages(messages);
   const agentMode = options.forceAgentMode === true || tools.length > 0;
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
-  const workspaceMutationRequired = hasWorkspaceMutationIntent(messages) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages, tools);
+  const latestUserText = latestUserTextFromMessages(messages);
+  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
+  const workspaceMutationDone = workspaceMutationRequired && hasRequiredLocalToolCall(messages, tools, latestUserText);
   const transcript: string[] = [tools.length ? TOOL_SYSTEM_DIRECTIVE : agentMode ? AGENT_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
   appendChatTools(transcript, tools, record.tool_choice);
   appendWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone);
@@ -182,9 +183,9 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
   const tools = record.tool_choice === "none" ? [] : parseChatTools(record.tools);
   const toolContext = toolCallContextFromMessages(messages);
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
-  const workspaceMutationRequired = hasWorkspaceMutationIntent(messages) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasWorkspaceMutationToolCall(messages, tools);
   const latestUserText = latestUserTextFromMessages(messages);
+  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
+  const workspaceMutationDone = workspaceMutationRequired && hasRequiredLocalToolCall(messages, tools, latestUserText);
   const transcript: string[] = [
     "You are running through an SDK-compatible OpenCode harness.",
     "OpenCode owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
@@ -255,8 +256,8 @@ export function prepareResponsesRequest(
   const toolContext = toolCallContextFromResponseInput(record.input, record.instructions);
   const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
   const latestUserText = latestUserTextFromResponseInput(record.input);
-  const workspaceMutationRequired = hasResponseWorkspaceMutationIntent(record.input) && hasWorkspaceMutationCapability(tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasResponseWorkspaceMutationToolCall(record.input, tools);
+  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
+  const workspaceMutationDone = workspaceMutationRequired && hasRequiredResponseLocalToolCall(record.input, tools, latestUserText);
   const transcript: string[] = [tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
   appendResponsesToolInventory(transcript, tools, record.tool_choice, toolContext);
   appendResponsesWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
@@ -816,8 +817,8 @@ function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpe
     `Client tool targets: ${tools.map((tool) => tool.name).join(", ")}`,
     "These are client execution targets, not the names you should emit.",
     "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching client tool names and schemas.",
-    "Prefer each tool's SDK mcp route when you need exact client schema arguments. Built-in SDK routes are fallback compatibility routes.",
-    "When the user names a specific allowed client tool, use its SDK mcp route and do not substitute a different tool.",
+    "Prefer built-in SDK routes for shell/read/write/edit/glob/grep/ls-style client tools. Use SDK mcp for unique client tools and MCP/server tools.",
+    "When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route and do not substitute a different tool.",
     "If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool."
   );
   if (hasCompatibleTool("shell", tools)) {
@@ -843,8 +844,8 @@ function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], t
     `Client tool targets: ${tools.map((tool) => tool.name).join(", ")}`,
     "These are OpenCode execution targets, not the names you should emit.",
     "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching OpenCode tool names and schemas.",
-    "Prefer each tool's SDK mcp route when you need exact OpenCode schema arguments. Built-in SDK routes are fallback compatibility routes.",
-    "When the user names a specific allowed client tool, use its SDK mcp route and do not substitute a different tool.",
+    "Prefer built-in SDK routes for shell/read/write/edit/glob/grep/ls-style OpenCode tools. Use SDK mcp for unique OpenCode tools and MCP/server tools.",
+    "When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route and do not substitute a different tool.",
     "For general local work, prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present."
   );
   for (const tool of tools) {
@@ -872,19 +873,6 @@ function appendSdkRoutingMap(transcript: string[], tools: OpenAiToolSpec[], cont
 
 function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): Record<string, unknown>[] {
   const routes: Record<string, unknown>[] = [];
-  for (const tool of tools) {
-    const target = mcpTargetForClientToolName(tool.name, { includeMapped: true });
-    if (!target) continue;
-    routes.push({
-      sdk: "mcp",
-      client: tool.name,
-      sdkArgs: {
-        providerIdentifier: target.provider,
-        toolName: target.toolName,
-        args: "match client schema"
-      }
-    });
-  }
   for (const sample of sdkRoutingSamples()) {
     const tool = resolveToolSpec(sample.name, sample.arguments, tools);
     if (!tool) continue;
@@ -894,6 +882,19 @@ function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): 
       sdk: sample.name,
       client: tool.name,
       clientArgs
+    });
+  }
+  for (const tool of tools) {
+    const target = mcpTargetForClientToolName(tool.name, { includeMapped: false });
+    if (!target) continue;
+    routes.push({
+      sdk: "mcp",
+      client: tool.name,
+      sdkArgs: {
+        providerIdentifier: target.provider,
+        toolName: target.toolName,
+        args: "match client schema"
+      }
     });
   }
   return routes.slice(0, 24);
@@ -916,7 +917,7 @@ function sdkRoutingSamples(): CursorToolCall[] {
 }
 
 function toolInventoryRecord(tool: OpenAiToolSpec, options: { includeSdkMcp: boolean }): Record<string, unknown> {
-  const target = options.includeSdkMcp ? mcpTargetForClientToolName(tool.name, { includeMapped: true }) : undefined;
+  const target = options.includeSdkMcp ? mcpTargetForClientToolName(tool.name, { includeMapped: false }) : undefined;
   return {
     name: tool.name,
     ...(tool.description ? { description: tool.description } : {}),
@@ -955,8 +956,8 @@ function appendResponsesWorkspaceMutationRequirement(
       : requestedTool
         ? requestedToolHint(requestedTool)
         : hasCompatibleTool("shell", tools)
-          ? "Use the SDK mcp route for the client shell/bash tool when available, or SDK shell as fallback. For creating or overwriting files, run mkdir -p for parent directories and write files with quoted heredocs. After function_call_output returns, continue."
-          : "Use the SDK mcp route for the client write tool when available, or SDK write as fallback, with path and fileText. After function_call_output returns, continue."
+          ? "Use SDK shell when it maps to the client shell/bash tool. For unique shell-like client tools, use the SDK mcp route. For creating or overwriting files, run mkdir -p for parent directories and write files with quoted heredocs. After function_call_output returns, continue."
+          : "Use SDK write when it maps to the client write tool. For unique writer tools, use the SDK mcp route with matching arguments. After function_call_output returns, continue."
   );
 }
 
@@ -989,7 +990,7 @@ function appendSdkWorkspaceMutationRequirement(
     "If the workspace is empty, stop probing after the first empty result and create the project files.",
     requestedTool
       ? requestedToolHint(requestedTool)
-      : "Use the SDK mcp route for client write/bash when available, or SDK write/shell as fallback. Do not use edit for new files.",
+      : "Use SDK shell/write when those routes map to client bash/write. Use SDK mcp for unique writer tools. Do not use edit for new files.",
     done
       ? "A file-mutating tool call has already been made. Continue from the returned tool results and run verification commands when needed."
       : requestedTool
@@ -1018,16 +1019,16 @@ function explicitlyRequestedToolName(text: string, tools: OpenAiToolSpec[]): str
 }
 
 function requestedToolHint(toolName: string): string {
-  const target = mcpTargetForClientToolName(toolName, { includeMapped: true });
-  if (target) {
-    return `Use SDK mcp now with providerIdentifier "${target.provider}", toolName "${target.toolName}", and args matching the ${toolName} schema. Do not use SDK shell/write as a substitute for this explicitly requested client tool.`;
-  }
   if (canonicalToolName(toolName) === "glob" && normalizeToolName(toolName) !== "glob") {
     return `Use SDK glob now; it will be forwarded to client tool ${toolName} with arguments matching its schema. Do not substitute shell or prose for this explicitly requested client tool.`;
   }
   const canonical = canonicalToolName(toolName);
   if (isKnownMappedToolName(toolName)) {
     return `Use SDK ${canonical} now; it will be forwarded to client tool ${toolName} with arguments matching its schema. Do not substitute a different tool.`;
+  }
+  const target = mcpTargetForClientToolName(toolName, { includeMapped: false });
+  if (target) {
+    return `Use SDK mcp now with providerIdentifier "${target.provider}", toolName "${target.toolName}", and args matching the ${toolName} schema. Do not use SDK shell/write as a substitute for this explicitly requested client tool.`;
   }
   return `Use SDK mcp now with providerIdentifier "client", toolName "${toolName}", and args matching the ${toolName} schema. Do not substitute a different tool.`;
 }
@@ -1265,16 +1266,41 @@ function contentToTextAndImages(content: unknown, role: string): { text: string;
   return { text: parts.join("\n"), images };
 }
 
-function hasWorkspaceMutationIntent(messages: unknown[]): boolean {
-  const userText = messages
-    .map((message) => (isRecord(message) && message.role === "user" ? contentToPlainText(message.content) : ""))
-    .join("\n")
-    .toLowerCase();
-  return /\b(make|create|build|add|write|generate|scaffold|implement|set up|setup)\b/.test(userText);
+function shouldRequireLocalTool(text: string, tools: OpenAiToolSpec[]): boolean {
+  if (!tools.length) return false;
+  if (explicitlyRequestedToolName(text, tools)) return true;
+  const lower = text.toLowerCase();
+  const hasPathSignal =
+    lower.includes("~/") ||
+    lower.includes("/") ||
+    lower.includes("desktop") ||
+    lower.includes("file") ||
+    lower.includes("folder") ||
+    lower.includes("directory") ||
+    /\b[\w.-]+\.(html|css|js|ts|tsx|jsx|json|md|txt|py|rb|go|rs|swift|toml|ya?ml)\b/.test(lower);
+  const wantsFileMutation = /\b(create|write|save|overwrite|edit|modify|update|delete|remove|make)\b/.test(lower);
+  if (hasPathSignal && wantsFileMutation && hasWorkspaceMutationCapability(tools)) return true;
+
+  const wantsProjectScaffold =
+    /\b(build|create|make|scaffold|generate|implement|setup|set up)\b/.test(lower) &&
+    /\b(app|application|site|website|project|component|page|vite|react|next|vue|svelte|todo|dashboard|cli)\b/.test(lower);
+  if (wantsProjectScaffold && hasWorkspaceMutationCapability(tools)) return true;
+
+  const wantsCommand = /\b(run|execute|start|launch)\b/.test(lower) &&
+    (lower.includes("command") || lower.includes("shell") || lower.includes("terminal") || lower.includes("server"));
+  return wantsCommand && hasCompatibleTool("shell", tools);
 }
 
-function hasResponseWorkspaceMutationIntent(input: unknown): boolean {
-  return /\b(make|create|build|add|write|generate|scaffold|implement|set up|setup)\b/.test(latestUserTextFromResponseInput(input).toLowerCase());
+function hasRequiredLocalToolCall(messages: unknown[], tools: OpenAiToolSpec[], latestUserText: string): boolean {
+  const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
+  if (requestedTool) return hasSpecificToolCallAfterLatestUser(messages, requestedTool, tools);
+  return hasWorkspaceMutationToolCall(messages, tools);
+}
+
+function hasRequiredResponseLocalToolCall(input: unknown, tools: OpenAiToolSpec[], latestUserText: string): boolean {
+  const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
+  if (requestedTool) return hasSpecificResponseToolCallAfterLatestUser(input, requestedTool, tools);
+  return hasResponseWorkspaceMutationToolCall(input, tools);
 }
 
 function latestUserTextFromMessages(messages: unknown[]): string {
@@ -1324,6 +1350,29 @@ function hasWorkspaceMutationToolCall(messages: unknown[], tools: OpenAiToolSpec
   return mutationAfterLatestUser;
 }
 
+function hasSpecificToolCallAfterLatestUser(messages: unknown[], requestedTool: string, tools: OpenAiToolSpec[] = []): boolean {
+  let sawLatestUser = false;
+  let foundAfterLatestUser = false;
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const role = typeof message.role === "string" ? message.role : "user";
+    if (role === "user" && contentToPlainText(message.content).trim()) {
+      sawLatestUser = true;
+      foundAfterLatestUser = false;
+    }
+    if (!sawLatestUser || !Array.isArray(message.tool_calls)) continue;
+    for (const toolCall of message.tool_calls) {
+      if (!isRecord(toolCall)) continue;
+      const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
+      if (!fn || typeof fn.name !== "string") continue;
+      if (toolCallMatchesClientTool(fn.name, parseToolCallArguments(fn.arguments), requestedTool, tools)) {
+        foundAfterLatestUser = true;
+      }
+    }
+  }
+  return foundAfterLatestUser;
+}
+
 function hasResponseWorkspaceMutationToolCall(input: unknown, tools: OpenAiToolSpec[] = []): boolean {
   if (!Array.isArray(input)) return false;
   let sawLatestUser = false;
@@ -1347,6 +1396,41 @@ function hasResponseWorkspaceMutationToolCall(input: unknown, tools: OpenAiToolS
     if (isWorkspaceMutationToolCall(item.name, item.arguments, tools)) mutationAfterLatestUser = true;
   }
   return mutationAfterLatestUser;
+}
+
+function hasSpecificResponseToolCallAfterLatestUser(input: unknown, requestedTool: string, tools: OpenAiToolSpec[] = []): boolean {
+  if (!Array.isArray(input)) return false;
+  let sawLatestUser = false;
+  let foundAfterLatestUser = false;
+  for (const item of input) {
+    if (typeof item === "string") {
+      if (item.trim()) {
+        sawLatestUser = true;
+        foundAfterLatestUser = false;
+      }
+      continue;
+    }
+    if (!isRecord(item)) continue;
+    if (item.type === "message" || typeof item.role === "string") {
+      const role = typeof item.role === "string" ? item.role : "user";
+      if (role === "user" && contentToPlainText(item.content).trim()) {
+        sawLatestUser = true;
+        foundAfterLatestUser = false;
+      }
+      continue;
+    }
+    if (!sawLatestUser || item.type !== "function_call" || typeof item.name !== "string") continue;
+    if (toolCallMatchesClientTool(item.name, parseToolCallArguments(item.arguments), requestedTool, tools)) {
+      foundAfterLatestUser = true;
+    }
+  }
+  return foundAfterLatestUser;
+}
+
+function toolCallMatchesClientTool(name: string, args: Record<string, unknown>, requestedTool: string, tools: OpenAiToolSpec[]): boolean {
+  if (normalizeToolName(name) === normalizeToolName(requestedTool)) return true;
+  const resolved = tools.length ? resolveToolSpec(name, args, tools) : undefined;
+  return normalizeToolName(resolved?.name || "") === normalizeToolName(requestedTool);
 }
 
 function isWorkspaceMutationToolCall(name: string, args: unknown, tools: OpenAiToolSpec[] = []): boolean {
@@ -2758,11 +2842,22 @@ function toolPropertyPrefersAbsolutePath(tool: OpenAiToolSpec | undefined, prope
 
 function absolutizeToolPath(value: string, context?: ToolCallContext): string {
   const trimmed = value.trim();
-  if (!trimmed || /^(?:[a-z][a-z0-9+.-]*:|~|\$)/i.test(trimmed)) return trimmed;
+  if (!trimmed || /^(?:[a-z][a-z0-9+.-]*:|\$)/i.test(trimmed)) return trimmed;
+  if (trimmed === "~" || trimmed.startsWith("~/")) {
+    const home = homeDirectoryFromContext(context);
+    if (!home) return trimmed;
+    return normalizePosixPath(trimmed === "~" ? home : `${home}/${trimmed.slice(2)}`);
+  }
   if (trimmed.startsWith("/")) return normalizePosixPath(trimmed);
   const base = sanitizeContextPath(context?.workingDirectory);
   if (!base || !base.startsWith("/")) return trimmed;
   return normalizePosixPath(`${base.replace(/\/+$/, "")}/${trimmed}`);
+}
+
+function homeDirectoryFromContext(context?: ToolCallContext): string | undefined {
+  const base = sanitizeContextPath(context?.workingDirectory);
+  if (!base?.startsWith("/")) return undefined;
+  return /^\/Users\/[^/]+/.exec(base)?.[0] ?? /^\/home\/[^/]+/.exec(base)?.[0];
 }
 
 function normalizePosixPath(value: string): string {

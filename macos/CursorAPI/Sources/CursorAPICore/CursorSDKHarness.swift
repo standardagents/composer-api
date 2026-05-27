@@ -45,6 +45,7 @@ public extension CursorSDKHarness {
 public struct LocalCursorSDKHarness: CursorSDKHarness {
     private static let sessionStore = CursorSDKSessionStore(maxEntries: 512)
     private static let accessTokenCache = CursorSDKAccessTokenCache(ttl: 10 * 60, maxEntries: 64)
+    private static let toolRetryAttempts = 3
 
     public init() {}
 
@@ -123,37 +124,45 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             )
         }
 
-        let buffered = LockedEventBuffer()
-        let first = try await runSDKRequest(
-            agentID: agentID,
-            runID: runID,
-            prepared: prepared,
-            accessToken: accessToken,
-            settings: settings,
-            onEvent: { buffered.append($0) }
-        )
-        let unsupportedToolCall = first.toolCalls.first { !OpenAICompatibility.canMapToolCall($0, tools: prepared.tools, context: prepared.toolContext) }
-        if !first.toolCalls.isEmpty, unsupportedToolCall == nil {
-            for event in buffered.events() {
-                onEvent(event)
+        var attemptPrepared = prepared
+        for attempt in 1...Self.toolRetryAttempts {
+            let buffered = LockedEventBuffer()
+            let output = try await runSDKRequest(
+                agentID: agentID,
+                runID: attempt == 1 ? runID : Self.newRunID(),
+                prepared: attemptPrepared,
+                accessToken: accessToken,
+                settings: settings,
+                onEvent: { buffered.append($0) }
+            )
+            let unsupportedToolCall = output.toolCalls.first { !OpenAICompatibility.canMapToolCall($0, tools: prepared.tools, context: prepared.toolContext) }
+            if !output.toolCalls.isEmpty, unsupportedToolCall == nil {
+                for event in buffered.events() {
+                    onEvent(event)
+                }
+                return output
             }
-            return first
-        }
-        guard unsupportedToolCall != nil || shouldRetryMissing else {
-            for event in buffered.events() {
-                onEvent(event)
+
+            let needsRetry = unsupportedToolCall != nil || shouldRetryMissing
+            guard needsRetry, attempt < Self.toolRetryAttempts else {
+                for event in buffered.events() {
+                    onEvent(event)
+                }
+                return output
             }
-            return first
+
+            var retry = prepared
+            retry.prompt = unsupportedToolCall.map {
+                retryPrompt(afterUnsupportedToolCall: $0, prepared: prepared, attempt: attempt + 1)
+            } ?? retryPrompt(afterMissingToolAttempt: prepared, attempt: attempt + 1)
+            retry.promptCharacters = retry.prompt.count
+            attemptPrepared = retry
         }
 
-        var retry = prepared
-        retry.prompt = unsupportedToolCall.map { retryPrompt(afterUnsupportedToolCall: $0, prepared: prepared) }
-            ?? retryPrompt(afterMissingToolAttempt: prepared)
-        retry.promptCharacters = retry.prompt.count
         return try await runSDKRequest(
             agentID: agentID,
             runID: Self.newRunID(),
-            prepared: retry,
+            prepared: prepared,
             accessToken: accessToken,
             settings: settings,
             onEvent: onEvent
@@ -164,24 +173,27 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         !prepared.tools.isEmpty && prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST")
     }
 
-    private func retryPrompt(afterMissingToolAttempt prepared: PreparedChatRequest) -> String {
+    private func retryPrompt(afterMissingToolAttempt prepared: PreparedChatRequest, attempt: Int) -> String {
         [
             prepared.prompt,
             "",
-            "TOOL CALL RETRY:",
+            "TOOL CALL RETRY (attempt \(attempt) of \(Self.toolRetryAttempts)):",
             "Your previous SDK response did not emit a local tool call, but the latest user request requires local execution.",
+            "The next response is invalid unless it contains a tool_call.",
             "Do not answer in prose. Emit exactly one SDK tool call now using the allowed client tool inventory above, then wait for the local tool result.",
+            "Use SDK mcp for an exact client tool route, or SDK shell/write when the routing map says those built-ins map to the client schema.",
             "If a specific client tool was named in the request, use that exact tool mapping and do not substitute shell, glob, or prose."
         ].joined(separator: "\n")
     }
 
-    private func retryPrompt(afterUnsupportedToolCall toolCall: CursorToolCall, prepared: PreparedChatRequest) -> String {
+    private func retryPrompt(afterUnsupportedToolCall toolCall: CursorToolCall, prepared: PreparedChatRequest, attempt: Int) -> String {
         [
             prepared.prompt,
             "",
-            "TOOL CALL RETRY:",
+            "TOOL CALL RETRY (attempt \(attempt) of \(Self.toolRetryAttempts)):",
             "Your previous SDK response requested \(toolCall.name), but that tool could not be mapped to the allowed client tool inventory above.",
             "Mapping failure detail: \(OpenAICompatibility.toolCallRetryHint(toolCall, tools: prepared.tools, context: prepared.toolContext))",
+            "The next response is invalid unless it contains a mappable tool_call.",
             "Do not answer in prose. Emit exactly one SDK tool call that maps to an allowed client tool.",
             "For filesystem mutations, prefer SDK write with path and fileText or SDK shell with command when those capabilities are present.",
             "For OpenCode MCP/server tools exposed as provider_tool names, use SDK mcp with providerIdentifier, toolName, and args."
