@@ -315,6 +315,34 @@ JSON
   cat "$pi_output"
   grep -F "pismoke" "$pi_output" >/dev/null || fail "pi did not surface the live Composer response"
   echo "Verified live pi response through API for Cursor."
+
+  pi_tool_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-pi-tool-project.XXXXXX")"
+  pi_tool_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-pi-tool-run.XXXXXX")"
+  TEMP_DIRS+=("$pi_tool_project")
+  TEMP_FILES+=("$pi_tool_output")
+  (
+    cd "$pi_tool_project"
+    HOME="$pi_home" PI_CODING_AGENT_DIR="$pi_agent_dir" \
+      pi --provider cursorapi --model composer-2.5-fast --no-session -p \
+        "Use your write tool to create pi-tool-smoke.txt in the current directory containing exactly PI_TOOL_OK. Then reply exactly: PI_TOOL_DONE" >"$pi_tool_output" 2>&1
+  ) &
+  pi_tool_pid=$!
+  deadline=$((SECONDS + TIMEOUT_SECONDS))
+  while kill -0 "$pi_tool_pid" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "$pi_tool_pid" >/dev/null 2>&1 || true
+      wait "$pi_tool_pid" >/dev/null 2>&1 || true
+      cat "$pi_tool_output"
+      fail "pi live tool run did not finish before timeout"
+    fi
+    sleep 0.5
+  done
+  wait "$pi_tool_pid" >/dev/null 2>&1 || true
+  cat "$pi_tool_output"
+  [ -f "$pi_tool_project/pi-tool-smoke.txt" ] || fail "pi did not create the live tool smoke file"
+  [ "$(cat "$pi_tool_project/pi-tool-smoke.txt")" = "PI_TOOL_OK" ] || fail "pi live tool smoke file had unexpected contents"
+  grep -F "PI_TOOL_DONE" "$pi_tool_output" >/dev/null || fail "pi did not finish after live tool execution"
+  echo "Verified live pi tool execution through API for Cursor."
 else
   echo "Skipping live pi check; pi is not installed."
 fi
@@ -377,6 +405,42 @@ TOML
     fail "Codex live run reported an error"
   fi
   echo "Verified live Codex response through API for Cursor."
+
+  codex_tool_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-codex-tool-project.XXXXXX")"
+  codex_tool_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-codex-tool-run.XXXXXX")"
+  codex_tool_last_message="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-codex-tool-last-message.XXXXXX")"
+  TEMP_DIRS+=("$codex_tool_project")
+  TEMP_FILES+=("$codex_tool_output" "$codex_tool_last_message")
+  (
+    cd "$codex_tool_project"
+    HOME="$codex_home" CODEX_HOME="$codex_home/.codex" \
+      codex -a never -s workspace-write exec \
+        --skip-git-repo-check \
+        --ignore-rules \
+        --ephemeral \
+        --profile cursorapi-fast \
+        --output-last-message "$codex_tool_last_message" \
+        "Create a file named codex-tool-smoke.txt in the current directory containing exactly CODEX_TOOL_OK. Then reply exactly: CODEX_TOOL_DONE" >"$codex_tool_output" 2>&1
+  ) &
+  codex_tool_pid=$!
+  deadline=$((SECONDS + TIMEOUT_SECONDS))
+  while kill -0 "$codex_tool_pid" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      kill "$codex_tool_pid" >/dev/null 2>&1 || true
+      wait "$codex_tool_pid" >/dev/null 2>&1 || true
+      cat "$codex_tool_output"
+      fail "Codex live tool run did not finish before timeout"
+    fi
+    sleep 0.5
+  done
+  wait "$codex_tool_pid" >/dev/null 2>&1 || true
+  cat "$codex_tool_output"
+  [ -f "$codex_tool_project/codex-tool-smoke.txt" ] || fail "Codex did not create the live tool smoke file"
+  [ "$(cat "$codex_tool_project/codex-tool-smoke.txt")" = "CODEX_TOOL_OK" ] || fail "Codex live tool smoke file had unexpected contents"
+  if ! grep -F "CODEX_TOOL_DONE" "$codex_tool_last_message" "$codex_tool_output" >/dev/null; then
+    fail "Codex did not finish after live tool execution"
+  fi
+  echo "Verified live Codex tool execution through API for Cursor."
 else
   echo "Skipping live Codex check; codex is not installed."
 fi
