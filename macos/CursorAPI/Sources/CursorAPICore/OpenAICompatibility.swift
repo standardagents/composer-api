@@ -1749,13 +1749,13 @@ public enum OpenAICompatibility {
             copy("offset", as: ["start", "startLine", "start_line"])
         case "glob":
             let glob = normalizedGlobArguments(arguments)
-            if let patternKey = propertyName(matching: ["pattern", "globPattern", "glob_pattern", "glob"], in: properties) {
+            if let patternKey = propertyName(matching: globPatternAliases(), in: properties) {
                 let pattern = glob.pattern ?? .string("**/*")
                 output[patternKey] = pattern
             }
             if let searchPath = glob.searchPath,
                shouldIncludeOptionalPath(searchPath),
-               let pathKey = propertyName(matching: ["path", "targetDirectory", "target_directory", "directory", "cwd"], in: properties) {
+               let pathKey = propertyName(matching: globPathAliases(), in: properties) {
                 output[pathKey] = searchPath
             }
             consumed.formUnion(glob.consumed)
@@ -1957,12 +1957,12 @@ public enum OpenAICompatibility {
         let properties = parameterPropertyNames(tool)
         guard !properties.isEmpty else { return arguments }
         var output: [String: JSONValue] = [:]
-        if let patternKey = propertyName(matching: ["pattern", "globPattern", "glob_pattern", "glob"], in: properties) {
+        if let patternKey = propertyName(matching: globPatternAliases(), in: properties) {
             output[patternKey] = .string(arguments.isEmpty ? "**/*" : "*")
         }
-        if let path = firstArgument(in: arguments, keys: pathPropertyAliases() + ["directory", "dir"])?.value,
+        if let path = firstArgument(in: arguments, keys: globPathAliases())?.value,
            shouldIncludeOptionalPath(path),
-           let pathKey = propertyName(matching: ["path", "targetDirectory", "target_directory", "directory", "cwd"], in: properties) {
+           let pathKey = propertyName(matching: globPathAliases(), in: properties) {
             output[pathKey] = path
         }
         return output.isEmpty ? arguments : output
@@ -2006,8 +2006,8 @@ public enum OpenAICompatibility {
     }
 
     private static func normalizedGlobArguments(_ arguments: [String: JSONValue]) -> GlobArguments {
-        let patternKeys = ["globPattern", "glob_pattern", "pattern", "glob"]
-        let pathKeys = ["targetDirectory", "target_directory", "directory", "cwd", "path"]
+        let patternKeys = globPatternAliases()
+        let pathKeys = globPathAliases()
         var pattern = firstArgument(in: arguments, keys: patternKeys)
         var searchPath = firstArgument(in: arguments, keys: pathKeys)
         var consumed = Set<String>()
@@ -2491,7 +2491,7 @@ public enum OpenAICompatibility {
         case "grep":
             return has(["pattern", "query", "regex"])
         case "glob":
-            return has(["globPattern", "glob_pattern", "pattern", "glob"])
+            return has(globPatternAliases(includeQuery: false)) || (canonicalToolName(tool.name) == "glob" && has(["query"]))
         case "ls":
             return has(pathPropertyAliases() + ["directory", "dir"])
         case "readlints":
@@ -2590,12 +2590,12 @@ public enum OpenAICompatibility {
             return ["newString", "replacement", "content", "text"]
         case "oldcontents", "oldstring", "oldtext", "searchstring":
             return ["oldString", "old", "search", "text"]
-        case "glob", "globpattern", "include":
-            return ["include", "pattern", "glob"]
+        case "glob", "globpattern", "filepattern", "include":
+            return ["include", "pattern", "glob", "filePattern", "file_pattern", "query"]
         case "pattern", "query", "regex", "search":
             return ["pattern", "query", "regex", "search", "prompt"]
-        case "targetdirectory", "targeting", "directory", "cwd", "workingdirectory", "workdir":
-            return ["path", "directory", "cwd", "workdir", "filePath", "pattern"]
+        case "targetdirectory", "targeting", "searchpath", "basepath", "root", "rootdir", "directory", "cwd", "workingdirectory", "workdir":
+            return ["path", "directory", "cwd", "workdir", "filePath", "searchPath", "search_path", "basePath", "base_path", "root", "rootDir", "root_dir", "pattern"]
         case "prompt", "instructions":
             return ["prompt", "description", "instructions", "query"]
         case "tasks", "todo", "items":
@@ -2610,11 +2610,11 @@ public enum OpenAICompatibility {
     private static func toolSpecificArgumentAliases(toolName: String, normalizedKey: String) -> [String] {
         switch canonicalToolName(toolName) {
         case "glob":
-            if ["globpattern", "glob", "include", "pattern"].contains(normalizedKey) {
-                return ["pattern", "glob", "include"]
+            if ["globpattern", "filepattern", "glob", "include", "pattern", "query"].contains(normalizedKey) {
+                return ["pattern", "glob", "filePattern", "file_pattern", "query", "include"]
             }
-            if ["targeting", "targetdirectory", "cwd", "directory", "path"].contains(normalizedKey) {
-                return ["path", "directory", "cwd"]
+            if ["targeting", "targetdirectory", "searchpath", "basepath", "root", "rootdir", "cwd", "directory", "path"].contains(normalizedKey) {
+                return ["path", "directory", "cwd", "searchPath", "search_path", "basePath", "base_path", "root", "rootDir", "root_dir"]
             }
         case "grep":
             if ["query", "search", "searchstring", "regex", "pattern"].contains(normalizedKey) {
@@ -2716,6 +2716,19 @@ public enum OpenAICompatibility {
 
     private static func pathPropertyAliases() -> [String] {
         ["path", "file_path", "filePath", "filename", "file"]
+    }
+
+    private static func globPatternAliases(includeQuery: Bool = true) -> [String] {
+        var aliases = ["globPattern", "glob_pattern", "filePattern", "file_pattern", "pattern", "glob"]
+        if includeQuery {
+            aliases.append("query")
+        }
+        aliases.append(contentsOf: ["include", "includeGlob", "include_glob"])
+        return aliases
+    }
+
+    private static func globPathAliases() -> [String] {
+        ["targetDirectory", "target_directory", "directory", "cwd", "path", "root", "rootDir", "root_dir", "basePath", "base_path", "searchPath", "search_path"]
     }
 
     private static func normalizedName(_ value: String) -> String {

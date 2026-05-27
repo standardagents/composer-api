@@ -1779,7 +1779,7 @@ function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boole
     case "grep":
       return has(["pattern", "query", "regex", "search"]);
     case "glob":
-      return has(["globPattern", "glob_pattern", "pattern", "glob"]);
+      return has(globPatternCandidates({ includeQuery: false })) || (canonicalToolName(tool.name) === "glob" && has(["query"]));
     case "ls":
       return has([...pathCandidates(), "directory", "dir"]);
     case "readlints":
@@ -1912,9 +1912,28 @@ function shouldIncludeOptionalPath(value: unknown): boolean {
   return trimmed.toLowerCase() !== "undefined" && trimmed.toLowerCase() !== "null";
 }
 
+function globPatternCandidates(options: { includeQuery?: boolean } = {}): string[] {
+  return [
+    "globPattern",
+    "glob_pattern",
+    "filePattern",
+    "file_pattern",
+    "pattern",
+    "glob",
+    ...(options.includeQuery === false ? [] : ["query"]),
+    "include",
+    "includeGlob",
+    "include_glob"
+  ];
+}
+
+function globPathCandidates(): string[] {
+  return ["targetDirectory", "target_directory", "directory", "cwd", "path", "root", "rootDir", "root_dir", "basePath", "base_path", "searchPath", "search_path"];
+}
+
 function normalizedGlobArguments(args: Record<string, unknown>): { pattern?: string; path?: string } {
-  let pattern = firstStringArg(args, "globPattern", "glob_pattern", "pattern", "glob");
-  let targetPath = firstStringArg(args, "targetDirectory", "target_directory", "directory", "cwd", "path");
+  let pattern = firstStringArg(args, ...globPatternCandidates());
+  let targetPath = firstStringArg(args, ...globPathCandidates());
   if (targetPath && looksLikeGlobPattern(targetPath) && !looksLikeGlobPattern(pattern || "")) {
     const nextPattern = targetPath;
     targetPath = pattern;
@@ -1939,10 +1958,10 @@ function listAsGlobArguments(args: Record<string, unknown>, tool: OpenAiToolSpec
   const schema = toolParameterSchema(tool);
   const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
   const output: Record<string, unknown> = {};
-  const patternKey = firstMatchingProperty(["pattern", "globPattern", "glob_pattern", "glob"], schema.properties, normalizedProperties);
+  const patternKey = firstMatchingProperty(globPatternCandidates(), schema.properties, normalizedProperties);
   if (patternKey) output[patternKey] = Object.keys(args).length ? "*" : "**/*";
-  const path = firstArg(args, [...pathCandidates(), "directory", "dir"]);
-  const pathKey = firstMatchingProperty(["path", "targetDirectory", "target_directory", "directory", "cwd"], schema.properties, normalizedProperties);
+  const path = firstArg(args, globPathCandidates());
+  const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
   if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = path;
   return Object.keys(output).length ? output : args;
 }
@@ -1952,9 +1971,9 @@ function globArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | und
   const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
   const output: Record<string, unknown> = {};
   const { pattern, path } = normalizedGlobArguments(args);
-  const patternKey = firstMatchingProperty(["pattern", "globPattern", "glob_pattern", "glob"], schema.properties, normalizedProperties);
+  const patternKey = firstMatchingProperty(globPatternCandidates(), schema.properties, normalizedProperties);
   if (patternKey) output[patternKey] = pattern || "*";
-  const pathKey = firstMatchingProperty(["path", "targetDirectory", "target_directory", "directory", "cwd"], schema.properties, normalizedProperties);
+  const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
   if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = path;
   return Object.keys(output).length ? output : args;
 }
@@ -2341,8 +2360,10 @@ function applyRequiredToolDefaults(
       next[commandKey] = firstStringArg(originalArgs, "command", "cmd", "script", "input") || "";
     }
   } else if (["glob", "fileglob", "filesearch", "findfiles"].includes(normalizedTool)) {
-    if (required.includes("pattern") && typeof next.pattern !== "string") {
-      next.pattern = firstStringArg(originalArgs, "globPattern", "glob", "include", "pattern") || "*";
+    const normalizedProperties = new Map(required.map((property) => [normalizeToolName(property), property]));
+    const patternKey = firstMatchingProperty(globPatternCandidates(), required, normalizedProperties);
+    if (patternKey && typeof next[patternKey] !== "string") {
+      next[patternKey] = firstStringArg(originalArgs, ...globPatternCandidates()) || "*";
     }
   }
   return next;
@@ -2509,9 +2530,10 @@ function commonArgumentAliases(normalized: string): Array<{ candidates: string[]
     filetext: [{ candidates: ["content", "contents", "text", "newString", "fileText", "file_text"], priority: 95 }],
     filepath: [{ candidates: ["filePath", "path", "file", "filename"], priority: 90 }],
     filename: [{ candidates: ["filePath", "path", "file", "filename"], priority: 75 }],
-    glob: [{ candidates: ["pattern", "glob", "include"], priority: 85 }],
-    globpattern: [{ candidates: ["pattern", "glob", "include"], priority: 95 }],
-    include: [{ candidates: ["include", "pattern", "glob"], priority: 70 }],
+    filepattern: [{ candidates: ["filePattern", "file_pattern", "pattern", "glob", "query", "include"], priority: 90 }],
+    glob: [{ candidates: ["pattern", "glob", "filePattern", "file_pattern", "query", "include"], priority: 85 }],
+    globpattern: [{ candidates: ["pattern", "glob", "filePattern", "file_pattern", "query", "include"], priority: 95 }],
+    include: [{ candidates: ["include", "pattern", "glob", "filePattern", "file_pattern", "query"], priority: 70 }],
     newcontents: [{ candidates: ["content", "newString", "replacement", "text"], priority: 85 }],
     newstring: [{ candidates: ["newString", "replacement", "content"], priority: 95 }],
     newtext: [{ candidates: ["newString", "replacement", "content", "text"], priority: 85 }],
@@ -2525,7 +2547,8 @@ function commonArgumentAliases(normalized: string): Array<{ candidates: string[]
     script: [{ candidates: ["command", "script", "cmd"], priority: 75 }],
     search: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 70 }],
     searchstring: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 80 }],
-    targetdirectory: [{ candidates: ["directory", "cwd", "path", "pattern"], priority: 55 }],
+    searchpath: [{ candidates: ["searchPath", "search_path", "basePath", "base_path", "root", "rootDir", "root_dir", "directory", "cwd", "path"], priority: 80 }],
+    targetdirectory: [{ candidates: ["directory", "cwd", "path", "searchPath", "search_path", "basePath", "base_path", "root"], priority: 55 }],
     targetfile: [{ candidates: ["filePath", "path", "file", "filename"], priority: 90 }],
     targeting: [{ candidates: ["path", "directory", "cwd", "pattern", "filePath"], priority: 45 }],
     url: [{ candidates: ["url", "uri", "href"], priority: 90 }]
@@ -2541,11 +2564,11 @@ function commonArgumentAliases(normalized: string): Array<{ candidates: string[]
 
 function toolSpecificArgumentAliases(tool: string, normalized: string): Array<{ candidates: string[]; priority: number }> {
   if (["glob", "fileglob", "filesearch", "findfiles"].includes(tool)) {
-    if (["globpattern", "glob", "include", "pattern"].includes(normalized)) {
-      return [{ candidates: ["pattern", "glob", "include"], priority: 98 }];
+    if (["globpattern", "filepattern", "glob", "include", "pattern", "query"].includes(normalized)) {
+      return [{ candidates: ["pattern", "glob", "filePattern", "file_pattern", "query", "include"], priority: 98 }];
     }
-    if (["targeting", "targetdirectory", "cwd", "directory", "path"].includes(normalized)) {
-      return [{ candidates: ["pattern", "path", "directory", "cwd"], priority: 40 }];
+    if (["targeting", "targetdirectory", "searchpath", "basepath", "root", "rootdir", "cwd", "directory", "path"].includes(normalized)) {
+      return [{ candidates: ["path", "directory", "cwd", "searchPath", "search_path", "basePath", "base_path", "root", "rootDir", "root_dir"], priority: 40 }];
     }
   }
   if (["grep", "search", "searchfiles"].includes(tool)) {

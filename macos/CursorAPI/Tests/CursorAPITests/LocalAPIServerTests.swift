@@ -2141,6 +2141,97 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(arguments["path"])
     }
 
+    func testChatToolCallsMapSDKGlobToQueryBasedFileSearchSchema() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"find source files"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"file_search",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "query":{"type":"string"},
+                    "basePath":{"type":"string"}
+                  },
+                  "required":["query"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "glob", arguments: [
+            "globPattern": .string("**/*.tsx"),
+            "targetDirectory": .string("src")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "file_search")
+        XCTAssertEqual(arguments["query"] as? String, "**/*.tsx")
+        XCTAssertEqual(arguments["basePath"] as? String, "src")
+    }
+
+    func testChatToolCallsMapSDKListToQueryBasedFileSearchSchema() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"list source files"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"find_files",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "filePattern":{"type":"string"},
+                    "root":{"type":"string"}
+                  },
+                  "required":["filePattern"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "ls", arguments: ["path": .string("src")])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "find_files")
+        XCTAssertEqual(arguments["filePattern"] as? String, "*")
+        XCTAssertEqual(arguments["root"] as? String, "src")
+    }
+
     func testChatToolCallsMapSDKFileOperationsToAnthropicTextEditorSchema() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {

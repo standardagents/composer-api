@@ -1003,6 +1003,74 @@ describe("OpenAI compatibility adapter", () => {
     expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "*" });
   });
 
+  it("maps SDK glob calls to query-based file search schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "file_search",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              query: { type: "string" },
+              basePath: { type: "string" }
+            },
+            required: ["query"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx", targetDirectory: "src" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("file_search");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ query: "**/*.tsx", basePath: "src" });
+  });
+
+  it("maps SDK ls calls to query-based file search schemas", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "find_files",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              filePattern: { type: "string" },
+              root: { type: "string" }
+            },
+            required: ["filePattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "ls", arguments: { path: "src" } }]
+    });
+
+    expect(toolCalls[0].function.name).toBe("find_files");
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ filePattern: "*", root: "src" });
+  });
+
+  it("does not map SDK glob calls to generic semantic query tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "semantic_search",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: { query: { type: "string" } },
+            required: ["query"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx" } }]
+    });
+
+    expect(toolCalls).toEqual([]);
+  });
+
   it("maps SDK file operations to Anthropic-style text editor schemas", () => {
     const tools = [
       {
