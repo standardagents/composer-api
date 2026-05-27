@@ -1656,10 +1656,10 @@ function serializedToolCallLength(toolCalls: OpenAiToolCall[]): number {
 
 function resolveToolSpec(emittedName: string, args: Record<string, unknown>, tools: OpenAiToolSpec[]): OpenAiToolSpec | undefined {
   const exact = tools.find((tool) => tool.name === emittedName);
-  if (exact) return exact;
+  if (exact && nameMatchedToolCanAccept(emittedName, exact)) return exact;
   const normalized = normalizeToolName(emittedName);
   const match = tools.find((tool) => normalizeToolName(tool.name) === normalized);
-  if (match) return match;
+  if (match && nameMatchedToolCanAccept(emittedName, match)) return match;
   const candidates = toolNameAliases(normalized);
   const alias = tools.find((tool) => candidates.includes(normalizeToolName(tool.name)) && schemaLooksCompatible(emittedName, tool));
   if (alias) return alias;
@@ -1679,6 +1679,16 @@ function resolveToolSpec(emittedName: string, args: Record<string, unknown>, too
     return tools.find((tool) => schemaLooksCompatible("shell", tool));
   }
   return undefined;
+}
+
+function nameMatchedToolCanAccept(emittedName: string, tool: OpenAiToolSpec): boolean {
+  if (!isKnownSdkCanonical(canonicalToolName(emittedName))) return true;
+  if (!toolParameterSchema(tool).properties.length) return true;
+  return schemaLooksCompatible(emittedName, tool);
+}
+
+function isKnownSdkCanonical(value: string): boolean {
+  return new Set(["shell", "write", "read", "edit", "delete", "grep", "glob", "ls", "readlints", "mcp", "semsearch", "todowrite"]).has(value);
 }
 
 function normalizeToolName(value: string): string {
