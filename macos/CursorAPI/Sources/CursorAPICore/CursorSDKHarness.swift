@@ -222,7 +222,8 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             "model": prepared.cursorModelID,
             "prompt": prepared.prompt,
             "sessionKey": prepared.sessionKey ?? agentID,
-            "workingDirectory": prepared.toolContext?.workingDirectory ?? ""
+            "workingDirectory": prepared.toolContext?.workingDirectory ?? "",
+            "tools": Self.bridgeToolObjects(prepared.tools)
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -245,6 +246,19 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             return CursorToolCall(name: name, arguments: arguments)
         }
         return CursorSDKOutput(text: text, toolCalls: toolCalls, agentID: bridgeAgentID, runID: bridgeRunID)
+    }
+
+    private static func bridgeToolObjects(_ tools: [OpenAIToolSpec]) -> [[String: Any]] {
+        tools.map { tool in
+            var object: [String: Any] = ["name": tool.name]
+            if let description = tool.description, !description.isEmpty {
+                object["description"] = description
+            }
+            if let parameters = tool.parameters {
+                object["parameters"] = parameters.foundationValue
+            }
+            return object
+        }
     }
 
     static func resolvedCursorAPIKey(from authorization: String?, settings: CursorAPISettings) -> String {

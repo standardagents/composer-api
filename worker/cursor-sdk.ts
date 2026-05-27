@@ -23,6 +23,12 @@ interface CursorSdkBridgeOutput {
   status?: string;
 }
 
+interface ClientToolSpec {
+  name: string;
+  description?: string;
+  parameters?: unknown;
+}
+
 type ToolCallDecision = boolean | string;
 
 interface ProtobufField {
@@ -99,6 +105,7 @@ export async function createCursorSdkCompletion(
     sessionKey?: string;
     sessionOwnerKey?: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
     requiresLocalTool?: boolean;
     allowToolCall?: (toolCall: CursorToolCall) => ToolCallDecision;
   }
@@ -121,6 +128,7 @@ export async function createCursorSdkCompletion(
     prompt: sdkPrompt(input.prompt),
     modelId: input.model?.id || "composer-2.5",
     workingDirectory: input.workingDirectory,
+    clientTools: input.clientTools,
     requiresLocalTool: input.requiresLocalTool === true,
     allowToolCall: input.allowToolCall
   };
@@ -179,6 +187,7 @@ async function* streamCursorLocalSdkRun(
     prompt: string;
     modelId: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
     allowToolCall?: (toolCall: CursorToolCall) => ToolCallDecision;
   }
 ): AsyncGenerator<CursorTextEvent> {
@@ -269,6 +278,7 @@ async function* streamCursorLocalSdkRunWithRetry(
     prompt: string;
     modelId: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
     requiresLocalTool: boolean;
     allowToolCall?: (toolCall: CursorToolCall) => ToolCallDecision;
   }
@@ -325,6 +335,7 @@ async function* streamCursorLocalSdkBridgeRun(
     prompt: string;
     modelId: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
     allowToolCall?: (toolCall: CursorToolCall) => ToolCallDecision;
   }
 ): AsyncGenerator<CursorTextEvent> {
@@ -368,6 +379,7 @@ async function* streamCursorLocalSdkBridgeRunWithRetry(
     prompt: string;
     modelId: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
     requiresLocalTool: boolean;
     allowToolCall?: (toolCall: CursorToolCall) => ToolCallDecision;
   }
@@ -493,6 +505,7 @@ async function cursorLocalSdkBridgeJson(
     prompt: string;
     modelId: string;
     workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
   }
 ): Promise<CursorSdkBridgeOutput> {
   const body = JSON.stringify({
@@ -501,7 +514,8 @@ async function cursorLocalSdkBridgeJson(
     model: input.modelId,
     prompt: input.prompt,
     sessionKey: input.sessionKey || input.agentId,
-    workingDirectory: sdkWorkingDirectory(input.workingDirectory)
+    workingDirectory: sdkWorkingDirectory(input.workingDirectory),
+    tools: bridgeClientTools(input.clientTools)
   });
   const bridgeBinding = env.CURSOR_SDK_BRIDGE_CONTAINER;
   const bridgeUrl = env.CURSOR_SDK_BRIDGE_URL?.trim();
@@ -575,6 +589,18 @@ function cursorToolCallFromJson(value: unknown): CursorToolCall[] {
 
 function hasCursorSdkBridge(env: Env): boolean {
   return Boolean(env.CURSOR_SDK_BRIDGE_CONTAINER || env.CURSOR_SDK_BRIDGE_URL?.trim());
+}
+
+function bridgeClientTools(tools: ClientToolSpec[] | undefined): ClientToolSpec[] {
+  return (tools ?? []).flatMap((tool) => {
+    const name = typeof tool.name === "string" ? tool.name.trim() : "";
+    if (!name) return [];
+    return [{
+      name,
+      ...(typeof tool.description === "string" && tool.description ? { description: tool.description } : {}),
+      ...(tool.parameters !== undefined ? { parameters: tool.parameters } : {})
+    }];
+  });
 }
 
 function cursorLocalSdkBridgeHeaders(env: Env): Headers {

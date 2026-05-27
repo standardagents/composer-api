@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { bridgePrompt, isForwardableSDKToolCall, normalizeSDKToolCall, toolCallFromDelta } from "./cursor-sdk-local-agent-bridge.mjs";
+import { bridgePrompt, clientMcpToolDefinitions, isForwardableSDKToolCall, normalizeSDKToolCall, toolCallFromDelta } from "./cursor-sdk-local-agent-bridge.mjs";
 
 describe("Cursor SDK local-agent bridge", () => {
   it("does not cancel SDK glob calls on directory-only partial arguments", () => {
@@ -64,6 +64,60 @@ describe("Cursor SDK local-agent bridge", () => {
       }
     });
     expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
+  it("keeps dynamic harness MCP tools as client MCP calls", () => {
+    const normalized = normalizeSDKToolCall({
+      type: "mcp",
+      args: {
+        providerIdentifier: "client",
+        toolName: "probe_write_file",
+        args: {
+          file_path: "marker.txt",
+          contents: "ok"
+        }
+      }
+    });
+
+    expect(normalized).toEqual({
+      name: "mcp",
+      arguments: {
+        providerIdentifier: "client",
+        toolName: "probe_write_file",
+        args: {
+          file_path: "marker.txt",
+          contents: "ok"
+        }
+      }
+    });
+    expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
+  it("exposes dynamic client tool schemas through the forwarding MCP server", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "probe_write_file",
+        description: "Writes a marker through the harness MCP server.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            file_path: { type: "string" },
+            contents: { type: "string" }
+          },
+          required: ["file_path", "contents"]
+        }
+      }
+    ]);
+
+    expect(tools.some((tool) => tool.name === "client_shell")).toBe(true);
+    expect(tools.find((tool) => tool.name === "probe_write_file")).toMatchObject({
+      description: "Writes a marker through the harness MCP server.",
+      inputSchema: {
+        additionalProperties: false,
+        required: ["file_path", "contents"]
+      }
+    });
   });
 
   it("tells the SDK to use client MCP tools instead of built-in local tools", () => {

@@ -585,7 +585,25 @@ describe("Worker", () => {
         },
         body: JSON.stringify({
           model: "composer-2.5",
-          messages: [{ role: "user", content: "Say hello" }]
+          messages: [{ role: "user", content: "Say hello" }],
+          tools: [
+            {
+              type: "function",
+              function: {
+                name: "probe_write_file",
+                description: "Writes a file through the harness MCP server.",
+                parameters: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    file_path: { type: "string" },
+                    contents: { type: "string" }
+                  },
+                  required: ["file_path", "contents"]
+                }
+              }
+            }
+          ]
         })
       }),
       env,
@@ -603,12 +621,27 @@ describe("Worker", () => {
       apiKey: "cursor_direct_key_bridge",
       model: "composer-2.5"
     });
+    expect((sdkRequests[0].body as { tools?: unknown[] }).tools).toEqual([
+      {
+        name: "probe_write_file",
+        description: "Writes a file through the harness MCP server.",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            file_path: { type: "string" },
+            contents: { type: "string" }
+          },
+          required: ["file_path", "contents"]
+        }
+      }
+    ]);
     expect(String((sdkRequests[0].body as { prompt?: string }).prompt || "")).toContain("SDK-compatible OpenCode harness");
   });
 
   it("prefers the shared container bridge when the Durable Object binding exists", async () => {
     const db = new FakeD1();
-    const bridgeRequests: Array<{ path: string; headers: Headers; body: Record<string, string> }> = [];
+    const bridgeRequests: Array<{ path: string; headers: Headers; body: Record<string, unknown> }> = [];
     const env = {
       ...makeEnv(db),
       CURSOR_SDK_BRIDGE_TOKEN: "bridge-token",
@@ -616,9 +649,9 @@ describe("Worker", () => {
       CURSOR_SDK_BRIDGE_CONTAINER: fakeBridgeNamespace(async (input, init) => {
         const url = new URL(String(input));
         const headers = new Headers(init?.headers);
-        const body = JSON.parse(String(init?.body || "{}")) as Record<string, string>;
+        const body = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
         bridgeRequests.push({ path: url.pathname, headers, body });
-        return localSdkBridgeJsonResponse(sdkRunKind(body.prompt || ""));
+        return localSdkBridgeJsonResponse(sdkRunKind(typeof body.prompt === "string" ? body.prompt : ""));
       })
     };
     const { deps, sdkRequests } = fakeDeps();

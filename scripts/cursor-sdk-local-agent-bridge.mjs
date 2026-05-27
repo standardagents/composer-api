@@ -31,6 +31,7 @@ if (isMainModule()) {
 
 export {
   bridgePrompt,
+  clientMcpToolDefinitions,
   isForwardableSDKToolCall,
   normalizeSDKToolCall,
   startServer,
@@ -75,6 +76,7 @@ async function handleRequest(request, response) {
   const sessionKey = typeof body.sessionKey === "string" && body.sessionKey ? body.sessionKey : crypto.randomUUID();
   const workingDirectory = sdkWorkingDirectory(body.workingDirectory);
   const requestId = typeof body.requestId === "string" && body.requestId ? body.requestId : crypto.randomUUID();
+  const clientTools = parseClientTools(body.tools);
 
   const output = await runLocalAgent({
     apiKey,
@@ -82,7 +84,8 @@ async function handleRequest(request, response) {
     prompt: bridgePrompt(prompt),
     sessionKey,
     workingDirectory,
-    requestId
+    requestId,
+    clientTools
   });
   writeJson(response, output);
 }
@@ -175,7 +178,7 @@ async function getAgent(input) {
     apiKey: input.apiKey,
     model: { id: input.model },
     name: "API for Cursor local bridge",
-    mcpServers: clientForwardingMcpServers(),
+    mcpServers: clientForwardingMcpServers(input.clientTools),
     local: {
       cwd: input.workingDirectory,
       sandboxOptions: { enabled: false },
@@ -187,18 +190,18 @@ async function getAgent(input) {
   return agent;
 }
 
-function clientForwardingMcpServers() {
+function clientForwardingMcpServers(clientTools = []) {
   return {
     [clientMcpServerName]: {
       type: "stdio",
       command: process.execPath,
-      args: ["-e", clientForwardingMcpServerSource()]
+      args: ["-e", clientForwardingMcpServerSource(clientTools)]
     }
   };
 }
 
-function clientForwardingMcpServerSource() {
-  const tools = JSON.stringify(clientMcpToolDefinitions());
+function clientForwardingMcpServerSource(clientTools = []) {
+  const tools = JSON.stringify(clientMcpToolDefinitions(clientTools));
   return `
 const readline = require("node:readline");
 const tools = ${tools};
@@ -240,9 +243,9 @@ rl.on("line", (line) => {
 `;
 }
 
-function clientMcpToolDefinitions() {
+function clientMcpToolDefinitions(clientTools = []) {
   const pathProperty = { type: "string", description: "File or directory path for the outer client." };
-  return [
+  const tools = [
     {
       name: "client_shell",
       description: "Forward a shell command to the outer client. The bridge never executes it locally.",
@@ -382,6 +385,17 @@ function clientMcpToolDefinitions() {
       }
     }
   ];
+  const seen = new Set(tools.map((tool) => tool.name));
+  for (const tool of clientTools) {
+    if (!tool.name || seen.has(tool.name)) continue;
+    seen.add(tool.name);
+    tools.push({
+      name: tool.name,
+      description: tool.description || `Forward ${tool.name} to the outer client.`,
+      inputSchema: clientMcpInputSchema(tool.parameters)
+    });
+  }
+  return tools;
 }
 
 function bridgePrompt(prompt) {
@@ -389,8 +403,10 @@ function bridgePrompt(prompt) {
     "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
     "The outer client owns local tool execution. When local work is needed, emit exactly one SDK tool call, then stop.",
     "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, and client_todo_write.",
+    "The same client MCP server also exposes the current harness tools by exact tool name when the outer client provided a tool schema.",
     "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, or todowrite tools because those execute inside the bridge instead of the outer client.",
-    "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
+    "If the request below mentions an SDK routing map or asks for SDK mcp, satisfy that by calling the matching client MCP forwarding tool.",
+    "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell or the exact harness shell tool with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
     "When creating Vite 8 React projects, use @vitejs/plugin-react ^5 with vite ^8, or omit the plugin if it is not needed. Do not pair Vite 8 with @vitejs/plugin-react 4.",
     "For inspection-only work, use client_read, client_grep, client_glob, or client_ls. Do not claim local work is done until a tool result is present in the transcript.",
     "",
@@ -424,8 +440,17 @@ function normalizeClientMcpToolCall(name, args) {
   if (provider && provider !== clientMcpServerName) return null;
   const toolName = firstString(args, "toolName", "tool_name", "tool", "name");
   const sdkName = sdkToolNameFromClientMcpTool(toolName);
-  if (!sdkName) return null;
   const payload = args.args && typeof args.args === "object" && !Array.isArray(args.args) ? args.args : {};
+  if (!sdkName) {
+    return {
+      name: "mcp",
+      arguments: {
+        providerIdentifier: clientMcpServerName,
+        toolName,
+        args: normalizeArguments(payload)
+      }
+    };
+  }
   return {
     name: sdkName,
     arguments: normalizeArguments(payload)
@@ -558,10 +583,21 @@ function normalizeJsonValue(value) {
   return String(value);
 }
 
+function clientMcpInputSchema(parameters) {
+  if (isRecord(parameters) && Object.keys(parameters).length > 0) {
+    return normalizeJsonValue(parameters);
+  }
+  return {
+    type: "object",
+    additionalProperties: true
+  };
+}
+
 function agentCacheKey(input) {
+  const toolSignature = stableJson(input.clientTools || []);
   const digest = crypto
     .createHash("sha256")
-    .update([input.apiKey, input.model, input.workingDirectory, input.sessionKey].join("\0"))
+    .update([input.apiKey, input.model, input.workingDirectory, input.sessionKey, toolSignature].join("\0"))
     .digest("hex")
     .slice(0, 32);
   return digest;
@@ -601,6 +637,20 @@ function requiredString(value, key) {
     throw new HttpError(`Missing ${key}`, 400, "invalid_request");
   }
   return value;
+}
+
+function parseClientTools(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((tool) => {
+    if (!isRecord(tool) || typeof tool.name !== "string" || !tool.name.trim()) return [];
+    const description = typeof tool.description === "string" ? tool.description : undefined;
+    const parameters = isJsonSerializable(tool.parameters) ? tool.parameters : undefined;
+    return [{
+      name: tool.name.trim(),
+      ...(description ? { description } : {}),
+      ...(parameters !== undefined ? { parameters: normalizeJsonValue(parameters) } : {})
+    }];
+  });
 }
 
 async function readJsonBody(request) {
@@ -660,6 +710,24 @@ function bearerToken(request) {
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ""), 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isJsonSerializable(value) {
+  return value === null || ["string", "number", "boolean"].includes(typeof value) || Array.isArray(value) || isRecord(value);
+}
+
+function stableJson(value) {
+  return JSON.stringify(sortJson(value));
+}
+
+function sortJson(value) {
+  if (Array.isArray(value)) return value.map(sortJson);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortJson(value[key])]));
 }
 
 function loadEnvFile(filePath) {
