@@ -916,6 +916,67 @@ describe("OpenAI compatibility adapter", () => {
     ]);
   });
 
+  it("maps SDK file operations to apply-patch style tools", () => {
+    const tools = [
+      {
+        name: "apply_patch",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            patch: { type: "string" },
+            path: { type: "string" }
+          },
+          required: ["patch"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() {\n  return null\n}\n" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "return null", newString: "return <main />" } },
+        { name: "delete", arguments: { path: "src/old.tsx" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["apply_patch", "apply_patch", "apply_patch"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      {
+        path: "src/App.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Add File: src/App.tsx",
+          "+export default function App() {",
+          "+  return null",
+          "+}",
+          "*** End Patch"
+        ].join("\n")
+      },
+      {
+        path: "src/App.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Update File: src/App.tsx",
+          "@@",
+          "-return null",
+          "+return <main />",
+          "*** End Patch"
+        ].join("\n")
+      },
+      {
+        path: "src/old.tsx",
+        patch: [
+          "*** Begin Patch",
+          "*** Delete File: src/old.tsx",
+          "*** End Patch"
+        ].join("\n")
+      }
+    ]);
+  });
+
   it("does not emit SDK-native tool names outside the advertised client tools", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",

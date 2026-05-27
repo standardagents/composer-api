@@ -1572,6 +1572,10 @@ function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolS
   if (commandStyleFile) {
     return commandStyleFile;
   }
+  const patchStyleFile = patchStyleFileArguments(argsToNormalize, emittedCanonical, tool);
+  if (patchStyleFile) {
+    return patchStyleFile;
+  }
   if (emittedCanonical !== "shell" && selectedCanonical === "shell") {
     return shellFallbackArguments(argsToNormalize, emittedName, tool);
   }
@@ -1610,6 +1614,9 @@ function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boole
     return false;
   }
   if (commandStyleFileToolSupports(canonical, tool)) {
+    return true;
+  }
+  if (patchStyleFileToolSupports(canonical, tool)) {
     return true;
   }
   switch (canonical) {
@@ -1952,6 +1959,95 @@ function toolPropertySchema(tool: OpenAiToolSpec | undefined, property: string):
   const parameters = isRecord(tool?.parameters) ? tool.parameters : undefined;
   const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
   return properties?.[property];
+}
+
+function patchStyleFileArguments(
+  args: Record<string, unknown>,
+  emittedCanonical: string,
+  tool: OpenAiToolSpec | undefined
+): Record<string, unknown> | undefined {
+  if (!["write", "edit", "delete"].includes(emittedCanonical)) return undefined;
+  const schema = toolParameterSchema(tool);
+  if (!schema.properties.length) return undefined;
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const patchKey = patchPropertyKey(tool, schema.properties, normalizedProperties);
+  if (!patchKey) return undefined;
+  const path = firstStringArg(args, ...pathCandidates(), "target_file", "targetFile");
+  if (!path) return undefined;
+
+  let patch: string | undefined;
+  if (emittedCanonical === "write") {
+    const content = firstStringArgAllowEmpty(args, "fileText", "file_text", "content", "contents", "text", "fileContent", "file_content", "streamContent");
+    if (content === undefined) return undefined;
+    patch = addFilePatch(path, content);
+  } else if (emittedCanonical === "edit") {
+    const oldText = firstStringArgAllowEmpty(args, "oldString", "old_string", "old_str", "oldText", "old_text", "search", "searchString", "search_string");
+    const newText = firstStringArgAllowEmpty(args, "newString", "new_string", "new_str", "newText", "new_text", "replacement", "replace", "content");
+    if (oldText === undefined || newText === undefined) return undefined;
+    patch = updateFilePatch(path, oldText, newText);
+  } else {
+    patch = deleteFilePatch(path);
+  }
+
+  const output: Record<string, unknown> = { [patchKey]: patch };
+  const pathKey = firstMatchingProperty(pathCandidates(), schema.properties, normalizedProperties);
+  if (pathKey) output[pathKey] = path;
+  return output;
+}
+
+function patchStyleFileToolSupports(canonical: string, tool: OpenAiToolSpec): boolean {
+  if (!["write", "edit", "delete"].includes(canonical)) return false;
+  const schema = toolParameterSchema(tool);
+  if (!schema.properties.length) return false;
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  return Boolean(patchPropertyKey(tool, schema.properties, normalizedProperties));
+}
+
+function patchPropertyKey(
+  tool: OpenAiToolSpec | undefined,
+  properties: string[],
+  normalizedProperties: Map<string, string>
+): string | undefined {
+  const direct = firstMatchingProperty(["patch", "diff", "unifiedDiff", "unified_diff"], properties, normalizedProperties);
+  if (direct) return direct;
+  const normalizedTool = normalizeToolName(tool?.name || "");
+  if (!normalizedTool.includes("patch")) return undefined;
+  return firstMatchingProperty(["input", "content", "text"], properties, normalizedProperties);
+}
+
+function addFilePatch(path: string, content: string): string {
+  return [
+    "*** Begin Patch",
+    `*** Add File: ${path}`,
+    ...patchLines(content, "+"),
+    "*** End Patch"
+  ].join("\n");
+}
+
+function updateFilePatch(path: string, oldText: string, newText: string): string {
+  return [
+    "*** Begin Patch",
+    `*** Update File: ${path}`,
+    "@@",
+    ...patchLines(oldText, "-"),
+    ...patchLines(newText, "+"),
+    "*** End Patch"
+  ].join("\n");
+}
+
+function deleteFilePatch(path: string): string {
+  return [
+    "*** Begin Patch",
+    `*** Delete File: ${path}`,
+    "*** End Patch"
+  ].join("\n");
+}
+
+function patchLines(text: string, prefix: "+" | "-"): string[] {
+  const lines = text.split(/\r?\n/);
+  if (lines.length === 0) return [`${prefix}`];
+  if (lines[lines.length - 1] === "") lines.pop();
+  return (lines.length ? lines : [""]).map((line) => `${prefix}${line}`);
 }
 
 function resolveSpecificMCPTool(args: Record<string, unknown>, tools: OpenAiToolSpec[]): OpenAiToolSpec | undefined {

@@ -1473,6 +1473,9 @@ public enum OpenAICompatibility {
         if let commandStyleFile = commandStyleFileArguments(arguments, sdkToolName: sdkToolName, tool: tool, properties: properties) {
             return commandStyleFile
         }
+        if let patchStyleFile = patchStyleFileArguments(arguments, sdkToolName: sdkToolName, tool: tool, properties: properties) {
+            return patchStyleFile
+        }
 
         var output: [String: JSONValue] = [:]
         var consumed = Set<String>()
@@ -2142,6 +2145,83 @@ public enum OpenAICompatibility {
         return properties[property]
     }
 
+    private static func patchStyleFileArguments(
+        _ arguments: [String: JSONValue],
+        sdkToolName: String,
+        tool: OpenAIToolSpec,
+        properties: [String]
+    ) -> [String: JSONValue]? {
+        let canonical = canonicalToolName(sdkToolName)
+        guard ["write", "edit", "delete"].contains(canonical),
+              let patchKey = patchPropertyKey(tool: tool, properties: properties),
+              let path = firstArgument(in: arguments, keys: pathPropertyAliases() + ["target_file", "targetFile"])?.value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty else {
+            return nil
+        }
+
+        let patch: String
+        switch canonical {
+        case "write":
+            guard let content = firstArgument(in: arguments, keys: ["fileText", "file_text", "content", "contents", "text", "fileContent", "file_content", "streamContent"])?.value.stringValue else {
+                return nil
+            }
+            patch = addFilePatch(path: path, content: content)
+        case "edit":
+            guard let oldText = firstArgument(in: arguments, keys: ["oldString", "old_string", "old_str", "oldText", "old_text", "search", "searchString", "search_string"])?.value.stringValue,
+                  let newText = firstArgument(in: arguments, keys: ["newString", "new_string", "new_str", "newText", "new_text", "replacement", "replace", "content"])?.value.stringValue else {
+                return nil
+            }
+            patch = updateFilePatch(path: path, oldText: oldText, newText: newText)
+        default:
+            patch = deleteFilePatch(path: path)
+        }
+
+        var output: [String: JSONValue] = [patchKey: .string(patch)]
+        if let pathKey = propertyName(matching: pathPropertyAliases(), in: properties) {
+            output[pathKey] = .string(path)
+        }
+        return output
+    }
+
+    private static func patchStyleFileToolSupports(_ canonical: String, tool: OpenAIToolSpec, properties: [String]) -> Bool {
+        guard ["write", "edit", "delete"].contains(canonical) else {
+            return false
+        }
+        return patchPropertyKey(tool: tool, properties: properties) != nil
+    }
+
+    private static func patchPropertyKey(tool: OpenAIToolSpec, properties: [String]) -> String? {
+        if let direct = propertyName(matching: ["patch", "diff", "unifiedDiff", "unified_diff"], in: properties) {
+            return direct
+        }
+        guard normalizedName(tool.name).contains("patch") else {
+            return nil
+        }
+        return propertyName(matching: ["input", "content", "text"], in: properties)
+    }
+
+    private static func addFilePatch(path: String, content: String) -> String {
+        (["*** Begin Patch", "*** Add File: \(path)"] + patchLines(content, prefix: "+") + ["*** End Patch"]).joined(separator: "\n")
+    }
+
+    private static func updateFilePatch(path: String, oldText: String, newText: String) -> String {
+        (["*** Begin Patch", "*** Update File: \(path)", "@@"] + patchLines(oldText, prefix: "-") + patchLines(newText, prefix: "+") + ["*** End Patch"]).joined(separator: "\n")
+    }
+
+    private static func deleteFilePatch(path: String) -> String {
+        ["*** Begin Patch", "*** Delete File: \(path)", "*** End Patch"].joined(separator: "\n")
+    }
+
+    private static func patchLines(_ text: String, prefix: String) -> [String] {
+        var lines = text.components(separatedBy: .newlines)
+        if lines.last == "" {
+            lines.removeLast()
+        }
+        if lines.isEmpty {
+            lines = [""]
+        }
+        return lines.map { "\(prefix)\($0)" }
+    }
+
     private static func schemaLooksCompatible(sdkToolName: String, tool: OpenAIToolSpec) -> Bool {
         let properties = parameterPropertyNames(tool)
         guard !properties.isEmpty else { return false }
@@ -2154,6 +2234,9 @@ public enum OpenAICompatibility {
             return false
         }
         if commandStyleFileToolSupports(canonical, tool: tool, properties: properties) {
+            return true
+        }
+        if patchStyleFileToolSupports(canonical, tool: tool, properties: properties) {
             return true
         }
         switch canonical {
