@@ -3805,14 +3805,17 @@ public enum OpenAICompatibility {
             return nil
         }
         if object["properties"] == nil {
-            if case .object? = object["schema"] {
-                return canonicalParameterSchemaObject(object["schema"], root: root, depth: depth + 1, seenRefs: seenRefs)
-            }
-            if case .object? = object["json_schema"] {
-                return canonicalParameterSchemaObject(object["json_schema"], root: root, depth: depth + 1, seenRefs: seenRefs)
+            for key in parameterSchemaWrapperKeys() {
+                if case .object? = object[key] {
+                    return canonicalParameterSchemaObject(object[key], root: root, depth: depth + 1, seenRefs: seenRefs)
+                }
             }
         }
         return object
+    }
+
+    private static func parameterSchemaWrapperKeys() -> [String] {
+        ["schema", "json_schema", "input_schema", "inputSchema"]
     }
 
     private static func directParameterSchemaShape(
@@ -3881,8 +3884,12 @@ public enum OpenAICompatibility {
             return direct
         }
         guard case .object(let object)? = root else { return nil }
-        return jsonPointerTarget(root: object["schema"], reference: reference)
-            ?? jsonPointerTarget(root: object["json_schema"], reference: reference)
+        for key in parameterSchemaWrapperKeys() {
+            if let target = jsonPointerTarget(root: object[key], reference: reference) {
+                return target
+            }
+        }
+        return nil
     }
 
     private static func jsonPointerTarget(root: JSONValue?, reference: String) -> JSONValue? {

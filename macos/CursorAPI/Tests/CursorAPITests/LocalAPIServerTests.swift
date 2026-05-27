@@ -4061,6 +4061,67 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments["text"] as? String, "export default function App() { return <main>Ref</main> }")
     }
 
+    func testChatToolCallsMapSDKCallsThroughInputSchemaWrappers() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"find react files"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"find_files",
+                "parameters":{
+                  "inputSchema":{
+                    "$ref":"#/$defs/FindInput",
+                    "$defs":{
+                      "FindInput":{
+                        "type":"object",
+                        "properties":{
+                          "pattern":{"type":"string"},
+                          "root":{"type":"string"}
+                        },
+                        "required":["pattern"],
+                        "additionalProperties":false
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(prepared.prompt.contains(#""sdk":"glob""#))
+        XCTAssertTrue(prepared.prompt.contains(#""client":"find_files""#))
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_input_schema",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "glob", arguments: [
+                    "targetDirectory": .string("src"),
+                    "globPattern": .string("**/*.tsx")
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls.count, 1)
+
+        let function = try XCTUnwrap(toolCalls[0]["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        XCTAssertEqual(function["name"] as? String, "find_files")
+        XCTAssertEqual(arguments["pattern"] as? String, "**/*.tsx")
+        XCTAssertEqual(arguments["root"] as? String, "src")
+        XCTAssertNil(arguments["globPattern"])
+        XCTAssertNil(arguments["targetDirectory"])
+    }
+
     func testChatToolInventoryAdvertisesPiFindAsExactSDKMCPWithGlobFallback() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -6550,6 +6611,58 @@ final class LocalAPIServerTests: XCTestCase {
 
         let object = OpenAICompatibility.responseObject(
             id: "resp_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let output = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let functionCall = try XCTUnwrap(output.first { ($0["type"] as? String) == "function_call" })
+        let arguments = try decodedArguments(functionCall)
+
+        XCTAssertEqual(functionCall["name"] as? String, "write_file")
+        XCTAssertEqual(arguments["file_path"] as? String, "index.html")
+        XCTAssertEqual(arguments["content"] as? String, "<h1>Hello</h1>")
+        XCTAssertNil(arguments["path"])
+        XCTAssertNil(arguments["fileText"])
+    }
+
+    func testResponsesFunctionCallsMapSDKWriteThroughInputSchemaWrapper() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"create a file through a wrapped schema",
+          "tools":[
+            {
+              "type":"function",
+              "name":"write_file",
+              "parameters":{
+                "input_schema":{
+                  "$ref":"#/$defs/WriteInput",
+                  "$defs":{
+                    "WriteInput":{
+                      "type":"object",
+                      "properties":{
+                        "file_path":{"type":"string"},
+                        "content":{"type":"string"}
+                      },
+                      "required":["file_path","content"],
+                      "additionalProperties":false
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "write", arguments: [
+            "path": .string("index.html"),
+            "fileText": .string("<h1>Hello</h1>")
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_input_schema",
             created: 1,
             prepared: prepared,
             output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
