@@ -1306,6 +1306,15 @@ public enum OpenAICompatibility {
             CursorToolCall(name: "semSearch", arguments: ["query": .string("<query>"), "targetDirectories": .array([.string(".")])]),
             CursorToolCall(name: "todowrite", arguments: [
                 "todos": .array([.object(["content": .string("<task>"), "status": .string("in_progress"), "priority": .string("medium")])])
+            ]),
+            CursorToolCall(name: "task", arguments: [
+                "description": .string("<task summary>"),
+                "prompt": .string("<task prompt>"),
+                "subagentType": .object(["kind": .string("agent"), "name": .string("general")])
+            ]),
+            CursorToolCall(name: "createPlan", arguments: [
+                "plan": .string("<plan>"),
+                "todos": .array([.object(["content": .string("<task>"), "status": .string("pending"), "priority": .string("medium")])])
             ])
         ]
     }
@@ -1378,7 +1387,7 @@ public enum OpenAICompatibility {
     }
 
     private static func isKnownMappedToolName(_ name: String) -> Bool {
-        let knownCanonicals = ["shell", "write", "read", "edit", "delete", "grep", "glob", "ls", "readlints", "mcp", "semsearch", "todowrite"]
+        let knownCanonicals = ["shell", "write", "read", "edit", "delete", "grep", "glob", "ls", "readlints", "mcp", "semsearch", "todowrite", "task", "createplan"]
         let normalized = normalizedName(name)
         return knownCanonicals.contains { canonical in
             canonicalToolName(name) == canonical || toolAliases(for: canonical).map(normalizedName).contains(normalized)
@@ -1941,6 +1950,18 @@ public enum OpenAICompatibility {
             return compactJSON([
                 "todos": firstArgument(in: arguments, keys: todoCollectionAliases())?.value
             ])
+        case "task":
+            return compactJSON([
+                "description": firstArgument(in: arguments, keys: ["description", "desc", "summary"])?.value,
+                "prompt": firstArgument(in: arguments, keys: ["prompt", "instructions", "input", "query"])?.value,
+                "subagentType": firstArgument(in: arguments, keys: taskSubagentTypeAliases())?.value
+            ])
+        case "createplan":
+            return compactJSON([
+                "plan": firstArgument(in: arguments, keys: ["plan", "overview", "description", "summary"])?.value,
+                "todos": firstArgument(in: arguments, keys: todoCollectionAliases())?.value,
+                "name": firstArgument(in: arguments, keys: ["name", "title"])?.value
+            ])
         default:
             return arguments
         }
@@ -2133,7 +2154,9 @@ public enum OpenAICompatibility {
         "readlints",
         "mcp",
         "semsearch",
-        "todowrite"
+        "todowrite",
+        "task",
+        "createplan"
     ]
 
     private static func isKnownSDKCanonical(_ name: String) -> Bool {
@@ -2328,6 +2351,16 @@ public enum OpenAICompatibility {
             consumed.insert(argument.key)
         }
 
+        func copyFirstTaskSubagentType() {
+            guard let argument = firstArgument(in: arguments, keys: taskSubagentTypeAliases()) else { return }
+            guard let target = propertyName(matching: taskSubagentTypeAliases(), in: properties) else {
+                consumed.insert(argument.key)
+                return
+            }
+            output[target] = normalizeToolArgumentValue(taskSubagentTypeValue(argument.value), property: target, tool: tool, context: context, sourceProperty: argument.key)
+            consumed.insert(argument.key)
+        }
+
         switch canonical {
         case "shell":
             copyFirst(shellCommandAliases(), as: [])
@@ -2438,6 +2471,21 @@ public enum OpenAICompatibility {
             copy("explanation", as: ["reason", "why", "description"])
         case "todowrite":
             copyFirst(todoCollectionAliases(), as: todoCollectionAliases())
+        case "task":
+            copyFirst(["description", "desc", "summary"], as: ["description"])
+            copyFirst(["prompt", "instructions", "input", "query"], as: ["prompt"])
+            copyFirstTaskSubagentType()
+            copy("model", as: ["model"])
+            copy("resume", as: ["resume"])
+            copy("agentId", as: ["agent_id", "agentID"])
+            copy("attachments", as: ["attachment", "files"])
+            copy("mode", as: ["mode"])
+        case "createplan":
+            copyFirst(["plan", "overview", "description", "summary"], as: ["plan", "overview", "description", "summary"])
+            copyFirst(todoCollectionAliases(), as: todoCollectionAliases())
+            copy("name", as: ["title"])
+            copy("isProject", as: ["is_project", "project"])
+            copy("phases", as: ["phases"])
         default:
             break
         }
@@ -2464,7 +2512,7 @@ public enum OpenAICompatibility {
             sanitizeSyntheticShellWorkdirs(&output, properties: properties, required: required)
         }
 
-        if canonical == "todowrite" {
+        if canonical == "todowrite" || canonical == "createplan" {
             output = normalizeTodoWriteArguments(output)
         }
 
@@ -2562,6 +2610,12 @@ public enum OpenAICompatibility {
         }
         if ["description", "desc", "summary", "reason", "explanation"].contains(normalizedProperty), hasType("string") {
             return .string(requiredDescriptionArgument(sdkToolName: sdkToolName, output: output, source: source))
+        }
+        if canonical == "task", taskSubagentTypeAliases().map(normalizedName).contains(normalizedProperty), hasType("string") {
+            if let value = firstArgument(in: source, keys: taskSubagentTypeAliases())?.value {
+                return taskSubagentTypeValue(value)
+            }
+            return .string("general")
         }
         if ["cwd", "workdir", "workingdirectory"].contains(normalizedProperty), hasType("string") {
             return .string(".")
@@ -2722,6 +2776,10 @@ public enum OpenAICompatibility {
             return "Search files"
         case "ls":
             return "List files"
+        case "task":
+            return firstArgument(in: source, keys: ["prompt", "instructions", "input", "query"])?.value.stringValue ?? "Run subagent task"
+        case "createplan":
+            return firstArgument(in: source, keys: ["plan", "overview"])?.value.stringValue ?? "Update plan"
         default:
             return "Run local tool"
         }
@@ -3164,6 +3222,9 @@ public enum OpenAICompatibility {
     private static func normalizeToolArgumentValue(_ value: JSONValue, property: String, tool: OpenAIToolSpec, context: ToolCallContext?, sourceProperty: String? = nil) -> JSONValue {
         if value == .null, toolPropertyAllowsNull(tool: tool, property: property) {
             return value
+        }
+        if ["subagenttype", "subagent", "agenttype"].contains(normalizedName(property)) {
+            return taskSubagentTypeValue(value)
         }
         if toolPropertyPrefersArray(tool: tool, property: property) {
             var values = arrayArgumentValue(value) ?? [value]
@@ -4949,6 +5010,12 @@ public enum OpenAICompatibility {
             return toolCanonical == "semsearch" && has(semanticSearchQueryAliases())
         case "todowrite":
             return has(todoCollectionAliases())
+        case "task":
+            return has(["description", "desc", "summary"])
+                && has(["prompt", "instructions", "input", "query"])
+        case "createplan":
+            return has(["plan", "overview", "description", "summary"])
+                || has(todoCollectionAliases())
         default:
             return false
         }
@@ -5031,6 +5098,8 @@ public enum OpenAICompatibility {
             return ["prompt", "description", "instructions", "query"]
         case "tasks", "todo", "items":
             return todoCollectionAliases()
+        case "subagenttype", "subagent", "agenttype":
+            return taskSubagentTypeAliases()
         case "url", "uri", "href":
             return ["url", "uri", "href"]
         default:
@@ -5089,6 +5158,23 @@ public enum OpenAICompatibility {
             if todoCollectionAliases().map(normalizedName).contains(normalizedKey) {
                 return todoCollectionAliases()
             }
+        case "task":
+            if ["description", "desc", "summary"].contains(normalizedKey) {
+                return ["description"]
+            }
+            if ["prompt", "instructions", "input", "query"].contains(normalizedKey) {
+                return ["prompt"]
+            }
+            if taskSubagentTypeAliases().map(normalizedName).contains(normalizedKey) {
+                return taskSubagentTypeAliases()
+            }
+        case "createplan":
+            if ["plan", "overview", "description", "summary"].contains(normalizedKey) {
+                return ["plan", "overview", "description", "summary"]
+            }
+            if todoCollectionAliases().map(normalizedName).contains(normalizedKey) {
+                return todoCollectionAliases()
+            }
         case "semsearch":
             if semanticSearchQueryAliases().map(normalizedName).contains(normalizedKey) {
                 return semanticSearchQueryAliases()
@@ -5127,6 +5213,10 @@ public enum OpenAICompatibility {
             return "semsearch"
         case "updatetodos", "updatetodostoolcall", "writetodos", "todowrite", "todowritetoolcall":
             return "todowrite"
+        case "tasktoolcall", "subagent", "subagenttask":
+            return "task"
+        case "createplantoolcall", "createplan":
+            return "createplan"
         case "callmcptool":
             return "mcp"
         default:
@@ -5160,6 +5250,10 @@ public enum OpenAICompatibility {
             return ["sem_search", "semantic_search", "search_code", "code_search", "semantic_code_search"]
         case "todowrite":
             return ["todowrite", "todo_write", "update_todos", "updateTodos", "write_todos"]
+        case "task":
+            return ["task", "subagent", "subagent_task"]
+        case "createplan":
+            return ["createPlan", "create_plan"]
         default:
             return [name]
         }
@@ -5187,6 +5281,27 @@ public enum OpenAICompatibility {
             "todos", "todoList", "todo_list", "todoItems", "todo_items",
             "items", "tasks", "taskList", "task_list"
         ]
+    }
+
+    private static func taskSubagentTypeAliases() -> [String] {
+        [
+            "subagentType", "subagent_type", "subagent", "subagentKind",
+            "subagent_kind", "agentType", "agent_type", "type"
+        ]
+    }
+
+    private static func taskSubagentTypeValue(_ value: JSONValue) -> JSONValue {
+        if let string = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !string.isEmpty {
+            return .string(string)
+        }
+        if let object = value.objectValue {
+            for key in ["name", "kind", "type", "subagentType", "subagent_type"] {
+                if let string = object[key]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !string.isEmpty {
+                    return .string(string)
+                }
+            }
+        }
+        return value
     }
 
     private static func fileContentAliases() -> [String] {

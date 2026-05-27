@@ -209,6 +209,13 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(isForwardableSDKToolCall({ name: "todowrite", arguments: { status: "in_progress" } })).toBe(false);
     expect(isForwardableSDKToolCall({ name: "todowrite", arguments: { todos: [] } })).toBe(true);
     expect(isForwardableSDKToolCall({ name: "todowrite", arguments: { taskList: [{ content: "Build app" }] } })).toBe(true);
+
+    expect(isForwardableSDKToolCall({ name: "task", arguments: { description: "Inspect app" } })).toBe(false);
+    expect(isForwardableSDKToolCall({ name: "task", arguments: { description: "Inspect app", prompt: "Find the entrypoint" } })).toBe(true);
+
+    expect(isForwardableSDKToolCall({ name: "createPlan", arguments: { status: "in_progress" } })).toBe(false);
+    expect(isForwardableSDKToolCall({ name: "createPlan", arguments: { plan: "Build and verify the app" } })).toBe(true);
+    expect(isForwardableSDKToolCall({ name: "createPlan", arguments: { todos: [{ content: "Build app" }] } })).toBe(true);
   });
 
   it("normalizes local client MCP forwarding tools back to SDK tool names", () => {
@@ -251,6 +258,48 @@ describe("Cursor SDK local-agent bridge", () => {
       }
     });
     expect(isForwardableSDKToolCall(normalized)).toBe(true);
+  });
+
+  it("normalizes SDK task and plan forwarding tools back to SDK tool names", () => {
+    const task = normalizeSDKToolCall({
+      type: "mcp",
+      args: {
+        providerIdentifier: "client",
+        toolName: "client_task",
+        args: {
+          description: "Inspect app",
+          prompt: "Find the entrypoint",
+          subagentType: { kind: "agent", name: "explore" }
+        }
+      }
+    });
+
+    expect(task).toEqual({
+      name: "task",
+      arguments: {
+        description: "Inspect app",
+        prompt: "Find the entrypoint",
+        subagentType: { kind: "agent", name: "explore" }
+      }
+    });
+    expect(isForwardableSDKToolCall(task)).toBe(true);
+
+    const plan = normalizeSDKToolCall({
+      type: "client_create_plan",
+      args: {
+        plan: "Build the app",
+        todos: [{ content: "Create files", status: "pending" }]
+      }
+    });
+
+    expect(plan).toEqual({
+      name: "createPlan",
+      arguments: {
+        plan: "Build the app",
+        todos: [{ content: "Create files", status: "pending" }]
+      }
+    });
+    expect(isForwardableSDKToolCall(plan)).toBe(true);
   });
 
   it("normalizes SDK tool calls that use OpenAI-style argument keys", () => {
@@ -707,6 +756,8 @@ describe("Cursor SDK local-agent bridge", () => {
     ]);
 
     expect(tools.some((tool) => tool.name === "client_shell")).toBe(true);
+    expect(tools.some((tool) => tool.name === "client_task")).toBe(true);
+    expect(tools.some((tool) => tool.name === "client_create_plan")).toBe(true);
     expect(tools.find((tool) => tool.name === "probe_write_file")).toMatchObject({
       description: "Writes a marker through the harness MCP server.",
       inputSchema: {
@@ -1698,6 +1749,8 @@ describe("Cursor SDK local-agent bridge", () => {
     const prompt = bridgePrompt("USER: create a file");
 
     expect(prompt).toContain("client_shell");
+    expect(prompt).toContain("client_task");
+    expect(prompt).toContain("client_create_plan");
     expect(prompt).toContain("Do not use the SDK built-in shell");
     expect(prompt).toContain("LOCAL TOOL RESULT records for your previous tool call");
   });

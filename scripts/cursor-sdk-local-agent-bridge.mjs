@@ -1325,6 +1325,41 @@ function clientMcpToolDefinitions(clientTools = []) {
         required: ["todos"],
         additionalProperties: true
       }
+    },
+    {
+      name: "client_task",
+      description: "Forward a subagent/task request to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          description: { type: "string" },
+          prompt: { type: "string" },
+          subagentType: { anyOf: [{ type: "string" }, { type: "object", additionalProperties: true }] },
+          model: { type: "string" },
+          resume: { type: "string" },
+          agentId: { type: "string" },
+          attachments: { type: "array", items: { type: "string" } },
+          mode: { type: "string" }
+        },
+        required: ["description", "prompt"],
+        additionalProperties: true
+      }
+    },
+    {
+      name: "client_create_plan",
+      description: "Forward a plan creation/update request to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          plan: { type: "string" },
+          overview: { type: "string" },
+          name: { type: "string" },
+          todos: { type: "array", items: { type: "object", additionalProperties: true } },
+          phases: { type: "array", items: { type: "object", additionalProperties: true } },
+          isProject: { type: "boolean" }
+        },
+        additionalProperties: true
+      }
     }
   ];
   const seen = new Set(tools.map((tool) => tool.name));
@@ -1344,12 +1379,12 @@ function bridgePrompt(prompt) {
   return [
     "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
     "The outer client owns local tool execution. When local work is needed, emit exactly one SDK tool call, then stop.",
-    "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, and client_todo_write.",
+    "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, client_todo_write, client_task, and client_create_plan.",
     "The same client MCP server also exposes the current harness tools by exact tool name when the outer client provided a tool schema.",
-    "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, or todowrite tools because those execute inside the bridge instead of the outer client.",
+    "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, todowrite, task, or createPlan tools because those execute inside the bridge instead of the outer client.",
     "If the prompt below says LOCAL TOOL REQUIRED, your response must be exactly one client MCP forwarding tool call and no prose.",
     "If the prompt below contains LOCAL TOOL RESULT records for your previous tool call, treat those tools as already executed by the outer client. Continue from the result, return any requested final answer, and do not repeat the same tool call unless the result shows a failure or more local work is clearly required.",
-    "When the outer prompt says to use SDK shell, write, read, edit, delete, glob, grep, ls, readLints, semSearch, or todowrite, satisfy that by calling the matching client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, or client_todo_write MCP tool.",
+    "When the outer prompt says to use SDK shell, write, read, edit, delete, glob, grep, ls, readLints, semSearch, todowrite, task, or createPlan, satisfy that by calling the matching client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, client_todo_write, client_task, or client_create_plan MCP tool.",
     "If the request below mentions an SDK routing map or asks for SDK mcp, satisfy that by calling the matching client MCP forwarding tool.",
     "For harness MCP tools named like mcp__server__tool or server_tool, still call the local client MCP server with toolName set to the exact harness tool name. Do not call a separate provider/server unless that exact server is exposed by the SDK runtime.",
     "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell or the exact harness shell tool with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
@@ -1468,6 +1503,12 @@ function sdkToolNameFromClientMcpTool(toolName) {
     case "todos":
     case "updatetodos":
       return "todowrite";
+    case "task":
+    case "subagent":
+    case "subagenttask":
+      return "task";
+    case "createplan":
+      return "createPlan";
     default:
       return null;
   }
@@ -1512,6 +1553,12 @@ function isForwardableSDKToolCall(toolCall, clientTools = []) {
       return hasString(args, "query", "pattern", "search", "searchQuery", "search_query", "semanticQuery", "semantic_query", "prompt");
     case "todowrite":
       return hasArray(args, "todos", "todoList", "todo_list", "todoItems", "todo_items", "items", "tasks", "taskList", "task_list");
+    case "task":
+      return hasString(args, "description", "desc", "summary")
+        && hasString(args, "prompt", "instructions", "input", "query");
+    case "createplan":
+      return hasString(args, "plan", "overview", "name", "title", "description")
+        || hasArray(args, "todos", "todoList", "todo_list", "todoItems", "todo_items", "items", "tasks", "taskList", "task_list", "phases");
     default:
       return false;
   }
@@ -1645,6 +1692,17 @@ function mcpWrapperPayloadLooksComplete(args) {
     case "search":
     case "query":
       return hasString(payload, "pattern", "query", "search", "regex");
+    case "task":
+    case "subagent":
+    case "subagenttask":
+      return hasString(payload, "description", "desc", "summary")
+        && hasString(payload, "prompt", "instructions", "input", "query");
+    case "createplan":
+    case "plan":
+    case "planupdate":
+    case "setplan":
+      return hasString(payload, "plan", "overview", "name", "title", "description")
+        || hasArray(payload, "todos", "todoList", "todo_list", "todoItems", "todo_items", "items", "tasks", "taskList", "task_list", "phases");
     default:
       return false;
   }

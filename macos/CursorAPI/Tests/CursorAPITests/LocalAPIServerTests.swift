@@ -2142,7 +2142,7 @@ final class LocalAPIServerTests: XCTestCase {
                 return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
             }
 
-        XCTAssertEqual(feedback.compactMap { $0["toolName"] as? String }, ["write", "read", "edit", "glob", "todowrite", "mcp", "mcp"])
+        XCTAssertEqual(feedback.compactMap { $0["toolName"] as? String }, ["write", "read", "edit", "glob", "todowrite", "task", "mcp"])
         let arguments = try feedback.map { try XCTUnwrap($0["arguments"] as? [String: Any]) }
         XCTAssertEqual(arguments[0]["path"] as? String, "/tmp/project/src/App.tsx")
         XCTAssertEqual(arguments[0]["fileText"] as? String, "export default function App() { return null }")
@@ -2156,10 +2156,9 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments[3]["globPattern"] as? String, "**/*.tsx")
         let todos = try XCTUnwrap(arguments[4]["todos"] as? [[String: Any]])
         XCTAssertEqual(todos.first?["content"] as? String, "Build app")
-        XCTAssertEqual(arguments[5]["providerIdentifier"] as? String, "client")
-        XCTAssertEqual(arguments[5]["toolName"] as? String, "task")
-        let taskArgs = try XCTUnwrap(arguments[5]["args"] as? [String: Any])
-        XCTAssertEqual(taskArgs["subagent_type"] as? String, "explore")
+        XCTAssertEqual(arguments[5]["description"] as? String, "Inspect app")
+        XCTAssertEqual(arguments[5]["prompt"] as? String, "Find the app entry point")
+        XCTAssertEqual(arguments[5]["subagentType"] as? String, "explore")
         XCTAssertEqual(arguments[6]["providerIdentifier"] as? String, "client")
         XCTAssertEqual(arguments[6]["toolName"] as? String, "skill")
         let skillArgs = try XCTUnwrap(arguments[6]["args"] as? [String: Any])
@@ -6822,6 +6821,60 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(arguments["args"])
     }
 
+    func testChatToolCallsMapSDKTaskBuiltinToOpenCodeTaskSchema() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"use task"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"task",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "description":{"type":"string"},
+                    "prompt":{"type":"string"},
+                    "subagent_type":{"type":"string"},
+                    "command":{"type":"string"}
+                  },
+                  "required":["description","prompt","subagent_type"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "task", arguments: [
+            "description": .string("Inspect app"),
+            "prompt": .string("Find the app entrypoint"),
+            "subagentType": .object(["kind": .string("agent"), "name": .string("explore")]),
+            "mode": .string("agent")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "task")
+        XCTAssertEqual(arguments["description"] as? String, "Inspect app")
+        XCTAssertEqual(arguments["prompt"] as? String, "Find the app entrypoint")
+        XCTAssertEqual(arguments["subagent_type"] as? String, "explore")
+        XCTAssertNil(arguments["subagentType"])
+        XCTAssertNil(arguments["mode"])
+    }
+
     func testChatToolCallsMapSDKMCPArgsToOpenCodeServerToolName() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
@@ -8375,6 +8428,74 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(tasks.first?["status"] as? String, "in_progress")
         XCTAssertEqual(tasks.first?["priority"] as? String, "medium")
         XCTAssertNil(arguments["todos"])
+    }
+
+    func testChatToolCallsMapSDKCreatePlanToTaskCollectionSchema() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"create a plan"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"set_plan",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "tasks":{
+                      "type":"array",
+                      "items":{
+                        "type":"object",
+                        "additionalProperties":false,
+                        "properties":{
+                          "content":{"type":"string"},
+                          "status":{"type":"string"},
+                          "priority":{"type":"string"}
+                        },
+                        "required":["content","status","priority"]
+                      }
+                    }
+                  },
+                  "required":["tasks"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_create_plan",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "createPlan", arguments: [
+                    "plan": .string("Ship local API"),
+                    "todos": .array([
+                        .object([
+                            "content": .string("Wire task forwarding"),
+                            "status": .string("todo_status_in_progress")
+                        ])
+                    ])
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        let tasks = try XCTUnwrap(arguments["tasks"] as? [[String: Any]])
+
+        XCTAssertEqual(function["name"] as? String, "set_plan")
+        XCTAssertEqual(tasks.first?["content"] as? String, "Wire task forwarding")
+        XCTAssertEqual(tasks.first?["status"] as? String, "in_progress")
+        XCTAssertEqual(tasks.first?["priority"] as? String, "medium")
+        XCTAssertNil(arguments["todos"])
+        XCTAssertNil(arguments["plan"])
     }
 
     func testChatToolResultsFeedTaskCollectionBackAsSDKTodos() throws {
