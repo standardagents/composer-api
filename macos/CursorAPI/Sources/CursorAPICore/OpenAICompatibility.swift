@@ -2410,7 +2410,8 @@ public enum OpenAICompatibility {
         depth: Int
     ) -> JSONValue? {
         guard depth <= 3 else { return nil }
-        guard case .object(let object)? = schema else { return nil }
+        let canonicalSchema = schemaWithInheritedDefinitions(schema, root: schema)
+        guard let object = canonicalParameterSchemaObject(canonicalSchema, root: canonicalSchema, depth: 0, seenRefs: []) else { return nil }
         if let value = object["default"] {
             return value
         }
@@ -2506,7 +2507,7 @@ public enum OpenAICompatibility {
         depth: Int
     ) -> [JSONValue]? {
         let minItems = max(1, schema["minItems"]?.integerValue ?? 1)
-        let itemSchema = schema["items"]
+        let itemSchema = schemaWithInheritedDefinitions(schema["items"], root: .object(schema))
         var itemTool = tool
         itemTool.parameters = itemSchema
         guard let item = synthesizedRequiredArgument(
@@ -2549,9 +2550,10 @@ public enum OpenAICompatibility {
         let propertyOrder = Array(properties.keys)
         for requiredProperty in required {
             let property = propertyName(matching: [requiredProperty], in: propertyOrder) ?? requiredProperty
+            let propertySchema = schemaWithInheritedDefinitions(properties[property], root: .object(schema))
             guard let value = synthesizedRequiredArgument(
                 property: property,
-                schema: properties[property],
+                schema: propertySchema,
                 output: output,
                 source: source,
                 sdkToolName: sdkToolName,
@@ -3469,7 +3471,10 @@ public enum OpenAICompatibility {
 
     private static func argumentValueSatisfiesSchema(_ value: JSONValue?, schema: JSONValue?, required: Bool) -> Bool {
         guard let value else { return !required }
-        guard case .object(let object)? = schema else { return value != .null || !required }
+        let canonicalSchema = schemaWithInheritedDefinitions(schema, root: schema)
+        guard let object = canonicalParameterSchemaObject(canonicalSchema, root: canonicalSchema, depth: 0, seenRefs: []) else {
+            return value != .null || !required
+        }
         if value == .null {
             return schemaAllowsJSONType(object, type: "null")
         }
@@ -3480,15 +3485,15 @@ public enum OpenAICompatibility {
             return false
         }
         let anyOf = composedParameterSchemas(object["anyOf"])
-        if !anyOf.isEmpty, !anyOf.contains(where: { argumentValueSatisfiesSchema(value, schema: $0, required: true) }) {
+        if !anyOf.isEmpty, !anyOf.contains(where: { argumentValueSatisfiesSchema(value, schema: schemaWithInheritedDefinitions($0, root: .object(object)), required: true) }) {
             return false
         }
         let oneOf = composedParameterSchemas(object["oneOf"])
-        if !oneOf.isEmpty, !oneOf.contains(where: { argumentValueSatisfiesSchema(value, schema: $0, required: true) }) {
+        if !oneOf.isEmpty, !oneOf.contains(where: { argumentValueSatisfiesSchema(value, schema: schemaWithInheritedDefinitions($0, root: .object(object)), required: true) }) {
             return false
         }
         let allOf = composedParameterSchemas(object["allOf"])
-        if !allOf.isEmpty, !allOf.allSatisfy({ argumentValueSatisfiesSchema(value, schema: $0, required: true) }) {
+        if !allOf.isEmpty, !allOf.allSatisfy({ argumentValueSatisfiesSchema(value, schema: schemaWithInheritedDefinitions($0, root: .object(object)), required: true) }) {
             return false
         }
         let types = schemaJSONTypes(object)
@@ -3533,14 +3538,16 @@ public enum OpenAICompatibility {
         }
         for requiredProperty in required {
             let property = propertyName(matching: [requiredProperty], in: propertyOrder) ?? requiredProperty
-            guard argumentValueSatisfiesSchema(values[property], schema: properties[property], required: true) else {
+            let propertySchema = schemaWithInheritedDefinitions(properties[property], root: .object(schema))
+            guard argumentValueSatisfiesSchema(values[property], schema: propertySchema, required: true) else {
                 return false
             }
         }
         for (property, nestedValue) in values {
             if let propertyName = propertyName(matching: [property], in: propertyOrder),
                let propertySchema = properties[propertyName] {
-                if !argumentValueSatisfiesSchema(nestedValue, schema: propertySchema, required: false) {
+                let nestedSchema = schemaWithInheritedDefinitions(propertySchema, root: .object(schema))
+                if !argumentValueSatisfiesSchema(nestedValue, schema: nestedSchema, required: false) {
                     return false
                 }
                 continue
@@ -3581,7 +3588,8 @@ public enum OpenAICompatibility {
             prefixItems = []
         }
         for index in 0..<min(prefixItems.count, values.count) {
-            if !argumentValueSatisfiesSchema(values[index], schema: prefixItems[index], required: true) {
+            let itemSchema = schemaWithInheritedDefinitions(prefixItems[index], root: .object(schema))
+            if !argumentValueSatisfiesSchema(values[index], schema: itemSchema, required: true) {
                 return false
             }
         }
@@ -3589,8 +3597,9 @@ public enum OpenAICompatibility {
             return false
         }
         if case .object? = schema["items"] {
+            let itemSchema = schemaWithInheritedDefinitions(schema["items"], root: .object(schema))
             for index in prefixItems.count..<values.count {
-                if !argumentValueSatisfiesSchema(values[index], schema: schema["items"], required: true) {
+                if !argumentValueSatisfiesSchema(values[index], schema: itemSchema, required: true) {
                     return false
                 }
             }
@@ -3617,6 +3626,9 @@ public enum OpenAICompatibility {
     }
 
     private static func schemaAllowsJSONType(_ schema: [String: JSONValue], type: String) -> Bool {
+        if type == "null", schema["nullable"] == .bool(true) {
+            return true
+        }
         let types = schemaJSONTypes(schema)
         return types.isEmpty || types.contains(type)
     }
@@ -3818,6 +3830,28 @@ public enum OpenAICompatibility {
         ["schema", "json_schema", "input_schema", "inputSchema"]
     }
 
+    private static func schemaWithInheritedDefinitions(_ schema: JSONValue?, root: JSONValue?) -> JSONValue? {
+        guard case .object(var object)? = schema else { return schema }
+        for (key, value) in schemaDefinitionValues(root: root) where object[key] == nil {
+            object[key] = value
+        }
+        return .object(object)
+    }
+
+    private static func schemaDefinitionValues(root: JSONValue?) -> [(String, JSONValue)] {
+        guard case .object(let object)? = root else { return [] }
+        var values: [(String, JSONValue)] = []
+        for key in ["$defs", "definitions"] {
+            if let value = object[key] {
+                values.append((key, value))
+            }
+        }
+        for key in parameterSchemaWrapperKeys() {
+            values.append(contentsOf: schemaDefinitionValues(root: object[key]))
+        }
+        return values
+    }
+
     private static func directParameterSchemaShape(
         _ root: [String: JSONValue],
         root schemaRoot: JSONValue?,
@@ -3827,7 +3861,8 @@ public enum OpenAICompatibility {
         let properties: [String: JSONValue]
         if case .object(let object)? = root["properties"] {
             properties = object.mapValues {
-                dereferencedParameterSchemaValue($0, root: schemaRoot, depth: depth + 1, seenRefs: seenRefs) ?? $0
+                let schema = dereferencedParameterSchemaValue($0, root: schemaRoot, depth: depth + 1, seenRefs: seenRefs) ?? $0
+                return schemaWithInheritedDefinitions(schema, root: schemaRoot) ?? schema
             }
         } else {
             properties = [:]

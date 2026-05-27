@@ -3029,6 +3029,117 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.count, 0)
     }
 
+    func testChatToolCallsMapWrapperToolCallsThroughNestedReferencedSchemas() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"write a file"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"workspace_write",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "input":{
+                      "type":"object",
+                      "additionalProperties":false,
+                      "properties":{
+                        "filePath":{"$ref":"#/$defs/FilePath"},
+                        "content":{"type":"string"}
+                      },
+                      "required":["filePath","content"]
+                    }
+                  },
+                  "required":["input"],
+                  "$defs":{
+                    "FilePath":{"type":"string"}
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "write", arguments: [
+            "path": .string("src/App.tsx"),
+            "fileText": .string("export default function App() { return null }")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_nested_ref",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+        let input = try XCTUnwrap(arguments["input"] as? [String: Any])
+
+        XCTAssertEqual(function["name"] as? String, "workspace_write")
+        XCTAssertEqual(input["filePath"] as? String, "src/App.tsx")
+        XCTAssertEqual(input["content"] as? String, "export default function App() { return null }")
+        XCTAssertNil(arguments["path"])
+        XCTAssertNil(arguments["fileText"])
+    }
+
+    func testChatToolCallsDoNotIgnoreInvalidNestedReferencedSchemas() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"write a file"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"workspace_write",
+                "parameters":{
+                  "type":"object",
+                  "additionalProperties":false,
+                  "properties":{
+                    "input":{
+                      "type":"object",
+                      "additionalProperties":false,
+                      "properties":{
+                        "filePath":{"$ref":"#/$defs/FilePath"},
+                        "content":{"type":"string"}
+                      },
+                      "required":["filePath","content"]
+                    }
+                  },
+                  "required":["input"],
+                  "$defs":{
+                    "FilePath":{"type":"number"}
+                  }
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "write", arguments: [
+            "path": .string("src/App.tsx"),
+            "fileText": .string("export default function App() { return null }")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_nested_ref_invalid",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.count, 0)
+    }
+
     func testChatToolCallsMapDirectoryOnlySDKGlobForOpenCode() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
