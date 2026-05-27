@@ -34,6 +34,13 @@ export interface OpenAiToolCall {
   };
 }
 
+interface ToolParameterSchemaShape {
+  properties: string[];
+  required: string[];
+  allowAdditionalProperties: boolean;
+  propertySchemas: Record<string, unknown>;
+}
+
 interface CursorModelPricing {
   input: number;
   output: number;
@@ -1553,7 +1560,7 @@ function canonicalToolName(value: string): string {
   return normalized;
 }
 
-function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | undefined, emittedName = ""): Record<string, unknown> {
+function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | undefined, emittedName = "", wrapperDepth = 0): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
   const emittedCanonical = canonicalToolName(emittedName);
   const selectedCanonical = canonicalToolName(tool?.name || "");
@@ -1565,6 +1572,10 @@ function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolS
     ? expandToolArguments(recordArgumentValue(args.args) ?? {})
     : expandToolArguments(args);
   if (!schema.properties.length) return argsToNormalize;
+  const wrapperObjectArguments = normalizeWrapperObjectArguments(argsToNormalize, tool, emittedName, schema, wrapperDepth);
+  if (wrapperObjectArguments) {
+    return wrapperObjectArguments;
+  }
   if (selectedTool === "strreplaceeditor") {
     return strReplaceEditorArguments(argsToNormalize, emittedCanonical, tool);
   }
@@ -1607,6 +1618,10 @@ function normalizeToolArguments(args: Record<string, unknown>, tool: OpenAiToolS
 function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boolean {
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return false;
+  const wrapper = wrapperObjectArgumentProperty(tool, schema);
+  if (wrapper) {
+    return schemaLooksCompatible(emittedName, { ...tool, parameters: wrapper.parameters });
+  }
   const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
   const has = (candidates: string[]) => Boolean(firstMatchingProperty(candidates, schema.properties, normalizedProperties));
   const canonical = canonicalToolName(emittedName);
@@ -2097,7 +2112,7 @@ function mcpProviderNameVariants(provider: string | undefined): string[] {
 
 function normalizeMCPWrapperArguments(
   args: Record<string, unknown>,
-  schema: { properties: string[]; required: string[]; allowAdditionalProperties: boolean }
+  schema: ToolParameterSchemaShape
 ): Record<string, unknown> {
   if (!schema.properties.length) return args;
   const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
@@ -2114,18 +2129,59 @@ function normalizeMCPWrapperArguments(
   return Object.keys(output).length ? output : args;
 }
 
-function toolParameterSchema(tool: OpenAiToolSpec | undefined): {
-  properties: string[];
-  required: string[];
-  allowAdditionalProperties: boolean;
-} {
-  const parameters = isRecord(tool?.parameters) ? tool.parameters : undefined;
+function normalizeWrapperObjectArguments(
+  args: Record<string, unknown>,
+  tool: OpenAiToolSpec | undefined,
+  emittedName: string,
+  schema: ToolParameterSchemaShape,
+  wrapperDepth: number
+): Record<string, unknown> | undefined {
+  if (!tool || wrapperDepth > 1) return undefined;
+  const wrapper = wrapperObjectArgumentProperty(tool, schema);
+  if (!wrapper) return undefined;
+  const nested = normalizeToolArguments(
+    args,
+    { name: tool.name, description: tool.description, parameters: wrapper.parameters },
+    emittedName,
+    wrapperDepth + 1
+  );
+  return { [wrapper.key]: nested };
+}
+
+function wrapperObjectArgumentProperty(
+  tool: OpenAiToolSpec | undefined,
+  schema = toolParameterSchema(tool)
+): { key: string; parameters: unknown } | undefined {
+  if (!tool || !schema.properties.length) return undefined;
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  for (const candidate of wrapperObjectPropertyCandidates()) {
+    const key = firstMatchingProperty([candidate], schema.properties, normalizedProperties);
+    if (!key) continue;
+    const parameters = schema.propertySchemas[key];
+    if (toolParameterSchemaFromValue(parameters).properties.length > 0) {
+      return { key, parameters };
+    }
+  }
+  return undefined;
+}
+
+function wrapperObjectPropertyCandidates(): string[] {
+  return ["input", "args", "arguments", "params", "parameters", "payload", "data"];
+}
+
+function toolParameterSchema(tool: OpenAiToolSpec | undefined): ToolParameterSchemaShape {
+  return toolParameterSchemaFromValue(tool?.parameters);
+}
+
+function toolParameterSchemaFromValue(value: unknown): ToolParameterSchemaShape {
+  const parameters = isRecord(value) ? value : undefined;
   const properties = isRecord(parameters?.properties) ? parameters.properties : undefined;
   const required = Array.isArray(parameters?.required) ? parameters.required.filter((item): item is string => typeof item === "string") : [];
   return {
     properties: properties ? Object.keys(properties) : [],
     required,
-    allowAdditionalProperties: parameters?.additionalProperties === true || isRecord(parameters?.additionalProperties)
+    allowAdditionalProperties: parameters?.additionalProperties === true || isRecord(parameters?.additionalProperties),
+    propertySchemas: properties ?? {}
   };
 }
 
@@ -2138,12 +2194,14 @@ function applyRequiredToolDefaults(
   if (!required.length) return output;
   const normalizedTool = normalizeToolName(tool?.name || "");
   const next = { ...output };
-  if (["bash", "shell", "terminal"].includes(normalizedTool)) {
+  if (isShellLikeTool(tool, originalArgs)) {
     if (required.includes("description") && typeof next.description !== "string") {
-      next.description = shellDescription(next.command);
+      const command = commandLikeValue(next, tool) ?? firstStringArg(originalArgs, "command", "cmd", "script", "input");
+      next.description = shellDescription(command);
     }
-    if (required.includes("command") && typeof next.command !== "string") {
-      next.command = firstStringArg(originalArgs, "command", "cmd", "script") || "";
+    const commandKey = commandLikeProperty(tool) ?? "command";
+    if (required.includes(commandKey) && typeof next[commandKey] !== "string") {
+      next[commandKey] = firstStringArg(originalArgs, "command", "cmd", "script", "input") || "";
     }
   } else if (["glob", "fileglob", "filesearch", "findfiles"].includes(normalizedTool)) {
     if (required.includes("pattern") && typeof next.pattern !== "string") {
@@ -2158,20 +2216,38 @@ function sanitizeNormalizedToolArguments(
   tool: OpenAiToolSpec | undefined,
   originalArgs: Record<string, unknown>
 ): Record<string, unknown> {
-  const normalizedTool = normalizeToolName(tool?.name || "");
-  if (!["bash", "shell", "terminal"].includes(normalizedTool)) return output;
+  if (!isShellLikeTool(tool, originalArgs)) return output;
   const next = { ...output };
   for (const key of ["workdir", "cwd", "directory", "path"]) {
     if (isSyntheticSdkWorkingDirectory(next[key])) delete next[key];
   }
-  const command = typeof next.command === "string" ? next.command : firstStringArg(originalArgs, "command", "cmd", "script");
-  if (command && shouldBackgroundShellCommand(command)) {
-    next.command = backgroundShellCommand(command);
+  const commandKey = commandLikeProperty(tool) ?? "command";
+  const command = typeof next[commandKey] === "string" ? next[commandKey] : firstStringArg(originalArgs, "command", "cmd", "script", "input");
+  if (typeof command === "string" && shouldBackgroundShellCommand(command)) {
+    next[commandKey] = backgroundShellCommand(command);
     if (typeof next.description === "string") {
       next.description = `Starts background process: ${next.description}`;
     }
   }
   return next;
+}
+
+function isShellLikeTool(tool: OpenAiToolSpec | undefined, originalArgs: Record<string, unknown>): boolean {
+  const normalizedTool = normalizeToolName(tool?.name || "");
+  if (["bash", "shell", "terminal"].includes(normalizedTool) || canonicalToolName(tool?.name || "") === "shell") return true;
+  return Boolean(commandLikeProperty(tool) && firstStringArg(originalArgs, "command", "cmd", "script", "input"));
+}
+
+function commandLikeProperty(tool: OpenAiToolSpec | undefined): string | undefined {
+  const schema = toolParameterSchema(tool);
+  if (!schema.properties.length) return undefined;
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  return firstMatchingProperty(["command", "cmd", "script", "input"], schema.properties, normalizedProperties);
+}
+
+function commandLikeValue(output: Record<string, unknown>, tool: OpenAiToolSpec | undefined): unknown {
+  const commandKey = commandLikeProperty(tool);
+  return commandKey ? output[commandKey] : output.command;
 }
 
 function isSyntheticSdkWorkingDirectory(value: unknown): boolean {

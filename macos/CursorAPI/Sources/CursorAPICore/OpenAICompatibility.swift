@@ -1455,13 +1455,22 @@ public enum OpenAICompatibility {
     private static func normalizeArguments(
         _ rawArguments: [String: JSONValue],
         sdkToolName: String,
-        tool: OpenAIToolSpec
+        tool: OpenAIToolSpec,
+        wrapperDepth: Int = 0
     ) -> [String: JSONValue] {
         let canonical = canonicalToolName(sdkToolName)
         let arguments = canonical == "mcp" ? rawArguments : expandedToolArguments(rawArguments)
         let properties = parameterPropertyNames(tool)
         let selectedTool = normalizedName(tool.name)
         let selectedCanonical = canonicalToolName(tool.name)
+
+        if wrapperDepth <= 1,
+           let wrapper = wrapperObjectArgumentProperty(tool: tool, properties: properties) {
+            let nestedTool = OpenAIToolSpec(name: tool.name, description: tool.description, parameters: wrapper.schema)
+            return [
+                wrapper.key: .object(normalizeArguments(arguments, sdkToolName: sdkToolName, tool: nestedTool, wrapperDepth: wrapperDepth + 1))
+            ]
+        }
 
         if selectedTool == "strreplaceeditor",
            ["write", "read", "edit"].contains(canonical) {
@@ -2145,6 +2154,30 @@ public enum OpenAICompatibility {
         return properties[property]
     }
 
+    private struct WrapperObjectArgumentProperty {
+        var key: String
+        var schema: JSONValue
+    }
+
+    private static func wrapperObjectArgumentProperty(tool: OpenAIToolSpec, properties: [String]) -> WrapperObjectArgumentProperty? {
+        guard !properties.isEmpty else { return nil }
+        for candidate in wrapperObjectPropertyAliases() {
+            guard let key = propertyName(matching: [candidate], in: properties),
+                  let schema = parameterPropertySchema(key, tool: tool) else {
+                continue
+            }
+            let nestedTool = OpenAIToolSpec(name: tool.name, description: tool.description, parameters: schema)
+            if !parameterPropertyNames(nestedTool).isEmpty {
+                return WrapperObjectArgumentProperty(key: key, schema: schema)
+            }
+        }
+        return nil
+    }
+
+    private static func wrapperObjectPropertyAliases() -> [String] {
+        ["input", "args", "arguments", "params", "parameters", "payload", "data"]
+    }
+
     private static func patchStyleFileArguments(
         _ arguments: [String: JSONValue],
         sdkToolName: String,
@@ -2225,6 +2258,10 @@ public enum OpenAICompatibility {
     private static func schemaLooksCompatible(sdkToolName: String, tool: OpenAIToolSpec) -> Bool {
         let properties = parameterPropertyNames(tool)
         guard !properties.isEmpty else { return false }
+        if let wrapper = wrapperObjectArgumentProperty(tool: tool, properties: properties) {
+            let nestedTool = OpenAIToolSpec(name: tool.name, description: tool.description, parameters: wrapper.schema)
+            return schemaLooksCompatible(sdkToolName: sdkToolName, tool: nestedTool)
+        }
         func has(_ candidates: [String]) -> Bool {
             propertyName(matching: candidates, in: properties) != nil
         }

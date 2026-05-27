@@ -916,6 +916,69 @@ describe("OpenAI compatibility adapter", () => {
     ]);
   });
 
+  it("maps SDK calls into wrapper object tool schemas", () => {
+    const tools = [
+      {
+        name: "wrapped_bash",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            input: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                command: { type: "string" },
+                workdir: { type: "string" }
+              },
+              required: ["command"]
+            }
+          },
+          required: ["input"]
+        }
+      },
+      {
+        name: "wrapped_files",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            input: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                action: { type: "string", enum: ["read", "write", "replace", "delete"] },
+                path: { type: "string" },
+                content: { type: "string" },
+                old: { type: "string" },
+                replacement: { type: "string" }
+              },
+              required: ["action", "path"]
+            }
+          },
+          required: ["input"]
+        }
+      }
+    ];
+
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools,
+      toolCalls: [
+        { name: "shell", arguments: { command: "npm test", workingDirectory: "/tmp/app" } },
+        { name: "write", arguments: { path: "src/App.tsx", fileText: "export default function App() { return null }" } },
+        { name: "edit", arguments: { path: "src/App.tsx", oldString: "Hello", newString: "Hi" } }
+      ]
+    });
+
+    expect(toolCalls.map((call) => call.function.name)).toEqual(["wrapped_bash", "wrapped_files", "wrapped_files"]);
+    expect(toolCalls.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { input: { command: "npm test", workdir: "/tmp/app" } },
+      { input: { action: "write", path: "src/App.tsx", content: "export default function App() { return null }" } },
+      { input: { action: "replace", path: "src/App.tsx", old: "Hello", replacement: "Hi" } }
+    ]);
+  });
+
   it("maps SDK file operations to apply-patch style tools", () => {
     const tools = [
       {
