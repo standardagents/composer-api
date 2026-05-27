@@ -7979,6 +7979,75 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(arguments["fileText"])
     }
 
+    func testResponsesFunctionCallsMapSDKFileOperationsToCommandEnumsWithNouns() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"use command style file operations",
+          "tools":[
+            {
+              "type":"function",
+              "name":"workspace_file",
+              "parameters":{
+                "type":"object",
+                "properties":{
+                  "operation":{"type":"string","enum":["read_file","create_file","replace_text","delete_file"]},
+                  "filePath":{"type":"string"},
+                  "content":{"type":"string"},
+                  "oldText":{"type":"string"},
+                  "newText":{"type":"string"}
+                },
+                "required":["operation","filePath"],
+                "additionalProperties":false
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_command_enum_files",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "write", arguments: [
+                    "path": .string("src/App.jsx"),
+                    "fileText": .string("export default function App() { return null }")
+                ]),
+                CursorToolCall(name: "read", arguments: [
+                    "path": .string("src/App.jsx")
+                ]),
+                CursorToolCall(name: "edit", arguments: [
+                    "path": .string("src/App.jsx"),
+                    "oldString": .string("return null"),
+                    "newString": .string("return <main />")
+                ]),
+                CursorToolCall(name: "delete", arguments: [
+                    "path": .string("src/old.jsx")
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let output = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let functionCalls = output.filter { ($0["type"] as? String) == "function_call" }
+        XCTAssertEqual(functionCalls.count, 4)
+
+        let arguments = try functionCalls.map(decodedArguments)
+
+        XCTAssertEqual(functionCalls.compactMap { $0["name"] as? String }, Array(repeating: "workspace_file", count: 4))
+        XCTAssertEqual(arguments[0]["operation"] as? String, "create_file")
+        XCTAssertEqual(arguments[0]["filePath"] as? String, "src/App.jsx")
+        XCTAssertEqual(arguments[0]["content"] as? String, "export default function App() { return null }")
+        XCTAssertEqual(arguments[1]["operation"] as? String, "read_file")
+        XCTAssertEqual(arguments[1]["filePath"] as? String, "src/App.jsx")
+        XCTAssertEqual(arguments[2]["operation"] as? String, "replace_text")
+        XCTAssertEqual(arguments[2]["filePath"] as? String, "src/App.jsx")
+        XCTAssertEqual(arguments[2]["oldText"] as? String, "return null")
+        XCTAssertEqual(arguments[2]["newText"] as? String, "return <main />")
+        XCTAssertEqual(arguments[3]["operation"] as? String, "delete_file")
+        XCTAssertEqual(arguments[3]["filePath"] as? String, "src/old.jsx")
+    }
+
     func testResponsesFunctionCallsMapSDKReadToArrayRangeSchemas() throws {
         let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
         {
@@ -9410,6 +9479,93 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments[2]["workingDirectory"] as? String, "src")
         XCTAssertEqual(arguments[3]["targetDirectory"] as? String, "src")
         XCTAssertEqual(arguments[3]["globPattern"] as? String, "**/*.tsx")
+    }
+
+    func testResponsesToolResultsFeedCommandEnumNounOperationsBackWithSDKArguments() throws {
+        let tools: [[String: Any]] = [
+            [
+                "type": "function",
+                "name": "workspace_file",
+                "parameters": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": [
+                        "operation": ["type": "string", "enum": ["read_file", "create_file", "replace_text", "delete_file"]],
+                        "filePath": ["type": "string"],
+                        "content": ["type": "string"],
+                        "oldText": ["type": "string"],
+                        "newText": ["type": "string"]
+                    ],
+                    "required": ["operation", "filePath"]
+                ]
+            ]
+        ]
+        let requestData = try JSONSerialization.data(withJSONObject: [
+            "model": "composer-2.5",
+            "input": "update files",
+            "tools": tools
+        ])
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(requestData)
+        let response = OpenAICompatibility.responseObject(
+            id: "resp_command_enum_feedback",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "write", arguments: [
+                    "path": .string("src/App.tsx"),
+                    "fileText": .string("export default function App() { return null }")
+                ]),
+                CursorToolCall(name: "read", arguments: [
+                    "path": .string("src/App.tsx")
+                ]),
+                CursorToolCall(name: "edit", arguments: [
+                    "path": .string("src/App.tsx"),
+                    "oldString": .string("return null"),
+                    "newString": .string("return <main />")
+                ]),
+                CursorToolCall(name: "delete", arguments: [
+                    "path": .string("src/old.tsx")
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+        let output = try XCTUnwrap(response["output"] as? [[String: Any]])
+        let functionCalls = output.filter { ($0["type"] as? String) == "function_call" }
+        XCTAssertEqual(functionCalls.count, 4)
+
+        let functionOutputs: [[String: Any]] = functionCalls.flatMap { functionCall in
+            [
+                functionCall,
+                [
+                    "type": "function_call_output",
+                    "call_id": functionCall["call_id"] as? String ?? "",
+                    "output": "ok"
+                ]
+            ]
+        }
+        let continueData = try JSONSerialization.data(withJSONObject: [
+            "model": "composer-2.5",
+            "input": [["role": "user", "content": "update files"]] + functionOutputs,
+            "tools": tools
+        ])
+        let continued = try OpenAICompatibility.prepareResponsesRequest(continueData)
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedback = try continued.prompt
+            .split(separator: "\n")
+            .filter { $0.hasPrefix(prefix) }
+            .map { line -> [String: Any] in
+                let data = Data(String(line.dropFirst(prefix.count)).utf8)
+                return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            }
+
+        XCTAssertEqual(feedback.compactMap { $0["toolName"] as? String }, ["write", "read", "edit", "delete"])
+        let arguments = try feedback.map { try XCTUnwrap($0["arguments"] as? [String: Any]) }
+        XCTAssertEqual(arguments[0]["path"] as? String, "src/App.tsx")
+        XCTAssertEqual(arguments[0]["fileText"] as? String, "export default function App() { return null }")
+        XCTAssertEqual(arguments[1]["path"] as? String, "src/App.tsx")
+        XCTAssertEqual(arguments[2]["path"] as? String, "src/App.tsx")
+        XCTAssertEqual(arguments[2]["oldString"] as? String, "return null")
+        XCTAssertEqual(arguments[2]["newString"] as? String, "return <main />")
+        XCTAssertEqual(arguments[3]["path"] as? String, "src/old.tsx")
     }
 
     func testResponsesSemanticSearchOutputsFeedBackWithSDKArguments() throws {

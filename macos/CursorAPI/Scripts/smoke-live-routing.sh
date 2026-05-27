@@ -175,6 +175,25 @@ process.stdin.on("end", () => {
 '
 }
 
+extract_response_function_call_summary() {
+  "$JS_RUNTIME" -e '
+let body = "";
+process.stdin.on("data", (chunk) => body += chunk);
+process.stdin.on("end", () => {
+  const json = JSON.parse(body);
+  const call = (json.output || []).find((item) => item && item.type === "function_call");
+  if (!call) process.exit(2);
+  const args = typeof call.arguments === "string" ? JSON.parse(call.arguments || "{}") : (call.arguments || {});
+  process.stdout.write([
+    call.name || "",
+    args.operation || "",
+    args.filePath || args.file_path || "",
+    String(args.content ?? args.body ?? "").trim()
+  ].join("\n"));
+});
+'
+}
+
 chat_body='{"model":"composer-2.5-fast","messages":[{"role":"user","content":"Reply exactly: hello"}],"stream":false}'
 chat_content="$(post_json "/chat/completions" "$chat_body" | extract_chat_content)"
 [ "$chat_content" = "hello" ] || fail "chat completions returned '$chat_content', expected hello"
@@ -187,6 +206,12 @@ responses_body='{"model":"composer-2.5-fast","input":"Reply exactly: hello","str
 responses_content="$(post_json "/responses" "$responses_body" | extract_response_text)"
 [ "$responses_content" = "hello" ] || fail "Responses API returned '$responses_content', expected hello"
 
+command_enum_responses_body='{"model":"composer-2.5-fast","input":"Create src/live-command-enum.txt containing exactly: live command enum ok","tools":[{"type":"function","name":"workspace_file","parameters":{"type":"object","properties":{"operation":{"type":"string","enum":["read_file","create_file","replace_text","delete_file"]},"filePath":{"type":"string"},"content":{"type":"string"},"oldText":{"type":"string"},"newText":{"type":"string"}},"required":["operation","filePath"],"additionalProperties":false}}]}'
+command_enum_responses_summary="$(post_json "/responses" "$command_enum_responses_body" | extract_response_function_call_summary)"
+expected_command_enum_responses_summary=$'workspace_file\ncreate_file\nsrc/live-command-enum.txt\nlive command enum ok'
+[ "$command_enum_responses_summary" = "$expected_command_enum_responses_summary" ] \
+  || fail "Responses API command-enum tool mapping returned unexpected summary: $command_enum_responses_summary"
+
 bridge_process_count() {
   ps ax -o command= \
     | grep -F "cursor-sdk-local-agent-bridge.mjs" \
@@ -194,6 +219,29 @@ bridge_process_count() {
     | grep -v grep \
     | wc -l \
     | tr -d " "
+}
+
+opencode_session_id_from_output() {
+  "$JS_RUNTIME" -e '
+const fs = require("node:fs");
+const text = fs.readFileSync(process.argv[1], "utf8");
+const match = text.match(/"sessionID":"([^"]+)"/);
+process.stdout.write(match ? match[1] : "");
+' "$1"
+}
+
+opencode_export_for_output() {
+  local project_dir="$1"
+  local output_file="$2"
+  local export_file="$3"
+  local session_id
+  session_id="$(opencode_session_id_from_output "$output_file")"
+  [ -n "$session_id" ] || return 1
+  (
+    cd "$project_dir"
+    HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" \
+      opencode export "$session_id" >"$export_file" 2>/dev/null
+  )
 }
 
 verify_deep_opencode_todo_app() {
@@ -255,7 +303,7 @@ verify_deep_opencode_todo_app() {
 
 bridge_count="$(bridge_process_count)"
 [ "$bridge_count" = "1" ] || fail "expected one shared SDK bridge process, found $bridge_count"
-echo "Verified direct chat, streaming chat, Responses API, and one shared SDK bridge process."
+echo "Verified direct chat, streaming chat, Responses API text and tool mapping, and one shared SDK bridge process."
 
 if command -v pi >/dev/null 2>&1; then
   pi_home="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-pi-home.XXXXXX")"
@@ -490,8 +538,9 @@ JSON
 
   glob_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-glob-project.XXXXXX")"
   glob_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-glob-run.XXXXXX")"
+  glob_export="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-glob-export.XXXXXX")"
   TEMP_DIRS+=("$glob_project")
-  TEMP_FILES+=("$glob_output")
+  TEMP_FILES+=("$glob_output" "$glob_export")
   mkdir -p "$glob_project/src"
   printf 'export const smoke = true\n' > "$glob_project/src/App.tsx"
   printf '{"name":"api-for-cursor-glob-smoke"}\n' > "$glob_project/package.json"
@@ -524,6 +573,14 @@ JSON
   done
   wait "$glob_pid" >/dev/null 2>&1 || true
   if [ "$glob_verified" -ne 1 ]; then
+    if opencode_export_for_output "$glob_project" "$glob_output" "$glob_export" \
+      && grep -F '"tool": "glob"' "$glob_export" >/dev/null \
+      && grep -F 'src/App.tsx' "$glob_export" >/dev/null \
+      && ! grep -F "SchemaError" "$glob_export" >/dev/null; then
+      glob_verified=1
+    fi
+  fi
+  if [ "$glob_verified" -ne 1 ]; then
     tail -80 "$glob_output"
     fail "OpenCode did not execute a valid live glob tool round trip"
   fi
@@ -531,8 +588,9 @@ JSON
 
   webfetch_project="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-webfetch-project.XXXXXX")"
   webfetch_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-webfetch-run.XXXXXX")"
+  webfetch_export="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-live-opencode-webfetch-export.XXXXXX")"
   TEMP_DIRS+=("$webfetch_project")
-  TEMP_FILES+=("$webfetch_output")
+  TEMP_FILES+=("$webfetch_output" "$webfetch_export")
   (
     cd "$webfetch_project"
     HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" \
@@ -560,6 +618,14 @@ JSON
     sleep 0.5
   done
   wait "$webfetch_pid" >/dev/null 2>&1 || true
+  if [ "$webfetch_verified" -ne 1 ]; then
+    if opencode_export_for_output "$webfetch_project" "$webfetch_output" "$webfetch_export" \
+      && grep -F '"tool": "webfetch"' "$webfetch_export" >/dev/null \
+      && grep -F "Example Domain" "$webfetch_export" >/dev/null \
+      && ! grep -E '"tool": "bash"|"tool":"bash"|SchemaError|Invalid tool|tool_use_error|NoSuchTool' "$webfetch_export" >/dev/null; then
+      webfetch_verified=1
+    fi
+  fi
   if [ "$webfetch_verified" -ne 1 ]; then
     tail -80 "$webfetch_output"
     fail "OpenCode did not execute a valid live non-builtin webfetch tool round trip"

@@ -25,6 +25,7 @@ const agentCache = new Map();
 let server = null;
 
 if (isMainModule()) {
+  installBridgeProcessHandlers();
   startServer();
   process.on("SIGINT", () => closeAndExit(0));
   process.on("SIGTERM", () => closeAndExit(0));
@@ -108,9 +109,10 @@ async function streamLocalAgent(input, response) {
   const markClosed = () => {
     closed = true;
   };
+  const socket = response.socket;
   response.on("close", markClosed);
   response.on("error", markClosed);
-  response.socket?.on?.("error", markClosed);
+  socket?.on?.("error", markClosed);
   response.writeHead(200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
@@ -128,6 +130,9 @@ async function streamLocalAgent(input, response) {
   } catch (error) {
     emit({ type: "error", error: openAiError(error).error });
   } finally {
+    response.off("close", markClosed);
+    response.off("error", markClosed);
+    socket?.off?.("error", markClosed);
     if (!response.writableEnded && !response.destroyed) {
       response.end();
     }
@@ -198,19 +203,25 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     } catch {}
   }
 
-  for await (const event of run.stream()) {
-    if (event.type === "assistant") {
-      for (const block of event.message?.content ?? []) {
-        if (block?.type === "text" && typeof block.text === "string") {
-          text += block.text;
-          if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+  try {
+    for await (const event of run.stream()) {
+      if (event.type === "assistant") {
+        for (const block of event.message?.content ?? []) {
+          if (block?.type === "text" && typeof block.text === "string") {
+            text += block.text;
+            if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+          }
         }
+        continue;
       }
-      continue;
+      if (event.type === "tool_call") {
+        await captureToolCall({ type: event.name, args: event.args });
+        if (capturedToolCall) break;
+      }
     }
-    if (event.type === "tool_call") {
-      await captureToolCall({ type: event.name, args: event.args });
-      if (capturedToolCall) break;
+  } catch (error) {
+    if (!capturedToolCall && !(cancelRequested && isBenignCancellationError(error))) {
+      throw error;
     }
   }
 
@@ -316,13 +327,32 @@ const isRecord = ${isRecord.toString()};
 const stableJson = ${stableJson.toString()};
 const sortJson = ${sortJson.toString()};
 const rl = readline.createInterface({ input: process.stdin });
+let stdoutClosed = false;
+function isBenignPipeError(error) {
+  return error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED";
+}
+function writeStdout(payload) {
+  if (stdoutClosed) return false;
+  try {
+    return process.stdout.write(payload);
+  } catch (error) {
+    if (!isBenignPipeError(error)) throw error;
+    stdoutClosed = true;
+    return false;
+  }
+}
+process.stdout.on("error", (error) => {
+  stdoutClosed = true;
+  if (isBenignPipeError(error)) process.exit(0);
+  process.exitCode = 1;
+});
 function send(id, result) {
   if (id === undefined || id === null) return;
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
+  writeStdout(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
 }
 function sendError(id, message) {
   if (id === undefined || id === null) return;
-  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\\n");
+  writeStdout(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\\n");
 }
 rl.on("line", (line) => {
   if (!line.trim()) return;
@@ -1019,6 +1049,8 @@ function bridgePrompt(prompt) {
     "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, and client_todo_write.",
     "The same client MCP server also exposes the current harness tools by exact tool name when the outer client provided a tool schema.",
     "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, or todowrite tools because those execute inside the bridge instead of the outer client.",
+    "If the prompt below says LOCAL TOOL REQUIRED, your response must be exactly one client MCP forwarding tool call and no prose.",
+    "When the outer prompt says to use SDK shell, write, read, edit, delete, glob, grep, ls, readLints, semSearch, or todowrite, satisfy that by calling the matching client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, or client_todo_write MCP tool.",
     "If the request below mentions an SDK routing map or asks for SDK mcp, satisfy that by calling the matching client MCP forwarding tool.",
     "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell or the exact harness shell tool with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
     "When creating Vite 8 React projects, use @vitejs/plugin-react ^5 with vite ^8, or omit the plugin if it is not needed. Do not pair Vite 8 with @vitejs/plugin-react 4.",
@@ -1467,6 +1499,27 @@ function writeNdjson(response, body) {
     }
     throw error;
   }
+}
+
+function installBridgeProcessHandlers() {
+  process.on("unhandledRejection", (reason) => {
+    if (isBenignCancellationError(reason) || isBenignPipeError(reason)) return;
+    console.error(reason);
+    closeAndExit(1);
+  });
+  process.on("uncaughtException", (error) => {
+    if (isBenignCancellationError(error) || isBenignPipeError(error)) return;
+    console.error(error);
+    closeAndExit(1);
+  });
+}
+
+function isBenignCancellationError(error) {
+  return error?.name === "AbortError" || error?.code === "ABORT_ERR";
+}
+
+function isBenignPipeError(error) {
+  return error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED";
 }
 
 function openAiError(error) {
