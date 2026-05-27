@@ -1698,6 +1698,62 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("The above tool calls have been executed. Continue your response based on these results."))
     }
 
+    func testChatToolResultsFeedProviderToolsBackAsSDKMCPCalls() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[
+            {"role":"user","content":"use the filesystem MCP writer"},
+            {
+              "role":"assistant",
+              "content":null,
+              "tool_calls":[
+                {
+                  "id":"call_mcp",
+                  "type":"function",
+                  "function":{
+                    "name":"mcp__filesystem__write_file",
+                    "arguments":"{\"file_path\":\"src/App.tsx\",\"contents\":\"export default function App() { return null }\"}"
+                  }
+                }
+              ]
+            },
+            {"role":"tool","tool_call_id":"call_mcp","name":"mcp__filesystem__write_file","content":"{\"content\":\"ok\"}"}
+          ],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"mcp__filesystem__write_file",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "file_path":{"type":"string"},
+                    "contents":{"type":"string"}
+                  },
+                  "required":["file_path","contents"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+
+        let prefix = "LOCAL TOOL RESULT: "
+        let feedbackLine = try XCTUnwrap(prepared.prompt.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let feedbackJSON = String(feedbackLine.dropFirst(prefix.count))
+        let feedbackData = Data(feedbackJSON.utf8)
+        let feedback = try XCTUnwrap(JSONSerialization.jsonObject(with: feedbackData) as? [String: Any])
+        let arguments = try XCTUnwrap(feedback["arguments"] as? [String: Any])
+        let nested = try XCTUnwrap(arguments["args"] as? [String: Any])
+
+        XCTAssertEqual(feedback["toolName"] as? String, "mcp")
+        XCTAssertEqual(arguments["providerIdentifier"] as? String, "filesystem")
+        XCTAssertEqual(arguments["toolName"] as? String, "write_file")
+        XCTAssertEqual(nested["file_path"] as? String, "src/App.tsx")
+        XCTAssertEqual(nested["contents"] as? String, "export default function App() { return null }")
+    }
+
     func testChatFileRequestAfterPriorToolResultStillRequiresLocalTool() throws {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {

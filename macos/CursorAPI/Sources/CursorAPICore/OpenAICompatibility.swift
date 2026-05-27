@@ -1464,14 +1464,34 @@ public enum OpenAICompatibility {
         remembered: [String: ResponseToolCallMemory]
     ) -> String {
         let rememberedCall = remembered[toolCallID]
+        let clientToolName = toolName.isEmpty ? rememberedCall?.name ?? "" : toolName
+        let arguments = rememberedCall?.arguments ?? [:]
         let record: [String: Any] = [
             "toolCallId": toolCallID,
-            "toolName": toolName.isEmpty ? rememberedCall?.name ?? "" : toolName,
-            "arguments": rememberedCall?.arguments.mapValues(\.foundationValue) ?? [:],
+            "toolName": sdkFeedbackToolName(for: clientToolName),
+            "arguments": sdkFeedbackArguments(for: clientToolName, arguments: arguments).mapValues(\.foundationValue),
             "result": text
         ]
         let data = (try? JSONSerialization.data(withJSONObject: record, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(data: data, encoding: .utf8) ?? "{}"
+    }
+
+    private static func sdkFeedbackToolName(for clientToolName: String) -> String {
+        if mcpTarget(forClientToolName: clientToolName) != nil {
+            return "mcp"
+        }
+        return clientToolName
+    }
+
+    private static func sdkFeedbackArguments(for clientToolName: String, arguments: [String: JSONValue]) -> [String: JSONValue] {
+        guard let target = mcpTarget(forClientToolName: clientToolName) else {
+            return arguments
+        }
+        return [
+            "providerIdentifier": .string(target.provider),
+            "toolName": .string(target.toolName),
+            "args": .object(arguments)
+        ]
     }
 
     static func canMapToolCall(_ toolCall: CursorToolCall, tools: [OpenAIToolSpec]) -> Bool {

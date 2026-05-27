@@ -1374,6 +1374,7 @@ function sdkToolResultFeedback(
 }
 
 function sdkToolNameForOpenCodeTool(name: string): string {
+  if (mcpTargetForClientToolName(name)) return "mcp";
   const normalized = normalizeToolName(name);
   if (["bash", "shell", "terminal"].includes(normalized)) return "shell";
   if (["list", "ls"].includes(normalized)) return "ls";
@@ -1386,6 +1387,14 @@ function sdkToolNameForOpenCodeTool(name: string): string {
 }
 
 function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  const mcpTarget = mcpTargetForClientToolName(toolName);
+  if (mcpTarget) {
+    return {
+      providerIdentifier: mcpTarget.provider,
+      toolName: mcpTarget.toolName,
+      args
+    };
+  }
   const normalized = normalizeToolName(toolName);
   if (["bash", "shell", "terminal"].includes(normalized)) {
     return compactRecord({
@@ -1423,6 +1432,9 @@ function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>):
 
 function openCodeToolResultToSdkResult(toolName: string, args: Record<string, unknown>, resultText: string): Record<string, unknown> {
   const parsed = parseToolResultPayload(resultText);
+  if (mcpTargetForClientToolName(toolName)) {
+    return sdkToolResult(parsed, resultText, isRecord(parsed) ? parsed : { text: resultText });
+  }
   const normalized = normalizeToolName(toolName);
   if (["bash", "shell", "terminal"].includes(normalized)) {
     return sdkToolResult(parsed, resultText, {

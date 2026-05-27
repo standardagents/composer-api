@@ -782,6 +782,68 @@ describe("OpenAI compatibility adapter", () => {
     });
   });
 
+  it("feeds OpenCode server tool results back as completed SDK MCP calls", () => {
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "user", content: "Use the filesystem write_file MCP tool." },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_mcp",
+                type: "function",
+                function: {
+                  name: "mcp__filesystem__write_file",
+                  arguments: JSON.stringify({
+                    file_path: "src/App.tsx",
+                    contents: "export default function App() { return null }"
+                  })
+                }
+              }
+            ]
+          },
+          { role: "tool", tool_call_id: "call_mcp", name: "mcp__filesystem__write_file", content: "{\"content\":\"ok\"}" }
+        ],
+        tools: [
+          {
+            type: "function",
+            function: {
+              name: "mcp__filesystem__write_file",
+              parameters: {
+                type: "object",
+                properties: {
+                  file_path: { type: "string" },
+                  contents: { type: "string" }
+                },
+                required: ["file_path", "contents"]
+              }
+            }
+          }
+        ]
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    const line = prepared.prompt.text
+      .split("\n")
+      .find((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "));
+    expect(line).toBeTruthy();
+    const feedback = JSON.parse(line!.slice("LOCAL OPENCODE TOOL RESULT: ".length));
+    expect(feedback.name).toBe("mcp");
+    expect(feedback.args).toEqual({
+      providerIdentifier: "filesystem",
+      toolName: "write_file",
+      args: {
+        file_path: "src/App.tsx",
+        contents: "export default function App() { return null }"
+      }
+    });
+    expect(feedback.result).toEqual({ status: "success", value: { content: "ok" } });
+  });
+
   it("maps SDK builtins to schema-compatible prefixed server tools", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
