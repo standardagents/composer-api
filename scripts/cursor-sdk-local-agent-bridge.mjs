@@ -33,9 +33,11 @@ if (isMainModule()) {
 export {
   bridgePrompt,
   clientMcpToolDefinitions,
+  clientForwardingMcpServerSource,
   isForwardableSDKToolCall,
   normalizeSDKToolCall,
   startServer,
+  validateClientMcpToolCall,
   toolCallFromDelta
 };
 
@@ -273,6 +275,7 @@ function clientForwardingMcpServerSource(clientTools = []) {
   return `
 const readline = require("node:readline");
 const tools = ${tools};
+const validateClientMcpToolCall = ${validateClientMcpToolCall.toString()};
 const rl = readline.createInterface({ input: process.stdin });
 function send(id, result) {
   if (id === undefined || id === null) return;
@@ -300,6 +303,14 @@ rl.on("line", (line) => {
   } else if (message.method === "tools/list") {
     send(message.id, { tools });
   } else if (message.method === "tools/call") {
+    const params = message.params || {};
+    const toolName = params.name || params.toolName;
+    const input = params.arguments || params.input || {};
+    const validationError = validateClientMcpToolCall(tools, toolName, input);
+    if (validationError) {
+      sendError(message.id, validationError);
+      return;
+    }
     send(message.id, {
       content: [{ type: "text", text: "FORWARDED_TO_OUTER_CLIENT" }],
       isError: false
@@ -309,6 +320,26 @@ rl.on("line", (line) => {
   }
 });
 `;
+}
+
+function validateClientMcpToolCall(tools, toolName, input = {}) {
+  if (typeof toolName !== "string" || !toolName.trim()) {
+    return "Missing MCP tool name.";
+  }
+  const tool = Array.isArray(tools) ? tools.find((candidate) => candidate && candidate.name === toolName) : null;
+  if (!tool) {
+    return `Unknown client MCP forwarding tool: ${toolName}`;
+  }
+  const schema = tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : {};
+  const required = Array.isArray(schema.required) ? schema.required.filter((key) => typeof key === "string" && key.trim()) : [];
+  if (!required.length) return null;
+  const args = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  for (const key of required) {
+    if (!(key in args) || args[key] === undefined || args[key] === null) {
+      return `Missing required argument for ${toolName}: ${key}`;
+    }
+  }
+  return null;
 }
 
 function clientMcpToolDefinitions(clientTools = []) {

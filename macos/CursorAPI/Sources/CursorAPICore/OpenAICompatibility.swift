@@ -2121,7 +2121,8 @@ public enum OpenAICompatibility {
         let selectedCanonical = canonicalToolName(tool.name)
 
         if wrapperDepth <= 1,
-           let wrapper = wrapperObjectArgumentProperty(tool: tool, properties: properties) {
+           let wrapper = wrapperObjectArgumentProperty(tool: tool, properties: properties),
+           !(canonical == "mcp" && isMCPWrapperTool(properties: properties)) {
             let nestedTool = OpenAIToolSpec(name: tool.name, description: tool.description, parameters: wrapper.schema)
             return [
                 wrapper.key: .object(normalizeArguments(arguments, sdkToolName: sdkToolName, tool: nestedTool, wrapperDepth: wrapperDepth + 1, context: context))
@@ -2248,7 +2249,22 @@ public enum OpenAICompatibility {
             copyFirst(["toolName", "tool_name", "tool", "name"], as: ["tool", "name", "tool_name"])
             if let payloadArgument = firstArgument(in: arguments, keys: mcpPayloadAliases()),
                let payloadKey = propertyName(matching: mcpPayloadAliases(), in: properties) {
-                output[payloadKey] = .object(objectArgumentValue(payloadArgument.value) ?? [:])
+                let payload = objectArgumentValue(payloadArgument.value) ?? [:]
+                let nestedSDKToolName = firstArgument(in: arguments, keys: ["toolName", "tool_name", "tool", "name"])?.value.stringValue
+                    .map(canonicalToolName) ?? sdkToolName
+                if let payloadSchema = parameterPropertySchema(payloadKey, tool: tool) {
+                    let nestedTool = OpenAIToolSpec(name: tool.name, description: tool.description, parameters: payloadSchema)
+                    let normalizedPayload = normalizedSpecificMCPPayloadArguments(payload, tool: nestedTool, context: context)
+                    output[payloadKey] = .object(finalizedToolArguments(
+                        normalizedPayload,
+                        source: payload,
+                        sdkToolName: nestedSDKToolName,
+                        tool: nestedTool,
+                        context: context
+                    ))
+                } else {
+                    output[payloadKey] = .object(payload)
+                }
                 consumed.insert(payloadArgument.key)
             }
         case "semsearch":
@@ -2584,12 +2600,15 @@ public enum OpenAICompatibility {
     }
 
     private static func specificMCPToolArguments(_ arguments: [String: JSONValue], tool: OpenAIToolSpec, context: ToolCallContext? = nil) -> [String: JSONValue] {
+        normalizedSpecificMCPPayloadArguments(mcpPayloadArguments(arguments), tool: tool, context: context)
+    }
+
+    private static func normalizedSpecificMCPPayloadArguments(_ payload: [String: JSONValue], tool: OpenAIToolSpec, context: ToolCallContext? = nil) -> [String: JSONValue] {
         let properties = parameterPropertyNames(tool)
         let allowAdditionalProperties = parameterAllowsAdditionalProperties(tool)
         guard !properties.isEmpty else {
-            return mcpPayloadArguments(arguments)
+            return payload
         }
-        let payload = mcpPayloadArguments(arguments)
         var output: [String: JSONValue] = [:]
         for (key, value) in expandedToolArguments(payload) {
             if let target = propertyName(matching: [key], in: properties) {
@@ -2602,6 +2621,12 @@ public enum OpenAICompatibility {
             }
         }
         return output
+    }
+
+    private static func isMCPWrapperTool(properties: [String]) -> Bool {
+        propertyName(matching: ["providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name"], in: properties) != nil
+            && propertyName(matching: ["toolName", "tool_name", "tool", "name"], in: properties) != nil
+            && propertyName(matching: mcpPayloadAliases(), in: properties) != nil
     }
 
     private static func mcpPayloadArguments(_ arguments: [String: JSONValue]) -> [String: JSONValue] {

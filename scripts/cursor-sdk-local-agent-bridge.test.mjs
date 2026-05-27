@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { bridgePrompt, clientMcpToolDefinitions, isForwardableSDKToolCall, normalizeSDKToolCall, toolCallFromDelta } from "./cursor-sdk-local-agent-bridge.mjs";
+import {
+  bridgePrompt,
+  clientMcpToolDefinitions,
+  isForwardableSDKToolCall,
+  normalizeSDKToolCall,
+  toolCallFromDelta,
+  validateClientMcpToolCall
+} from "./cursor-sdk-local-agent-bridge.mjs";
 
 describe("Cursor SDK local-agent bridge", () => {
   it("does not cancel SDK glob calls on directory-only partial arguments", () => {
@@ -214,6 +221,26 @@ describe("Cursor SDK local-agent bridge", () => {
         required: ["file_path", "contents"]
       }
     });
+  });
+
+  it("rejects unknown or incomplete client MCP forwarding calls internally", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "probe_write_file",
+        parameters: {
+          type: "object",
+          properties: {
+            file_path: { type: "string" },
+            contents: { type: "string" }
+          },
+          required: ["file_path", "contents"]
+        }
+      }
+    ]);
+
+    expect(validateClientMcpToolCall(tools, "missing_tool", {})).toContain("Unknown client MCP forwarding tool");
+    expect(validateClientMcpToolCall(tools, "probe_write_file", { file_path: "marker.txt" })).toBe("Missing required argument for probe_write_file: contents");
+    expect(validateClientMcpToolCall(tools, "probe_write_file", { file_path: "marker.txt", contents: "" })).toBe(null);
   });
 
   it("tells the SDK to use client MCP tools instead of built-in local tools", () => {
