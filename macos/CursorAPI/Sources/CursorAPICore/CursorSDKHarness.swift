@@ -780,8 +780,7 @@ struct CursorSDKToolSpec {
         if hasString(args, keys: ["globPattern", "glob_pattern", "filePattern", "file_pattern", "pattern", "glob", "query", "include", "includeGlob", "include_glob"]) {
             return true
         }
-        guard let target = stringValue(args, keys: ["targetDirectory", "target_directory", "targeting", "path"]) else { return false }
-        return target.contains("*") || target.contains("?") || target.contains("[") || target.contains("]") || target.contains("{") || target.contains("}")
+        return stringValue(args, keys: ["targetDirectory", "target_directory", "targeting", "path"]) != nil
     }
 
     private static func stringValue(_ args: [String: JSONValue], keys: [String]) -> String? {

@@ -644,6 +644,132 @@ describe("OpenAI compatibility adapter", () => {
     ]);
   });
 
+  it("maps a Vite React app-build flow through strict OpenCode schemas", () => {
+    const tools = [
+      {
+        name: "bash",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            command: { type: "string" },
+            cwd: { type: "string" },
+            timeout_ms: { type: "number" },
+            description: { type: "string" }
+          },
+          required: ["command", "cwd", "timeout_ms", "description"]
+        }
+      },
+      {
+        name: "glob",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            pattern: { type: "string" },
+            path: { type: "string" }
+          },
+          required: ["pattern", "path"]
+        }
+      },
+      {
+        name: "write",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to write" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      },
+      {
+        name: "edit",
+        parameters: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            filePath: { type: "string", description: "The absolute path to the file to modify" },
+            oldString: { type: "string" },
+            newString: { type: "string" }
+          },
+          required: ["filePath", "oldString", "newString"]
+        }
+      }
+    ];
+    const prepared = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "system", content: "Working directory: /tmp/todo-vite" },
+          { role: "user", content: "build a todo app in vite 8 and react" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+
+    expect(prepared.requiresLocalTool).toBe(true);
+    expect(prepared.prompt.text).toContain("Client tool targets: bash, glob, write, edit");
+    expect(prepared.prompt.text).not.toContain("Allowed tool names: bash");
+    expect(prepared.prompt.text).toContain("SDK TOOL ROUTING MAP:");
+    expect(prepared.prompt.text).toContain('"sdk":"glob","client":"glob","clientArgs":{"pattern":"**/*","path":"/tmp/todo-vite"}');
+    expect(prepared.prompt.text).toContain('"sdk":"shell","client":"bash","clientArgs":{"command":"<command>","cwd":".","timeout_ms":120000');
+    const generated = toOpenAiToolCalls({
+      responseId: "chatcmpl_vite_flow",
+      tools: prepared.tools,
+      context: prepared.toolContext,
+      toolCalls: [
+        { name: "glob", arguments: { targetDirectory: "." } },
+        { name: "shell", arguments: { command: "npm create vite@latest . -- --template react", workingDirectory: "/workspace" } },
+        { name: "write", arguments: { path: "src/App.jsx", fileText: "export default function App() { return <main>Todos</main> }" } },
+        { name: "edit", arguments: { path: "package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" } },
+        { name: "shell", arguments: { command: "npm install && npm run build", timeout: 120_000 } }
+      ]
+    });
+
+    expect(generated.map((call) => call.function.name)).toEqual(["glob", "bash", "write", "edit", "bash"]);
+    expect(generated.map((call) => JSON.parse(call.function.arguments))).toEqual([
+      { pattern: "**/*", path: "/tmp/todo-vite" },
+      { command: "npm create vite@latest . -- --template react", cwd: ".", timeout_ms: 120_000, description: "Runs npm create vite@latest . --" },
+      { filePath: "/tmp/todo-vite/src/App.jsx", content: "export default function App() { return <main>Todos</main> }" },
+      { filePath: "/tmp/todo-vite/package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" },
+      { command: "npm install && npm run build", cwd: ".", timeout_ms: 120_000, description: "Runs npm install && npm run" }
+    ]);
+
+    const continued = prepareOpencodeSdkChatRequest(
+      {
+        model: "composer-2.5-sdk",
+        messages: [
+          { role: "system", content: "Working directory: /tmp/todo-vite" },
+          { role: "user", content: "build a todo app in vite 8 and react" },
+          { role: "assistant", content: null, tool_calls: generated },
+          { role: "tool", tool_call_id: generated[0].id, content: "{\"files\":[]}" },
+          { role: "tool", tool_call_id: generated[1].id, content: "{\"exitCode\":0,\"stdout\":\"created\",\"stderr\":\"\"}" },
+          { role: "tool", tool_call_id: generated[2].id, content: "{\"content\":\"ok\"}" },
+          { role: "tool", tool_call_id: generated[3].id, content: "{\"diff\":\"ok\"}" },
+          { role: "tool", tool_call_id: generated[4].id, content: "{\"exitCode\":0,\"stdout\":\"built\",\"stderr\":\"\"}" }
+        ],
+        tools
+      },
+      { id: "composer-2.5-sdk" }
+    );
+    const feedback = continued.prompt.text
+      .split("\n")
+      .filter((item) => item.startsWith("LOCAL OPENCODE TOOL RESULT: "))
+      .map((line) => JSON.parse(line.slice("LOCAL OPENCODE TOOL RESULT: ".length)));
+
+    expect(feedback.map((item) => item.name)).toEqual(["glob", "shell", "write", "edit", "shell"]);
+    expect(feedback.map((item) => item.args)).toEqual([
+      { targetDirectory: "." },
+      { command: "npm create vite@latest . -- --template react", workingDirectory: "/workspace" },
+      { path: "src/App.jsx", fileText: "export default function App() { return <main>Todos</main> }" },
+      { path: "package.json", oldString: "\"scripts\": {", newString: "\"scripts\": {" },
+      { command: "npm install && npm run build", timeout: 120_000 }
+    ]);
+  });
+
   it("keeps direct chat tools on direct tool-call syntax", () => {
     const prepared = prepareChatRequest(
       {
@@ -702,6 +828,7 @@ describe("OpenAI compatibility adapter", () => {
     );
 
     expect(prepared.prompt.text).toContain('"sdk_mcp":{"providerIdentifier":"client","toolName":"webfetch","args":"match this tool schema"}');
+    expect(prepared.prompt.text).toContain('"sdk":"mcp","client":"webfetch","sdkArgs":{"providerIdentifier":"client","toolName":"webfetch","args":"match client schema"}');
     expect(prepared.prompt.text).toContain('Use SDK mcp now with providerIdentifier "client", toolName "webfetch"');
   });
 
@@ -742,7 +869,8 @@ describe("OpenAI compatibility adapter", () => {
         }
       }
     ]);
-    expect(prepared.prompt.text).toContain("Allowed tool names: repo_search");
+    expect(prepared.prompt.text).toContain("Client tool targets: repo_search");
+    expect(prepared.prompt.text).toContain("These are client execution targets, not the names you should emit.");
     expect(prepared.responseMetadata.tools).toEqual([
       {
         type: "function",
@@ -1141,7 +1269,8 @@ describe("OpenAI compatibility adapter", () => {
     ]);
     expect(prepared.prompt.mode).toBe("agent");
     expect(prepared.prompt.text).toContain("LOCAL TOOL INVENTORY:");
-    expect(prepared.prompt.text).toContain("Allowed tool names: glob");
+    expect(prepared.prompt.text).toContain("Client tool targets: glob");
+    expect(prepared.prompt.text).toContain("emit only SDK tool names from the SDK TOOL ROUTING MAP");
     expect(prepared.prompt.text).toContain("LOCAL TOOL RESULT:");
     expect(prepared.prompt.text).toContain("You must call at least one tool.");
     expect(prepared.responseMetadata.tools).toEqual([
@@ -2540,6 +2669,36 @@ describe("OpenAI compatibility adapter", () => {
     expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ command: "npm install && npm test" });
   });
 
+  it("fills required shell cwd and timeout fields for strict harness command tools", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "run_command",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              command: { type: "string" },
+              cwd: { type: "string" },
+              timeout_ms: { type: "number" },
+              description: { type: "string" }
+            },
+            required: ["command", "cwd", "timeout_ms", "description"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "shell", arguments: { command: "npm test", workingDirectory: "/workspace" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({
+      command: "npm test",
+      cwd: ".",
+      timeout_ms: 120_000,
+      description: "Runs npm test"
+    });
+  });
+
   it("backgrounds SDK server shell calls so OpenCode is not blocked", () => {
     const toolCalls = toOpenAiToolCalls({
       responseId: "chatcmpl_test",
@@ -2637,7 +2796,53 @@ describe("OpenAI compatibility adapter", () => {
       toolCalls: [{ name: "glob", arguments: {} }]
     });
 
-    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "*" });
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*" });
+  });
+
+  it("maps SDK directory-only glob calls to a valid OpenCode glob", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { targetDirectory: "src" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*", path: "src" });
+  });
+
+  it("fills a required glob path with the harness workspace root", () => {
+    const toolCalls = toOpenAiToolCalls({
+      responseId: "chatcmpl_test",
+      tools: [
+        {
+          name: "glob",
+          parameters: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              pattern: { type: "string" },
+              path: { type: "string" }
+            },
+            required: ["pattern", "path"]
+          }
+        }
+      ],
+      toolCalls: [{ name: "glob", arguments: { globPattern: "**/*.tsx" } }]
+    });
+
+    expect(JSON.parse(toolCalls[0].function.arguments)).toEqual({ pattern: "**/*.tsx", path: "." });
   });
 
   it("maps SDK glob calls to query-based file search schemas", () => {

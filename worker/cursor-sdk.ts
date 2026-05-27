@@ -754,7 +754,7 @@ function hasGlobRequest(args: Record<string, unknown>): boolean {
     return true;
   }
   const target = stringArg(args, "targetDirectory") || stringArg(args, "target_directory") || stringArg(args, "targeting") || stringArg(args, "path");
-  return target !== undefined && /[*?[\]{}]/.test(target);
+  return target !== undefined;
 }
 
 function stringArgAllowEmpty(args: Record<string, unknown>, ...keys: string[]): string | undefined {

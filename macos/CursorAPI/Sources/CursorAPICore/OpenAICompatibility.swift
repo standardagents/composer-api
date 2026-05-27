@@ -164,7 +164,7 @@ public enum OpenAICompatibility {
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
-        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"])
+        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
         transcript.append("")
         transcript.append("Conversation:")
         var rememberedToolCalls: [String: ResponseToolCallMemory] = [:]
@@ -321,7 +321,7 @@ public enum OpenAICompatibility {
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
-        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"])
+        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
         if let instructions, !instructions.isEmpty {
             transcript.append("")
             transcript.append("INSTRUCTIONS:")
@@ -1175,13 +1175,13 @@ public enum OpenAICompatibility {
         return nil
     }
 
-    private static func appendToolInventory(_ transcript: inout [String], tools: [OpenAIToolSpec], toolChoice: Any?) {
+    private static func appendToolInventory(_ transcript: inout [String], tools: [OpenAIToolSpec], toolChoice: Any?, context: ToolCallContext?) {
         guard !tools.isEmpty else { return }
         transcript.append("")
         transcript.append("LOCAL TOOL INVENTORY:")
-        transcript.append("Allowed tool names: \(tools.map(\.name).joined(separator: ", "))")
-        transcript.append("Use only the client's local tools for filesystem and shell work.")
-        transcript.append("For local work, emit SDK built-in tool calls; the harness translates them to the matching client tool names and schemas.")
+        transcript.append("Client tool targets: \(tools.map(\.name).joined(separator: ", "))")
+        transcript.append("These are client execution targets, not the names you should emit.")
+        transcript.append("For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching client tool names and schemas.")
         transcript.append("When the user names a specific allowed client tool, do not substitute a different tool. Non-builtin client tools, including OpenCode MCP/server tools, should be requested with SDK mcp using providerIdentifier, toolName, and args.")
         transcript.append("If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool.")
         if hasCompatibleTool("shell", in: tools) {
@@ -1194,11 +1194,68 @@ public enum OpenAICompatibility {
                 transcript.append(json)
             }
         }
+        appendSDKRoutingMap(&transcript, tools: tools, context: context)
         if let name = toolChoiceFunctionName(toolChoice) {
             transcript.append(requestedToolHint(for: name))
         } else if (toolChoice as? String) == "required" {
             transcript.append("You must call at least one tool.")
         }
+    }
+
+    private static func appendSDKRoutingMap(_ transcript: inout [String], tools: [OpenAIToolSpec], context: ToolCallContext?) {
+        let routes = sdkRoutingRecords(tools: tools, context: context)
+        guard !routes.isEmpty else { return }
+        transcript.append("SDK TOOL ROUTING MAP:")
+        transcript.append("Use these SDK tool names; the adapter forwards them to the listed client tool and argument shape.")
+        for route in routes {
+            if let data = try? JSONSerialization.data(withJSONObject: route, options: [.withoutEscapingSlashes]),
+               let json = String(data: data, encoding: .utf8) {
+                transcript.append(json)
+            }
+        }
+    }
+
+    private static func sdkRoutingRecords(tools: [OpenAIToolSpec], context: ToolCallContext?) -> [[String: Any]] {
+        var routes: [[String: Any]] = []
+        for sample in sdkRoutingSamples() {
+            guard let resolved = resolveToolCall(sample, tools: tools, context: context) else { continue }
+            routes.append([
+                "sdk": sample.name,
+                "client": resolved.name,
+                "clientArgs": resolved.arguments.mapValues(\.foundationValue)
+            ])
+        }
+        for tool in tools {
+            guard let target = mcpTarget(forClientToolName: tool.name) else { continue }
+            routes.append([
+                "sdk": "mcp",
+                "client": tool.name,
+                "sdkArgs": [
+                    "providerIdentifier": target.provider,
+                    "toolName": target.toolName,
+                    "args": "match client schema"
+                ]
+            ])
+        }
+        return Array(routes.prefix(24))
+    }
+
+    private static func sdkRoutingSamples() -> [CursorToolCall] {
+        [
+            CursorToolCall(name: "shell", arguments: ["command": .string("<command>"), "workingDirectory": .string("/workspace"), "timeout": .number(120_000)]),
+            CursorToolCall(name: "read", arguments: ["path": .string("src/App.tsx"), "offset": .number(1), "limit": .number(80)]),
+            CursorToolCall(name: "write", arguments: ["path": .string("src/App.tsx"), "fileText": .string("<file content>")]),
+            CursorToolCall(name: "edit", arguments: ["path": .string("src/App.tsx"), "oldString": .string("<old text>"), "newString": .string("<new text>")]),
+            CursorToolCall(name: "delete", arguments: ["path": .string("src/old.tsx")]),
+            CursorToolCall(name: "glob", arguments: ["targetDirectory": .string("."), "globPattern": .string("**/*")]),
+            CursorToolCall(name: "grep", arguments: ["pattern": .string("<pattern>"), "path": .string("."), "glob": .string("*")]),
+            CursorToolCall(name: "ls", arguments: ["path": .string(".")]),
+            CursorToolCall(name: "readLints", arguments: ["paths": .array([.string("src/App.tsx")])]),
+            CursorToolCall(name: "semSearch", arguments: ["query": .string("<query>"), "targetDirectories": .array([.string(".")])]),
+            CursorToolCall(name: "todowrite", arguments: [
+                "todos": .array([.object(["content": .string("<task>"), "status": .string("in_progress"), "priority": .string("medium")])])
+            ])
+        ]
     }
 
     private static func toolInventoryRecord(_ tool: OpenAIToolSpec) -> [String: Any] {
@@ -1237,7 +1294,11 @@ public enum OpenAICompatibility {
         if canonicalToolName(toolName) == "glob", normalizedName(toolName) != "glob" {
             return "Use SDK glob now; it will be forwarded to client tool \(toolName) with arguments matching its schema. Do not substitute shell or prose for this explicitly requested client tool."
         }
-        return "Use the explicitly requested client tool \(toolName) now, with arguments matching its schema. Do not substitute a different tool."
+        let canonical = canonicalToolName(toolName)
+        if isKnownMappedToolName(toolName) {
+            return "Use SDK \(canonical) now; it will be forwarded to client tool \(toolName) with arguments matching its schema. Do not substitute a different tool."
+        }
+        return "Use SDK mcp now with providerIdentifier \"client\", toolName \"\(toolName)\", and args matching the \(toolName) schema. Do not substitute a different tool."
     }
 
     private static func explicitlyRequestedToolName(in text: String, tools: [OpenAIToolSpec]) -> String? {
@@ -2114,6 +2175,9 @@ public enum OpenAICompatibility {
                shouldIncludeOptionalPath(searchPath),
                let pathKey = propertyName(matching: globPathAliases(), in: properties) {
                 output[pathKey] = normalizeToolArgumentValue(searchPath, property: pathKey, tool: tool, context: context)
+            } else if let pathKey = propertyName(matching: globPathAliases(), in: properties),
+                      isRequired(pathKey, in: required) {
+                output[pathKey] = .string(".")
             }
             consumed.formUnion(glob.consumed)
         case "ls":
@@ -2156,6 +2220,10 @@ public enum OpenAICompatibility {
            let command = output[commandKey]?.stringValue,
            shouldDetachShellCommand(command) {
             output[commandKey] = .string(detachedShellCommand(command))
+        }
+
+        if canonical == "shell" {
+            sanitizeSyntheticShellWorkdirs(&output, properties: properties, required: required)
         }
 
         if canonical == "todowrite" {
@@ -2218,7 +2286,37 @@ public enum OpenAICompatibility {
             output[descriptionKey] = .string(shellToolDescription(for: command))
         }
         fillRequiredShellArguments(&output, source: arguments, properties: properties, required: requiredParameterNames(tool), tool: tool)
+        sanitizeSyntheticShellWorkdirs(&output, properties: properties, required: requiredParameterNames(tool))
         return output
+    }
+
+    private static func sanitizeSyntheticShellWorkdirs(
+        _ output: inout [String: JSONValue],
+        properties: [String],
+        required: Set<String>
+    ) {
+        for key in ["workdir", "cwd", "directory", "path"] {
+            guard let property = propertyName(matching: [key], in: properties),
+                  let value = output[property],
+                  isSyntheticSDKWorkingDirectory(value) else {
+                continue
+            }
+            if isRequired(property, in: required) {
+                output[property] = .string(".")
+            } else {
+                output[property] = nil
+            }
+        }
+    }
+
+    private static func isSyntheticSDKWorkingDirectory(_ value: JSONValue) -> Bool {
+        guard let string = value.stringValue else { return false }
+        switch string.trimmingCharacters(in: .whitespacesAndNewlines) {
+        case "", ".", "/workspace", "workspace":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func specificMCPToolArguments(_ arguments: [String: JSONValue], tool: OpenAIToolSpec, context: ToolCallContext? = nil) -> [String: JSONValue] {
@@ -2346,6 +2444,9 @@ public enum OpenAICompatibility {
            shouldIncludeOptionalPath(path),
            let pathKey = propertyName(matching: globPathAliases(), in: properties) {
             output[pathKey] = normalizeToolArgumentValue(path, property: pathKey, tool: tool, context: context)
+        } else if let pathKey = propertyName(matching: globPathAliases(), in: properties),
+                  isRequired(pathKey, in: requiredParameterNames(tool)) {
+            output[pathKey] = .string(".")
         }
         return output.isEmpty ? arguments : output
     }

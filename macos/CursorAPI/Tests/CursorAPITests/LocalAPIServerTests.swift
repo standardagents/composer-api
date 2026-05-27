@@ -1413,7 +1413,8 @@ final class LocalAPIServerTests: XCTestCase {
             return XCTFail("Expected server tool input schema to be preserved")
         }
         XCTAssertNotNil(properties["query"])
-        XCTAssertTrue(prepared.prompt.contains("Allowed tool names: repo_search"))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: repo_search"))
+        XCTAssertTrue(prepared.prompt.contains("These are client execution targets, not the names you should emit."))
     }
 
     func testChatFileRequestAddsRequiredLocalToolHint() throws {
@@ -1738,6 +1739,9 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("\"providerIdentifier\":\"client\""))
         XCTAssertTrue(prepared.prompt.contains("\"toolName\":\"webfetch\""))
         XCTAssertTrue(prepared.prompt.contains("\"args\":\"match this tool schema\""))
+        XCTAssertTrue(prepared.prompt.contains("\"sdk\":\"mcp\""))
+        XCTAssertTrue(prepared.prompt.contains("\"client\":\"webfetch\""))
+        XCTAssertTrue(prepared.prompt.contains("\"args\":\"match client schema\""))
         XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"webfetch\""))
     }
 
@@ -2311,7 +2315,7 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertEqual(prepared.tools.map(\.name), ["shell"])
-        XCTAssertTrue(prepared.prompt.contains("Use the explicitly requested client tool shell now"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK shell now; it will be forwarded to client tool shell"))
     }
 
     func testResponsesToolChoiceNestedFunctionShapeAddsPromptHint() throws {
@@ -2339,7 +2343,7 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertEqual(prepared.tools.map(\.name), ["shell"])
-        XCTAssertTrue(prepared.prompt.contains("Use the explicitly requested client tool shell now"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK shell now; it will be forwarded to client tool shell"))
     }
 
     func testResponsesEndpointReturnsFunctionCallOutputItems() async throws {
@@ -2820,6 +2824,96 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(function["name"] as? String, "glob")
         XCTAssertEqual(arguments["pattern"] as? String, "**/*")
         XCTAssertNil(arguments["path"])
+    }
+
+    func testChatToolCallsMapDirectoryOnlySDKGlobForOpenCode() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"find project files"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"glob",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "pattern":{"type":"string"},
+                    "path":{"type":"string"}
+                  },
+                  "required":["pattern"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "glob", arguments: [
+            "targetDirectory": .string("src")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "glob")
+        XCTAssertEqual(arguments["pattern"] as? String, "**/*")
+        XCTAssertEqual(arguments["path"] as? String, "src")
+    }
+
+    func testChatToolCallsFillRequiredGlobPathForStrictHarnesses() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"find project files"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"glob",
+                "parameters":{
+                  "type":"object",
+                  "properties":{
+                    "pattern":{"type":"string"},
+                    "path":{"type":"string"}
+                  },
+                  "required":["pattern","path"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "glob", arguments: [
+            "globPattern": .string("**/*.tsx")
+        ])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let function = try XCTUnwrap(toolCalls.first?["function"] as? [String: Any])
+        let arguments = try decodedArguments(function)
+
+        XCTAssertEqual(function["name"] as? String, "glob")
+        XCTAssertEqual(arguments["pattern"] as? String, "**/*.tsx")
+        XCTAssertEqual(arguments["path"] as? String, ".")
     }
 
     func testChatToolCallsMapSDKGlobToQueryBasedFileSearchSchema() throws {
@@ -3946,6 +4040,94 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(arguments[11]["subagent_type"] as? String, "explore")
         XCTAssertEqual(arguments[11]["command"] as? String, "inspect")
         XCTAssertEqual(arguments[12]["name"] as? String, "customize-opencode")
+    }
+
+    func testChatToolCallsMapViteReactBuildFlowThroughStrictOpenCodeSchemas() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[
+            {"role":"system","content":"Working directory: /tmp/todo-vite"},
+            {"role":"user","content":"build a todo app in vite 8 and react"}
+          ],
+          "tools":[
+            {"type":"function","function":{"name":"bash","parameters":{"type":"object","additionalProperties":false,"properties":{"command":{"type":"string"},"cwd":{"type":"string"},"timeout_ms":{"type":"number"},"description":{"type":"string"}},"required":["command","cwd","timeout_ms","description"]}}},
+            {"type":"function","function":{"name":"glob","parameters":{"type":"object","additionalProperties":false,"properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern","path"]}}},
+            {"type":"function","function":{"name":"write","parameters":{"type":"object","additionalProperties":false,"properties":{"filePath":{"type":"string","description":"The absolute path to the file to write"},"content":{"type":"string"}},"required":["filePath","content"]}}},
+            {"type":"function","function":{"name":"edit","parameters":{"type":"object","additionalProperties":false,"properties":{"filePath":{"type":"string","description":"The absolute path to the file to modify"},"oldString":{"type":"string"},"newString":{"type":"string"}},"required":["filePath","oldString","newString"]}}}
+          ]
+        }
+        """#.utf8))
+        XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: bash, glob, write, edit"))
+        XCTAssertFalse(prepared.prompt.contains("Allowed tool names: bash"))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
+        let routes = try prepared.prompt
+            .split(separator: "\n")
+            .filter { $0.contains(#""sdk""#) && $0.contains(#""client""#) }
+            .map { line -> [String: Any] in
+                let data = Data(String(line).utf8)
+                return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            }
+        let globRoute = try XCTUnwrap(routes.first { ($0["sdk"] as? String) == "glob" })
+        let globRouteArgs = try XCTUnwrap(globRoute["clientArgs"] as? [String: Any])
+        XCTAssertEqual(globRoute["client"] as? String, "glob")
+        XCTAssertEqual(globRouteArgs["pattern"] as? String, "**/*")
+        XCTAssertEqual(globRouteArgs["path"] as? String, "/tmp/todo-vite")
+        let shellRoute = try XCTUnwrap(routes.first { ($0["sdk"] as? String) == "shell" })
+        let shellRouteArgs = try XCTUnwrap(shellRoute["clientArgs"] as? [String: Any])
+        XCTAssertEqual(shellRoute["client"] as? String, "bash")
+        XCTAssertEqual(shellRouteArgs["command"] as? String, "<command>")
+        XCTAssertEqual(shellRouteArgs["cwd"] as? String, ".")
+        XCTAssertEqual((shellRouteArgs["timeout_ms"] as? NSNumber)?.doubleValue, 120_000)
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_viteflow",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [
+                CursorToolCall(name: "glob", arguments: ["targetDirectory": .string(".")]),
+                CursorToolCall(name: "shell", arguments: [
+                    "command": .string("npm create vite@latest . -- --template react"),
+                    "workingDirectory": .string("/workspace")
+                ]),
+                CursorToolCall(name: "write", arguments: [
+                    "path": .string("src/App.jsx"),
+                    "fileText": .string("export default function App() { return <main>Todos</main> }")
+                ]),
+                CursorToolCall(name: "edit", arguments: [
+                    "path": .string("package.json"),
+                    "oldString": .string("\"scripts\": {"),
+                    "newString": .string("\"scripts\": {")
+                ]),
+                CursorToolCall(name: "shell", arguments: [
+                    "command": .string("npm install && npm run build"),
+                    "timeout": .number(120_000)
+                ])
+            ], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let message = try XCTUnwrap(choices.first?["message"] as? [String: Any])
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        XCTAssertEqual(toolCalls.compactMap { ($0["function"] as? [String: Any])?["name"] as? String }, ["glob", "bash", "write", "edit", "bash"])
+
+        let arguments = try toolCalls.map { try decodedArguments(try XCTUnwrap($0["function"] as? [String: Any])) }
+        XCTAssertEqual(arguments[0]["pattern"] as? String, "**/*")
+        XCTAssertEqual(arguments[0]["path"] as? String, "/tmp/todo-vite")
+        XCTAssertEqual(arguments[1]["command"] as? String, "npm create vite@latest . -- --template react")
+        XCTAssertEqual(arguments[1]["cwd"] as? String, ".")
+        XCTAssertEqual((arguments[1]["timeout_ms"] as? NSNumber)?.doubleValue, 120_000)
+        XCTAssertEqual(arguments[1]["description"] as? String, "Run npm create vite@latest . -- --template react")
+        XCTAssertEqual(arguments[2]["filePath"] as? String, "/tmp/todo-vite/src/App.jsx")
+        XCTAssertEqual(arguments[2]["content"] as? String, "export default function App() { return <main>Todos</main> }")
+        XCTAssertEqual(arguments[3]["filePath"] as? String, "/tmp/todo-vite/package.json")
+        XCTAssertEqual(arguments[3]["oldString"] as? String, "\"scripts\": {")
+        XCTAssertEqual(arguments[3]["newString"] as? String, "\"scripts\": {")
+        XCTAssertEqual(arguments[4]["command"] as? String, "npm install && npm run build")
+        XCTAssertEqual(arguments[4]["cwd"] as? String, ".")
+        XCTAssertEqual((arguments[4]["timeout_ms"] as? NSNumber)?.doubleValue, 120_000)
+        XCTAssertEqual(arguments[4]["description"] as? String, "Run npm install && npm run build")
     }
 
     func testChatToolCallsMapSDKAliasNamesToClientSchemas() throws {

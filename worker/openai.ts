@@ -195,7 +195,7 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
     "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately; do not request a foreground server command.",
     "Do not say that agent mode or tools are unavailable. Do not ask the user to switch modes."
   ];
-  appendSdkToolInventory(transcript, tools, record.tool_choice);
+  appendSdkToolInventory(transcript, tools, record.tool_choice, toolContext);
   appendSdkWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
   transcript.push("", "Conversation:");
 
@@ -258,7 +258,7 @@ export function prepareResponsesRequest(
   const workspaceMutationRequired = hasResponseWorkspaceMutationIntent(record.input) && hasWorkspaceMutationCapability(tools);
   const workspaceMutationDone = workspaceMutationRequired && hasResponseWorkspaceMutationToolCall(record.input, tools);
   const transcript: string[] = [tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
-  appendResponsesToolInventory(transcript, tools, record.tool_choice);
+  appendResponsesToolInventory(transcript, tools, record.tool_choice, toolContext);
   appendResponsesWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
   const instructions = typeof record.instructions === "string" ? record.instructions.trim() : "";
   if (instructions) transcript.push("", `INSTRUCTIONS:\n${instructions}`);
@@ -782,14 +782,14 @@ function appendChatTools(transcript: string[], tools: OpenAiToolSpec[], toolChoi
   }
 }
 
-function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown) {
+function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown, context?: ToolCallContext) {
   if (!tools.length) return;
   transcript.push(
     "",
     "LOCAL TOOL INVENTORY:",
-    `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
-    "Use only the client's local tools for filesystem and shell work.",
-    "For local work, emit SDK built-in tool calls; the harness translates them to the matching client tool names and schemas.",
+    `Client tool targets: ${tools.map((tool) => tool.name).join(", ")}`,
+    "These are client execution targets, not the names you should emit.",
+    "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching client tool names and schemas.",
     "When the user names a specific allowed client tool, do not substitute a different tool. Non-builtin client tools and MCP/server tools should be requested with SDK mcp.",
     "If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool."
   );
@@ -799,6 +799,7 @@ function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpe
   for (const tool of tools) {
     transcript.push(JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })));
   }
+  appendSdkRoutingMap(transcript, tools, context);
   const selected = toolChoiceFunctionName(toolChoice);
   if (selected) {
     transcript.push(requestedToolHint(selected));
@@ -807,24 +808,82 @@ function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpe
   }
 }
 
-function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown) {
+function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown, context?: ToolCallContext) {
   if (!tools.length) return;
   transcript.push(
     "",
     "OPENCODE TOOL INVENTORY:",
-    `Allowed tool names: ${tools.map((tool) => tool.name).join(", ")}`,
-    "Use only the client's local tools for filesystem and shell work.",
+    `Client tool targets: ${tools.map((tool) => tool.name).join(", ")}`,
+    "These are OpenCode execution targets, not the names you should emit.",
+    "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching OpenCode tool names and schemas.",
     "When the user names a specific allowed client tool, do not substitute a different tool. Non-builtin client tools, including OpenCode MCP/server tools, should be requested with SDK mcp using providerIdentifier, toolName, and args.",
     "For general local work, prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present."
   );
   for (const tool of tools) {
     transcript.push(JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })));
   }
+  appendSdkRoutingMap(transcript, tools, context);
   if (isRecord(toolChoice) && toolChoice.type === "function" && isRecord(toolChoice.function) && typeof toolChoice.function.name === "string") {
     transcript.push(requestedToolHint(toolChoice.function.name));
   } else if (toolChoice === "required") {
     transcript.push("You must call at least one tool.");
   }
+}
+
+function appendSdkRoutingMap(transcript: string[], tools: OpenAiToolSpec[], context?: ToolCallContext) {
+  const routes = sdkRoutingRecords(tools, context);
+  if (!routes.length) return;
+  transcript.push(
+    "SDK TOOL ROUTING MAP:",
+    "Use these SDK tool names; the adapter forwards them to the listed client tool and argument shape."
+  );
+  for (const route of routes) {
+    transcript.push(JSON.stringify(route));
+  }
+}
+
+function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): Record<string, unknown>[] {
+  const routes: Record<string, unknown>[] = [];
+  for (const sample of sdkRoutingSamples()) {
+    const tool = resolveToolSpec(sample.name, sample.arguments, tools);
+    if (!tool) continue;
+    const clientArgs = normalizeToolArguments(sample.arguments, tool, sample.name, 0, context);
+    routes.push({
+      sdk: sample.name,
+      client: tool.name,
+      clientArgs
+    });
+  }
+  for (const tool of tools) {
+    const target = mcpTargetForClientToolName(tool.name);
+    if (!target) continue;
+    routes.push({
+      sdk: "mcp",
+      client: tool.name,
+      sdkArgs: {
+        providerIdentifier: target.provider,
+        toolName: target.toolName,
+        args: "match client schema"
+      }
+    });
+  }
+  return routes.slice(0, 24);
+}
+
+function sdkRoutingSamples(): CursorToolCall[] {
+  return [
+    { name: "shell", arguments: { command: "<command>", workingDirectory: "/workspace", timeout: 120_000 } },
+    { name: "read", arguments: { path: "src/App.tsx", offset: 1, limit: 80 } },
+    { name: "write", arguments: { path: "src/App.tsx", fileText: "<file content>" } },
+    { name: "edit", arguments: { path: "src/App.tsx", oldString: "<old text>", newString: "<new text>" } },
+    { name: "delete", arguments: { path: "src/old.tsx" } },
+    { name: "glob", arguments: { targetDirectory: ".", globPattern: "**/*" } },
+    { name: "grep", arguments: { pattern: "<pattern>", path: ".", glob: "*" } },
+    { name: "ls", arguments: { path: "." } },
+    { name: "readLints", arguments: { paths: ["src/App.tsx"] } },
+    { name: "semSearch", arguments: { query: "<query>", targetDirectories: ["."] } },
+    { name: "todowrite", arguments: { todos: [{ content: "<task>", status: "in_progress", priority: "medium" }] } }
+  ];
 }
 
 function toolInventoryRecord(tool: OpenAiToolSpec, options: { includeSdkMcp: boolean }): Record<string, unknown> {
@@ -937,7 +996,11 @@ function requestedToolHint(toolName: string): string {
   if (canonicalToolName(toolName) === "glob" && normalizeToolName(toolName) !== "glob") {
     return `Use SDK glob now; it will be forwarded to client tool ${toolName} with arguments matching its schema. Do not substitute shell or prose for this explicitly requested client tool.`;
   }
-  return `Use the explicitly requested client tool ${toolName} now, with arguments matching its schema. Do not substitute a different tool.`;
+  const canonical = canonicalToolName(toolName);
+  if (isKnownMappedToolName(toolName)) {
+    return `Use SDK ${canonical} now; it will be forwarded to client tool ${toolName} with arguments matching its schema. Do not substitute a different tool.`;
+  }
+  return `Use SDK mcp now with providerIdentifier "client", toolName "${toolName}", and args matching the ${toolName} schema. Do not substitute a different tool.`;
 }
 
 function toolChoiceFunctionName(toolChoice: unknown): string | undefined {
@@ -2329,6 +2392,7 @@ function listAsGlobArguments(args: Record<string, unknown>, tool: OpenAiToolSpec
   const path = firstArg(args, globPathCandidates());
   const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
   if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
+  else if (pathKey && schema.required.includes(pathKey)) output[pathKey] = ".";
   return Object.keys(output).length ? output : args;
 }
 
@@ -2338,9 +2402,10 @@ function globArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | und
   const output: Record<string, unknown> = {};
   const { pattern, path } = normalizedGlobArguments(args, context);
   const patternKey = firstMatchingProperty(globPatternCandidates(), schema.properties, normalizedProperties);
-  if (patternKey) output[patternKey] = pattern || "*";
+  if (patternKey) output[patternKey] = pattern || "**/*";
   const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
   if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
+  else if (pathKey && schema.required.includes(pathKey)) output[pathKey] = ".";
   return Object.keys(output).length ? output : args;
 }
 
@@ -2787,8 +2852,18 @@ function applyRequiredToolDefaults(
 ): Record<string, unknown> {
   if (!required.length) return output;
   const normalizedTool = normalizeToolName(tool?.name || "");
+  const schema = toolParameterSchema(tool);
+  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
   const next = { ...output };
   if (isShellLikeTool(tool, originalArgs)) {
+    const workdirKey = firstMatchingProperty(shellExplicitWorkdirCandidates(), schema.properties, normalizedProperties);
+    if (workdirKey && required.includes(workdirKey) && !shouldIncludeOptionalPath(next[workdirKey])) {
+      next[workdirKey] = ".";
+    }
+    const timeoutKey = firstMatchingProperty(["timeout", "timeoutMs", "timeout_ms", "timeoutSeconds", "timeout_seconds"], schema.properties, normalizedProperties);
+    if (timeoutKey && required.includes(timeoutKey) && next[timeoutKey] === undefined) {
+      next[timeoutKey] = normalizeToolArgumentValue(120_000, timeoutKey, tool);
+    }
     if (required.includes("description") && typeof next.description !== "string") {
       const command = commandLikeValue(next, tool) ?? firstStringArg(originalArgs, ...shellCommandCandidates());
       next.description = shellDescription(command);
@@ -2798,10 +2873,14 @@ function applyRequiredToolDefaults(
       next[commandKey] = firstStringArg(originalArgs, ...shellCommandCandidates()) || "";
     }
   } else if (isGlobLikeToolName(normalizedTool)) {
-    const normalizedProperties = new Map(required.map((property) => [normalizeToolName(property), property]));
-    const patternKey = firstMatchingProperty(globPatternCandidates(), required, normalizedProperties);
+    const requiredProperties = new Map(required.map((property) => [normalizeToolName(property), property]));
+    const patternKey = firstMatchingProperty(globPatternCandidates(), required, requiredProperties);
     if (patternKey && typeof next[patternKey] !== "string") {
       next[patternKey] = firstStringArg(originalArgs, ...globPatternCandidates()) || "*";
+    }
+    const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
+    if (pathKey && required.includes(pathKey) && !shouldIncludeOptionalPath(next[pathKey])) {
+      next[pathKey] = ".";
     }
   }
   return next;
@@ -2814,8 +2893,11 @@ function sanitizeNormalizedToolArguments(
 ): Record<string, unknown> {
   if (!isShellLikeTool(tool, originalArgs)) return output;
   const next = { ...output };
+  const required = new Set(toolParameterSchema(tool).required);
   for (const key of ["workdir", "cwd", "directory", "path"]) {
-    if (isSyntheticSdkWorkingDirectory(next[key])) delete next[key];
+    if (!isSyntheticSdkWorkingDirectory(next[key])) continue;
+    if (required.has(key)) next[key] = ".";
+    else delete next[key];
   }
   const commandKey = commandLikeProperty(tool) ?? "command";
   const command = typeof next[commandKey] === "string" ? next[commandKey] : firstStringArg(originalArgs, ...shellCommandCandidates());

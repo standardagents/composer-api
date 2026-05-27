@@ -4,7 +4,6 @@ import { cursorSdkTestExports } from "./cursor-sdk";
 describe("Cursor SDK harness", () => {
   it("does not emit incomplete SDK tool-call starts to OpenCode", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: {} })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src" } })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: {} })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", oldText: "old" } })).toBe(false);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", newText: "new" } })).toBe(false);
@@ -15,6 +14,7 @@ describe("Cursor SDK harness", () => {
 
   it("allows SDK tool calls once required execution arguments are available", () => {
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { globPattern: "**/*.tsx" } })).toBe(true);
+    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src/**/*.tsx" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json", fileText: "" } })).toBe(true);
     expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { filePath: "empty.txt", content: "" } })).toBe(true);
