@@ -502,7 +502,7 @@ function validateJsonSchemaValue(value, schema, path, rootSchema = schema, seenR
         validated = true;
       }
       const evaluatedByComposedSchema = schemaEvaluatesObjectProperty(schema, key, root, value, new Set(seenRefs));
-      if (!validated && schema.additionalProperties === false) {
+      if (!validated && !evaluatedByComposedSchema && schema.additionalProperties === false) {
         return `Unexpected argument for ${path}: ${key}`;
       } else if (!validated && schema.additionalProperties === true) {
         validated = true;
@@ -809,14 +809,22 @@ function schemaEvaluatesObjectProperty(schema, key, rootSchema, value, seenRefs 
       if (schemaEvaluatesObjectProperty(dependentSchema, key, rootSchema, value, new Set(seenRefs))) return true;
     }
   }
-  for (const keyword of ["allOf", "anyOf", "oneOf"]) {
+  if (Array.isArray(schema.allOf)) {
+    if (schema.allOf.some((candidate) => schemaEvaluatesObjectProperty(candidate, key, rootSchema, value, new Set(seenRefs)))) return true;
+  }
+  for (const keyword of ["anyOf", "oneOf"]) {
     if (!Array.isArray(schema[keyword])) continue;
-    if (schema[keyword].some((candidate) => schemaEvaluatesObjectProperty(candidate, key, rootSchema, value, new Set(seenRefs)))) {
-      return true;
+    for (const candidate of schema[keyword]) {
+      if (validateJsonSchemaValue(value, candidate, "$", rootSchema, new Set(seenRefs)) !== null) continue;
+      if (schemaEvaluatesObjectProperty(candidate, key, rootSchema, value, new Set(seenRefs))) return true;
     }
   }
-  for (const keyword of ["if", "then", "else", "not"]) {
-    if (isRecord(schema[keyword]) && schemaEvaluatesObjectProperty(schema[keyword], key, rootSchema, value, new Set(seenRefs))) {
+  if (isRecord(schema.if) || typeof schema.if === "boolean") {
+    const matchesIf = validateJsonSchemaValue(value, schema.if, "$", rootSchema, new Set(seenRefs)) === null;
+    if (matchesIf && schemaEvaluatesObjectProperty(schema.if, key, rootSchema, value, new Set(seenRefs))) return true;
+    const branch = matchesIf ? schema.then : schema.else;
+    if ((isRecord(branch) || typeof branch === "boolean")
+        && schemaEvaluatesObjectProperty(branch, key, rootSchema, value, new Set(seenRefs))) {
       return true;
     }
   }

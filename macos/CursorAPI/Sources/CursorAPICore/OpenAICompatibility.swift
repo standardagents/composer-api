@@ -3784,6 +3784,9 @@ public enum OpenAICompatibility {
         if !toolArgumentsSatisfyConditionalSchemas(arguments, tool: tool) {
             return false
         }
+        if !argumentValueSatisfiesSchema(.object(arguments), schema: tool.parameters, required: true) {
+            return false
+        }
         let shape = parameterSchemaShape(tool.parameters)
         guard !shape.propertyOrder.isEmpty else { return true }
         for required in shape.required {
@@ -4046,7 +4049,8 @@ public enum OpenAICompatibility {
                 }
                 validated = true
             }
-            if !validated, schema["additionalProperties"] == .bool(false) {
+            let evaluatedByComposedSchema = schemaEvaluatesObjectProperty(property, schema: schema, objectValues: values)
+            if !validated, !evaluatedByComposedSchema, schema["additionalProperties"] == .bool(false) {
                 return false
             }
             if !validated, schema["additionalProperties"] == .bool(true) {
@@ -4060,7 +4064,6 @@ public enum OpenAICompatibility {
             if !validated, case .object? = schema["additionalProperties"] {
                 validated = true
             }
-            let evaluatedByComposedSchema = schemaEvaluatesObjectProperty(property, schema: schema, objectValues: values)
             if !validated, !evaluatedByComposedSchema, schema["unevaluatedProperties"] == .bool(false) {
                 return false
             }
@@ -4101,16 +4104,41 @@ public enum OpenAICompatibility {
                 }
             }
         }
-        let composed = composedParameterSchemas(schema["allOf"]) + composedParameterSchemas(schema["anyOf"]) + composedParameterSchemas(schema["oneOf"])
-        for candidate in composed {
+        for candidate in composedParameterSchemas(schema["allOf"]) {
             let nested = schemaWithInheritedDefinitions(candidate, root: .object(schema))
             if case .object(let object)? = nested,
                schemaEvaluatesObjectProperty(property, schema: object, objectValues: objectValues, depth: depth + 1) {
                 return true
             }
         }
-        for key in ["if", "then", "else", "not"] {
-            let nested = schemaWithInheritedDefinitions(schema[key], root: .object(schema))
+        for key in ["anyOf", "oneOf"] {
+            for candidate in composedParameterSchemas(schema[key]) {
+                let nested = schemaWithInheritedDefinitions(candidate, root: .object(schema))
+                if let objectValues,
+                   !argumentValueSatisfiesSchema(.object(objectValues), schema: nested, required: true) {
+                    continue
+                }
+                if case .object(let object)? = nested,
+                   schemaEvaluatesObjectProperty(property, schema: object, objectValues: objectValues, depth: depth + 1) {
+                    return true
+                }
+            }
+        }
+        if let ifSchema = schema["if"] {
+            let nestedIf = schemaWithInheritedDefinitions(ifSchema, root: .object(schema))
+            let matchesIf: Bool
+            if let objectValues {
+                matchesIf = argumentValueSatisfiesSchema(.object(objectValues), schema: nestedIf, required: true)
+            } else {
+                matchesIf = true
+            }
+            if matchesIf,
+               case .object(let object)? = nestedIf,
+               schemaEvaluatesObjectProperty(property, schema: object, objectValues: objectValues, depth: depth + 1) {
+                return true
+            }
+            let branch = matchesIf ? schema["then"] : schema["else"]
+            let nested = schemaWithInheritedDefinitions(branch, root: .object(schema))
             if case .object(let object)? = nested,
                schemaEvaluatesObjectProperty(property, schema: object, objectValues: objectValues, depth: depth + 1) {
                 return true
@@ -4435,13 +4463,15 @@ public enum OpenAICompatibility {
         let variants = (composedParameterSchemas(object["anyOf"]) + composedParameterSchemas(object["oneOf"]))
             .map { parameterSchemaShape($0, depth: depth + 1, root: schemaRoot, seenRefs: seenRefs) }
         let dependent = dependentParameterSchemaShapes(object["dependentSchemas"], root: schemaRoot, depth: depth, seenRefs: seenRefs)
+        let conditional = conditionalParameterSchemaShapes(object, root: schemaRoot, depth: depth, seenRefs: seenRefs)
 
         return mergeParameterSchemaShapes(
             [
                 direct,
                 mergeParameterSchemaShapes(dependent, requiredMode: .intersection),
                 mergeParameterSchemaShapes(allOf, requiredMode: .union),
-                mergeParameterSchemaShapes(variants, requiredMode: .intersection)
+                mergeParameterSchemaShapes(variants, requiredMode: .intersection),
+                mergeParameterSchemaShapes(conditional, requiredMode: .intersection)
             ],
             requiredMode: .union
         )
@@ -4459,6 +4489,21 @@ public enum OpenAICompatibility {
         }
         return dependencies.values.map {
             var shape = parameterSchemaShape($0, depth: depth + 1, root: root, seenRefs: seenRefs)
+            shape.required = []
+            return shape
+        }
+    }
+
+    private static func conditionalParameterSchemaShapes(
+        _ object: [String: JSONValue],
+        root: JSONValue?,
+        depth: Int,
+        seenRefs: Set<String>
+    ) -> [ParameterSchemaShape] {
+        guard depth <= 5 else { return [] }
+        return ["if", "then", "else"].compactMap { key in
+            guard object[key] != nil else { return nil }
+            var shape = parameterSchemaShape(object[key], depth: depth + 1, root: root, seenRefs: seenRefs)
             shape.required = []
             return shape
         }

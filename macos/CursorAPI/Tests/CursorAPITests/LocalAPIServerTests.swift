@@ -8437,6 +8437,124 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
     }
 
+    func testResponsesFunctionCallsPreserveProviderSpecificMCPBranchConditionalArguments() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"send notice",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__notify__send_notice",
+              "parameters":{
+                "type":"object",
+                "unevaluatedProperties":false,
+                "properties":{
+                  "channel":{"type":"string","enum":["email","slack"]},
+                  "message":{"type":"string"}
+                },
+                "required":["channel","message"],
+                "if":{
+                  "properties":{"channel":{"const":"email"}},
+                  "required":["channel"]
+                },
+                "then":{
+                  "properties":{"email":{"type":"string","minLength":3}},
+                  "required":["email"]
+                },
+                "else":{
+                  "properties":{"channelId":{"type":"string","pattern":"^C[A-Z0-9]+$"}},
+                  "required":["channelId"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("notify"),
+            "toolName": .string("send_notice"),
+            "args": .object([
+                "channel": .string("slack"),
+                "message": .string("Build passed"),
+                "channelId": .string("C123")
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_conditional_branch",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        let functionCall = try XCTUnwrap(outputItems.first { ($0["type"] as? String) == "function_call" })
+        let arguments = try decodedArguments(functionCall)
+
+        XCTAssertEqual(functionCall["name"] as? String, "mcp__notify__send_notice")
+        XCTAssertEqual(arguments["channel"] as? String, "slack")
+        XCTAssertEqual(arguments["message"] as? String, "Build passed")
+        XCTAssertEqual(arguments["channelId"] as? String, "C123")
+        XCTAssertNil(arguments["email"])
+    }
+
+    func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolWithUnselectedConditionalBranchArgument() throws {
+        let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "input":"send notice",
+          "tools":[
+            {
+              "type":"function",
+              "name":"mcp__notify__send_notice",
+              "parameters":{
+                "type":"object",
+                "unevaluatedProperties":false,
+                "properties":{
+                  "channel":{"type":"string","enum":["email","slack"]},
+                  "message":{"type":"string"}
+                },
+                "required":["channel","message"],
+                "if":{
+                  "properties":{"channel":{"const":"email"}},
+                  "required":["channel"]
+                },
+                "then":{
+                  "properties":{"email":{"type":"string","minLength":3}},
+                  "required":["email"]
+                },
+                "else":{
+                  "properties":{"channelId":{"type":"string","pattern":"^C[A-Z0-9]+$"}},
+                  "required":["channelId"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+        let toolCall = CursorToolCall(name: "mcp", arguments: [
+            "providerIdentifier": .string("notify"),
+            "toolName": .string("send_notice"),
+            "args": .object([
+                "channel": .string("slack"),
+                "message": .string("Build passed"),
+                "channelId": .string("C123"),
+                "email": .string("dev@example.com")
+            ])
+        ])
+
+        let object = OpenAICompatibility.responseObject(
+            id: "resp_mcp_conditional_branch_extra",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test")
+        )
+
+        let outputItems = try XCTUnwrap(object["output"] as? [[String: Any]])
+        XCTAssertNil(outputItems.first { ($0["type"] as? String) == "function_call" })
+    }
+
     func testResponsesFunctionCallsDoNotEmitProviderSpecificMCPToolViolatingTupleArraySchema() throws {
         let prepared = try OpenAICompatibility.prepareResponsesRequest(Data(#"""
         {

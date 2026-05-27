@@ -722,6 +722,58 @@ describe("Cursor SDK local-agent bridge", () => {
     })).toBe("Missing required argument for send_notice: channelId");
   });
 
+  it("validates dynamic client MCP branch-specific conditional schemas", () => {
+    const tools = clientMcpToolDefinitions([
+      {
+        name: "send_notice",
+        parameters: {
+          type: "object",
+          unevaluatedProperties: false,
+          properties: {
+            channel: { type: "string", enum: ["email", "slack"] },
+            message: { type: "string" }
+          },
+          required: ["channel", "message"],
+          if: {
+            properties: { channel: { const: "email" } },
+            required: ["channel"]
+          },
+          then: {
+            properties: { email: { type: "string", minLength: 3 } },
+            required: ["email"]
+          },
+          else: {
+            properties: { channelId: { type: "string", pattern: "^C[A-Z0-9]+$" } },
+            required: ["channelId"]
+          }
+        }
+      }
+    ]);
+
+    expect(validateClientMcpToolCall(tools, "send_notice", {
+      channel: "email",
+      message: "Build passed",
+      email: "dev@example.com"
+    })).toBe(null);
+    expect(validateClientMcpToolCall(tools, "send_notice", {
+      channel: "slack",
+      message: "Build passed",
+      channelId: "C123"
+    })).toBe(null);
+    expect(validateClientMcpToolCall(tools, "send_notice", {
+      channel: "slack",
+      message: "Build passed",
+      channelId: "C123",
+      email: "dev@example.com"
+    })).toBe("Unexpected argument for send_notice: email");
+    expect(validateClientMcpToolCall(tools, "send_notice", {
+      channel: "email",
+      message: "Build passed",
+      email: "dev@example.com",
+      channelId: "C123"
+    })).toBe("Unexpected argument for send_notice: channelId");
+  });
+
   it("validates dynamic client MCP pattern properties", () => {
     const tools = clientMcpToolDefinitions([
       {
