@@ -77,6 +77,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
     if (url.pathname === "/api/early-access" && request.method === "POST") {
       return await handleEarlyAccess(request, env, deps);
     }
+    if (isNotaryWebhookRoute(url.pathname)) {
+      return await handleNotaryWebhook(request, env, url, deps);
+    }
     if (isReleaseRoute(url.pathname)) {
       return await handleReleaseRoute(request, env, url);
     }
@@ -109,9 +112,114 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
 
 const LATEST_DMG_NAME = "API-for-Cursor-latest.dmg";
 const RELEASE_OBJECT_PREFIX = "releases/";
+const NOTARY_WEBHOOK_PREFIX = "/api/notary/webhook/";
 
 function isReleaseRoute(pathname: string): boolean {
   return pathname === "/download" || pathname === "/appcast.xml" || pathname.startsWith("/releases/");
+}
+
+function isNotaryWebhookRoute(pathname: string): boolean {
+  return pathname.startsWith(NOTARY_WEBHOOK_PREFIX);
+}
+
+async function handleNotaryWebhook(request: Request, env: Env, url: URL, deps: Deps): Promise<Response> {
+  if (request.method !== "POST") return notFound();
+
+  const expectedToken = env.NOTARY_WEBHOOK_TOKEN;
+  const token = decodeURIComponent(url.pathname.slice(NOTARY_WEBHOOK_PREFIX.length));
+  if (!expectedToken || !token || token !== expectedToken) return notFound();
+
+  const dispatchToken = env.GITHUB_RELEASE_DISPATCH_TOKEN;
+  if (!dispatchToken) {
+    throw new HttpError("GitHub release dispatch token is not configured", 503, "server_error");
+  }
+
+  const metadata = notaryWebhookMetadata(url);
+  const missing = ["version", "build", "sourceRunId", "artifactName", "dmgName", "ref"].filter(
+    (name) => !metadata[name as keyof NotaryWebhookMetadata]
+  );
+  if (missing.length > 0) {
+    throw new HttpError(`Missing notary webhook metadata: ${missing.join(", ")}`, 400, "invalid_request_error");
+  }
+
+  const payload = await parseJsonBody<Record<string, unknown>>(request).catch(() => ({}));
+  const submissionId = findStringField(payload, ["id", "submissionId", "submission_id"]) || metadata.submissionId;
+  const submissionStatus = findStringField(payload, ["status", "submissionStatus", "submission_status"]);
+
+  if (!submissionId) {
+    throw new HttpError("Missing notarization submission id", 400, "invalid_request_error", "submissionId");
+  }
+
+  const repository = env.GITHUB_RELEASE_REPOSITORY || "standardagents/composer-api";
+  const response = await deps.fetch(`https://api.github.com/repos/${repository}/dispatches`, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${dispatchToken}`,
+      "content-type": "application/json",
+      "user-agent": "api-for-cursor-notary-webhook",
+      "x-github-api-version": "2022-11-28"
+    },
+    body: JSON.stringify({
+      event_type: "apple-notary-complete",
+      client_payload: {
+        ...metadata,
+        submissionId,
+        submissionStatus: submissionStatus || "unknown"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => "");
+    throw new HttpError(`Could not dispatch release finalizer: ${message || response.statusText}`, 502, "server_error");
+  }
+
+  return json({ ok: true });
+}
+
+interface NotaryWebhookMetadata {
+  version: string;
+  build: string;
+  sourceRunId: string;
+  artifactName: string;
+  dmgName: string;
+  ref: string;
+  submissionId: string;
+}
+
+function notaryWebhookMetadata(url: URL): NotaryWebhookMetadata {
+  return {
+    version: url.searchParams.get("version") || "",
+    build: url.searchParams.get("build") || "",
+    sourceRunId: url.searchParams.get("run_id") || "",
+    artifactName: url.searchParams.get("artifact") || "",
+    dmgName: url.searchParams.get("dmg") || "",
+    ref: url.searchParams.get("ref") || "",
+    submissionId: url.searchParams.get("submission_id") || ""
+  };
+}
+
+function findStringField(value: unknown, keys: string[], depth = 0): string {
+  if (depth > 4 || value === null || typeof value !== "object") return "";
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findStringField(item, keys, depth + 1);
+      if (found) return found;
+    }
+    return "";
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of keys) {
+    const found = record[key];
+    if (typeof found === "string" && found.trim()) return found.trim();
+  }
+  for (const nested of Object.values(record)) {
+    const found = findStringField(nested, keys, depth + 1);
+    if (found) return found;
+  }
+  return "";
 }
 
 async function handleReleaseRoute(request: Request, env: Env, url: URL): Promise<Response> {

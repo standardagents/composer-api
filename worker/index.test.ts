@@ -7,6 +7,9 @@ import type { Deps, Env } from "./types";
 interface MakeEnvOptions {
   assetsFetch?: Fetcher["fetch"];
   releases?: Record<string, { body: string; contentType?: string }>;
+  notaryWebhookToken?: string;
+  githubReleaseDispatchToken?: string;
+  githubReleaseRepository?: string;
 }
 
 function makeEnv(
@@ -26,7 +29,10 @@ function makeEnv(
     CURSOR_CHAT_ENDPOINT: "/test-cursor-chat",
     CURSOR_CLIENT_VERSION: "2.6.22",
     CURSOR_LOCAL_AGENT_ENDPOINT: "/test-local-sdk",
-    CURSOR_SDK_CLIENT_VERSION: "sdk-test"
+    CURSOR_SDK_CLIENT_VERSION: "sdk-test",
+    NOTARY_WEBHOOK_TOKEN: options.notaryWebhookToken,
+    GITHUB_RELEASE_DISPATCH_TOKEN: options.githubReleaseDispatchToken,
+    GITHUB_RELEASE_REPOSITORY: options.githubReleaseRepository
   };
 }
 
@@ -97,6 +103,52 @@ describe("Worker", () => {
     const response = await handleRequest(new Request("https://composer.test/releases/missing.dmg"), env, fakeCtx(), deps);
 
     expect(response.status).toBe(404);
+  });
+
+  it("dispatches the release finalizer from an Apple notary webhook", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, {
+      notaryWebhookToken: "webhook-secret",
+      githubReleaseDispatchToken: "github-token",
+      githubReleaseRepository: "standardagents/composer-api"
+    });
+    const dispatches: { url: string; init?: RequestInit }[] = [];
+    const { deps } = fakeDeps({
+      fetch: (input, init) => {
+        dispatches.push({ url: input.toString(), init });
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+    });
+    const url =
+      "https://composer.test/api/notary/webhook/webhook-secret?version=0.1.3&build=4&run_id=123&artifact=pending&dmg=API.dmg&ref=refs/tags/v0.1.3";
+
+    const response = await handleRequest(
+      new Request(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "notary-id", status: "Accepted" })
+      }),
+      env,
+      fakeCtx(),
+      deps
+    );
+
+    expect(response.status).toBe(200);
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0].url).toBe("https://api.github.com/repos/standardagents/composer-api/dispatches");
+    expect(dispatches[0].init?.headers).toMatchObject({ authorization: "Bearer github-token" });
+    const body = JSON.parse(dispatches[0].init?.body as string);
+    expect(body.event_type).toBe("apple-notary-complete");
+    expect(body.client_payload).toMatchObject({
+      submissionId: "notary-id",
+      submissionStatus: "Accepted",
+      version: "0.1.3",
+      build: "4",
+      sourceRunId: "123",
+      artifactName: "pending",
+      dmgName: "API.dmg",
+      ref: "refs/tags/v0.1.3"
+    });
   });
 
   it("allows OpenCode session headers in CORS preflight", async () => {
@@ -1683,7 +1735,7 @@ describe("Worker", () => {
   });
 });
 
-function fakeDeps(): {
+function fakeDeps(overrides: Partial<Deps> = {}): {
   deps: Deps;
   exchangeAuthHeaders: string[];
   chatAuthHeaders: string[];
@@ -1814,6 +1866,7 @@ function fakeDeps(): {
       return new Response("not found", { status: 404 });
     }
   };
+  Object.assign(deps, overrides);
   return { deps, exchangeAuthHeaders, chatAuthHeaders, chatRequestHeaders, chatRequestBodies, sdkRequests };
 }
 

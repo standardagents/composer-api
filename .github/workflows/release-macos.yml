@@ -32,6 +32,7 @@ jobs:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      NOTARY_WEBHOOK_TOKEN: ${{ secrets.NOTARY_WEBHOOK_TOKEN }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
@@ -137,11 +138,71 @@ jobs:
           echo "path=$dmg_path" >> "$GITHUB_OUTPUT"
           echo "name=$(basename "$dmg_path")" >> "$GITHUB_OUTPUT"
 
+      - name: Upload pending notarization artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-for-cursor-macos-pending-${{ env.CURSOR_API_APP_VERSION }}-${{ env.CURSOR_API_APP_BUILD }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            macos/CursorAPI/dist/API for Cursor.app
+            macos/CursorAPI/.build/artifacts/sparkle/Sparkle/bin/sign_update
+
       - name: Notarize DMG
+        id: notary
         timeout-minutes: 50
-        run: macos/CursorAPI/Scripts/notarize-dmg.sh "${{ steps.dmg.outputs.path }}"
+        run: |
+          set -euo pipefail
+
+          output="$RUNNER_TEMP/notary-output.txt"
+          webhook_url=""
+          pending_ok=""
+          if [ -n "${NOTARY_WEBHOOK_TOKEN:-}" ]; then
+            webhook_url="$(
+              python3 - <<'PY'
+import os
+from urllib.parse import quote, urlencode
+
+token = os.environ["NOTARY_WEBHOOK_TOKEN"]
+base = "https://api-for-composer.standardagents.ai/api/notary/webhook"
+params = {
+    "version": os.environ["CURSOR_API_APP_VERSION"],
+    "build": os.environ["CURSOR_API_APP_BUILD"],
+    "run_id": os.environ["GITHUB_RUN_ID"],
+    "artifact": f"api-for-cursor-macos-pending-{os.environ['CURSOR_API_APP_VERSION']}-{os.environ['CURSOR_API_APP_BUILD']}",
+    "dmg": os.environ["DMG_NAME"],
+    "ref": os.environ["GITHUB_REF"],
+}
+print(f"{base}/{quote(token, safe='')}?{urlencode(params)}")
+PY
+            )"
+            pending_ok="1"
+          fi
+
+          set +e
+          APPLE_NOTARY_OUTPUT="$output" \
+            APPLE_NOTARY_PENDING_OK="$pending_ok" \
+            APPLE_NOTARY_WEBHOOK_URL="$webhook_url" \
+            macos/CursorAPI/Scripts/notarize-dmg.sh "${{ steps.dmg.outputs.path }}"
+          status=$?
+          set -e
+
+          if [ -s "$output" ]; then
+            cat "$output" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$status" -eq 75 ]; then
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+            echo "Apple notarization is still pending. A webhook will trigger the finalizer when Apple finishes."
+            exit 0
+          fi
+          echo "pending=false" >> "$GITHUB_OUTPUT"
+          exit "$status"
+        env:
+          DMG_NAME: ${{ steps.dmg.outputs.name }}
 
       - name: Generate Sparkle appcast
+        if: steps.notary.outputs.pending != 'true'
         id: appcast
         timeout-minutes: 10
         run: |
@@ -156,6 +217,7 @@ jobs:
           echo "path=$appcast_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload release files to Cloudflare R2
+        if: steps.notary.outputs.pending != 'true'
         run: |
           set -euo pipefail
           dmg="${{ steps.dmg.outputs.path }}"
@@ -172,6 +234,7 @@ jobs:
             --content-type application/rss+xml
 
       - name: Verify published release files
+        if: steps.notary.outputs.pending != 'true'
         run: |
           set -euo pipefail
 
@@ -199,6 +262,7 @@ jobs:
           [ -s /tmp/api-for-cursor-latest-byte ]
 
       - name: Upload GitHub Actions artifacts
+        if: steps.notary.outputs.pending != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: api-for-cursor-macos-${{ env.CURSOR_API_APP_VERSION }}-${{ env.CURSOR_API_APP_BUILD }}
@@ -207,7 +271,7 @@ jobs:
             ${{ steps.appcast.outputs.path }}
 
       - name: Publish GitHub release assets
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && steps.notary.outputs.pending != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: |

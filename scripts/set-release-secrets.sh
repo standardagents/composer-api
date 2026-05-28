@@ -66,4 +66,8 @@ set_value_secret APPLE_ID "$(read_value APPLE_ID apple-id.txt)"
 set_value_secret APPLE_TEAM_ID "$(read_value APPLE_TEAM_ID apple-team-id.txt)"
 set_value_secret CLOUDFLARE_ACCOUNT_ID "$(read_value CLOUDFLARE_ACCOUNT_ID cloudflare-account-id.txt)"
 
+if [ -n "${NOTARY_WEBHOOK_TOKEN:-}" ] || [ -s "$SECRETS_DIR/notary-webhook-token.txt" ]; then
+  set_value_secret NOTARY_WEBHOOK_TOKEN "$(read_value NOTARY_WEBHOOK_TOKEN notary-webhook-token.txt)"
+fi
+
 echo "Release secrets are configured for $REPO."

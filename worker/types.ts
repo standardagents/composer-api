@@ -13,6 +13,9 @@ export interface Env {
   CURSOR_SDK_BRIDGE_TIMEOUT_MS?: string;
   CURSOR_SDK_BRIDGE_URL?: string;
   CURSOR_SDK_CLIENT_VERSION?: string;
+  GITHUB_RELEASE_DISPATCH_TOKEN?: string;
+  GITHUB_RELEASE_REPOSITORY?: string;
+  NOTARY_WEBHOOK_TOKEN?: string;
   WAITLIST_API_TOKEN?: string;
   WAITLIST_SOURCE?: string;
 }

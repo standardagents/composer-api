@@ -7,6 +7,9 @@ APPLE_ID="${APPLE_ID:-}"
 APPLE_TEAM_ID="${APPLE_TEAM_ID:-}"
 APPLE_APP_PASSWORD="${APPLE_APP_PASSWORD:-}"
 NOTARY_TIMEOUT="${APPLE_NOTARY_TIMEOUT:-45m}"
+NOTARY_WEBHOOK_URL="${APPLE_NOTARY_WEBHOOK_URL:-}"
+NOTARY_OUTPUT="${APPLE_NOTARY_OUTPUT:-}"
+NOTARY_PENDING_OK="${APPLE_NOTARY_PENDING_OK:-}"
 
 fail() {
   echo "Notarization failed: $*" >&2
@@ -27,6 +30,11 @@ else
   fail "set APPLE_NOTARY_KEYCHAIN_PROFILE or APPLE_ID, APPLE_TEAM_ID, and APPLE_APP_PASSWORD"
 fi
 
+NOTARY_SUBMIT_ARGS=()
+if [ -n "$NOTARY_WEBHOOK_URL" ]; then
+  NOTARY_SUBMIT_ARGS+=(--webhook "$NOTARY_WEBHOOK_URL")
+fi
+
 SUBMISSION_JSON="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-notary.XXXXXX.json")"
 cleanup() {
   rm -f "$SUBMISSION_JSON"
@@ -36,6 +44,7 @@ trap cleanup EXIT
 set +e
 xcrun notarytool submit "$DMG_PATH" \
   "${NOTARY_AUTH_ARGS[@]}" \
+  "${NOTARY_SUBMIT_ARGS[@]}" \
   --wait \
   --timeout "$NOTARY_TIMEOUT" \
   --output-format json >"$SUBMISSION_JSON"
@@ -62,6 +71,23 @@ PY
 
 SUBMISSION_ID="$(read_json_field id)"
 SUBMISSION_STATUS="$(read_json_field status)"
+
+write_output() {
+  if [ -z "$NOTARY_OUTPUT" ]; then
+    return 0
+  fi
+  {
+    printf 'submission_id=%s\n' "$SUBMISSION_ID"
+    printf 'submission_status=%s\n' "$SUBMISSION_STATUS"
+  } >> "$NOTARY_OUTPUT"
+}
+
+write_output
+
+if [ "$SUBMISSION_STATUS" = "In Progress" ] && [ -n "$NOTARY_PENDING_OK" ]; then
+  echo "Notarization submission $SUBMISSION_ID is still in progress; Apple will continue processing it." >&2
+  exit 75
+fi
 
 if [ "$submit_status" -ne 0 ] || [ "$SUBMISSION_STATUS" != "Accepted" ]; then
   if [ -n "$SUBMISSION_ID" ]; then

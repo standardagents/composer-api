@@ -78,5 +78,7 @@
   // Optional secret:
   // CURSOR_SDK_BRIDGE_URL - HTTPS URL for an external Node or Bun SDK bridge.
   // CURSOR_SDK_BRIDGE_TOKEN - bearer token shared with the SDK bridge.
+  // NOTARY_WEBHOOK_TOKEN - unguessable token in the Apple notarization webhook URL.
+  // GITHUB_RELEASE_DISPATCH_TOKEN - fine-grained GitHub token that can create repository dispatch events.
   // WAITLIST_API_TOKEN - bearer token for https://agents.standardagentbuilder.com/api/waitlist.
 }

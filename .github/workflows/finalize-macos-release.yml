@@ -1,0 +1,238 @@
+name: Finalize notarized macOS release
+
+on:
+  repository_dispatch:
+    types:
+      - apple-notary-complete
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version, for example 0.1.0"
+        required: true
+        type: string
+      build:
+        description: "Build number"
+        required: true
+        type: string
+      source_run_id:
+        description: "Release workflow run id containing the pending artifact"
+        required: true
+        type: string
+      artifact_name:
+        description: "Pending notarization artifact name"
+        required: true
+        type: string
+      dmg_name:
+        description: "DMG filename in the pending artifact"
+        required: true
+        type: string
+      submission_id:
+        description: "Apple notarization submission id"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to check out"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  finalize:
+    name: Staple, publish, and attach release assets
+    runs-on: macos-15
+    env:
+      R2_RELEASE_BUCKET: api-for-composer-releases
+      CURSOR_API_APPCAST_URL: https://api-for-composer.standardagents.ai/appcast.xml
+      CURSOR_API_RELEASE_BASE_URL: https://api-for-composer.standardagents.ai/releases
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Resolve finalizer metadata
+        id: metadata
+        run: |
+          set -euo pipefail
+          python3 - "$GITHUB_EVENT_PATH" "$GITHUB_EVENT_NAME" <<'PY'
+import json
+import os
+import sys
+
+event_path, event_name = sys.argv[1], sys.argv[2]
+with open(event_path, "r", encoding="utf-8") as handle:
+    event = json.load(handle)
+
+if event_name == "repository_dispatch":
+    payload = event.get("client_payload") or {}
+else:
+    payload = event.get("inputs") or {}
+
+values = {
+    "version": payload.get("version", ""),
+    "build": payload.get("build", ""),
+    "source_run_id": payload.get("sourceRunId") or payload.get("source_run_id", ""),
+    "artifact_name": payload.get("artifactName") or payload.get("artifact_name", ""),
+    "dmg_name": payload.get("dmgName") or payload.get("dmg_name", ""),
+    "submission_id": payload.get("submissionId") or payload.get("submission_id", ""),
+    "ref": payload.get("ref", ""),
+}
+missing = [key for key, value in values.items() if not value]
+if missing:
+    raise SystemExit(f"Missing finalizer metadata: {', '.join(missing)}")
+
+tag = values["ref"].removeprefix("refs/tags/")
+if tag == values["ref"]:
+    tag = f"v{values['version']}"
+
+with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+    for key, value in values.items():
+        output.write(f"{key}={value}\n")
+    output.write(f"tag={tag}\n")
+with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env:
+    env.write(f"CURSOR_API_APP_VERSION={values['version']}\n")
+    env.write(f"CURSOR_API_APP_BUILD={values['build']}\n")
+PY
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.metadata.outputs.ref }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download pending notarization artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pending-release"
+          gh run download "${{ steps.metadata.outputs.source_run_id }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "${{ steps.metadata.outputs.artifact_name }}" \
+            --dir "$RUNNER_TEMP/pending-release"
+
+      - name: Verify Apple notarization and staple DMG
+        id: final
+        run: |
+          set -euo pipefail
+          pending_dir="$RUNNER_TEMP/pending-release"
+          dmg_path="$(find "$pending_dir" -name "${{ steps.metadata.outputs.dmg_name }}" -type f -print -quit)"
+          app_path="$(find "$pending_dir" -name "API for Cursor.app" -type d -prune -print -quit)"
+          sign_update="$(find "$pending_dir" -name sign_update -type f -print -quit)"
+
+          [ -s "$dmg_path" ] || { echo "Pending DMG is missing" >&2; exit 1; }
+          [ -d "$app_path" ] || { echo "Pending app bundle is missing" >&2; exit 1; }
+          [ -s "$sign_update" ] || { echo "Sparkle sign_update is missing" >&2; exit 1; }
+          chmod +x "$sign_update"
+
+          info_json="$RUNNER_TEMP/notary-info.json"
+          xcrun notarytool info "${{ steps.metadata.outputs.submission_id }}" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --output-format json > "$info_json"
+          status="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status", ""))' "$info_json")"
+          if [ "$status" != "Accepted" ]; then
+            xcrun notarytool log "${{ steps.metadata.outputs.submission_id }}" \
+              --apple-id "$APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" || true
+            echo "Notarization is $status, not Accepted." >&2
+            exit 1
+          fi
+
+          xcrun stapler staple "$dmg_path"
+          xcrun stapler validate "$dmg_path"
+          spctl --assess --type open --context context:primary-signature --verbose "$dmg_path"
+
+          appcast_path="$(
+            CURSOR_API_APPCAST_PATH="$RUNNER_TEMP/appcast.xml" \
+            SPARKLE_SIGN_UPDATE="$sign_update" \
+            macos/CursorAPI/Scripts/generate-appcast.sh "$dmg_path" "$app_path"
+          )"
+
+          grep -q 'sparkle:edSignature=' "$appcast_path"
+          grep -q "${CURSOR_API_RELEASE_BASE_URL}/" "$appcast_path"
+          echo "dmg_path=$dmg_path" >> "$GITHUB_OUTPUT"
+          echo "appcast_path=$appcast_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release files to Cloudflare R2
+        run: |
+          set -euo pipefail
+          dmg="${{ steps.final.outputs.dmg_path }}"
+          appcast="${{ steps.final.outputs.appcast_path }}"
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/releases/${{ steps.metadata.outputs.dmg_name }}" \
+            --file "$dmg" \
+            --content-type application/x-apple-diskimage
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/releases/API-for-Cursor-latest.dmg" \
+            --file "$dmg" \
+            --content-type application/x-apple-diskimage
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/appcast.xml" \
+            --file "$appcast" \
+            --content-type application/rss+xml
+
+      - name: Verify published release files
+        run: |
+          set -euo pipefail
+
+          retry() {
+            label="$1"
+            shift
+            for attempt in $(seq 1 12); do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -lt 12 ]; then
+                echo "$label is not ready yet; retrying in 5s..."
+                sleep 5
+              fi
+            done
+            echo "$label did not become available" >&2
+            return 1
+          }
+
+          retry "appcast" curl -fsSL "$CURSOR_API_APPCAST_URL" -o /tmp/api-for-cursor-appcast.xml
+          grep -q 'sparkle:edSignature=' /tmp/api-for-cursor-appcast.xml
+          grep -q "${CURSOR_API_RELEASE_BASE_URL}/" /tmp/api-for-cursor-appcast.xml
+
+          retry "latest DMG" curl -fsSL --range 0-0 "${CURSOR_API_RELEASE_BASE_URL}/API-for-Cursor-latest.dmg" -o /tmp/api-for-cursor-latest-byte
+          [ -s /tmp/api-for-cursor-latest-byte ]
+
+      - name: Upload final GitHub Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-for-cursor-macos-${{ env.CURSOR_API_APP_VERSION }}-${{ env.CURSOR_API_APP_BUILD }}
+          path: |
+            ${{ steps.final.outputs.dmg_path }}
+            ${{ steps.final.outputs.appcast_path }}
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.metadata.outputs.tag }}"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$tag" \
+              --notes "Release $tag"
+          fi
+          gh release upload "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            "${{ steps.final.outputs.dmg_path }}" \
+            "${{ steps.final.outputs.appcast_path }}" \
+            --clobber
