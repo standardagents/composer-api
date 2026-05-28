@@ -111,7 +111,6 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = item.button {
             button.image = Self.menuBarTemplateIcon()
-                ?? NSImage(systemSymbolName: "app", accessibilityDescription: CursorAPIBrand.displayName)
             button.image?.isTemplate = true
             button.imageScaling = .scaleProportionallyDown
             button.imagePosition = .imageOnly
@@ -120,36 +119,17 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         statusItem = item
     }
 
-    private static func menuBarTemplateIcon() -> NSImage? {
-        if let image = standardAgentsLogoTemplateImage() {
-            return image
-        }
-        return drawnStandardAgentsTemplateIcon()
+    private static func menuBarTemplateIcon() -> NSImage {
+        standardAgentsMenuBarBitmapIcon() ?? standardAgentsMenuBarVectorIcon()
     }
 
-    private static func standardAgentsLogoTemplateImage() -> NSImage? {
+    private static func standardAgentsMenuBarBitmapIcon() -> NSImage? {
         let pointSize = NSSize(width: 18, height: 18)
         let pixelSize = 72
         let bytesPerPixel = 4
         let bytesPerRow = pixelSize * bytesPerPixel
-
-        guard let logoURL = Bundle.module.url(forResource: "cursor-logo", withExtension: "png"),
-              let sourceImage = NSImage(contentsOf: logoURL),
-              let sourceCGImage = sourceImage.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            return nil
-        }
-
-        let cropRect = brightPixelBounds(in: sourceCGImage) ?? CGRect(
-            x: 0,
-            y: 0,
-            width: sourceCGImage.width,
-            height: sourceCGImage.height
-        )
-        guard let croppedImage = sourceCGImage.cropping(to: cropRect.integral) else {
-            return nil
-        }
-
         var pixels = [UInt8](repeating: 0, count: pixelSize * pixelSize * bytesPerPixel)
+
         guard let context = CGContext(
             data: &pixels,
             width: pixelSize,
@@ -163,31 +143,23 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         }
 
         context.clear(CGRect(x: 0, y: 0, width: pixelSize, height: pixelSize))
+        context.setFillColor(NSColor.black.cgColor)
         context.interpolationQuality = .high
-        let inset = CGFloat(pixelSize) * 0.08
-        context.draw(
-            croppedImage,
-            in: CGRect(
-                x: inset,
-                y: inset,
-                width: CGFloat(pixelSize) - (inset * 2),
-                height: CGFloat(pixelSize) - (inset * 2)
-            )
+
+        let inset = CGFloat(pixelSize) * 0.09
+        let iconRect = CGRect(
+            x: inset,
+            y: inset,
+            width: CGFloat(pixelSize) - (inset * 2),
+            height: CGFloat(pixelSize) - (inset * 2)
         )
 
-        for offset in stride(from: 0, to: pixels.count, by: bytesPerPixel) {
-            let red = CGFloat(pixels[offset]) / 255
-            let green = CGFloat(pixels[offset + 1]) / 255
-            let blue = CGFloat(pixels[offset + 2]) / 255
-            let sourceAlpha = CGFloat(pixels[offset + 3]) / 255
-            let luminance = (0.2126 * red) + (0.7152 * green) + (0.0722 * blue)
-            let maskAlpha = max(0, min(1, (luminance - 0.12) / 0.48)) * sourceAlpha
-
-            pixels[offset] = 0
-            pixels[offset + 1] = 0
-            pixels[offset + 2] = 0
-            pixels[offset + 3] = UInt8((maskAlpha * 255).rounded())
-        }
+        context.saveGState()
+        context.translateBy(x: iconRect.minX, y: iconRect.minY + iconRect.height)
+        context.scaleBy(x: iconRect.width / 150, y: -iconRect.height / 150)
+        context.addPath(standardAgentsLogoPath())
+        context.fillPath(using: .winding)
+        context.restoreGState()
 
         let data = Data(pixels)
         guard let provider = CGDataProvider(data: data as CFData),
@@ -216,88 +188,24 @@ final class CursorAPIAppDelegate: NSObject, NSApplicationDelegate, NSWindowDeleg
         return image
     }
 
-    private static func brightPixelBounds(in image: CGImage) -> CGRect? {
-        let width = image.width
-        let height = image.height
-        let bytesPerPixel = 4
-        let bytesPerRow = width * bytesPerPixel
-        var pixels = [UInt8](repeating: 0, count: width * height * bytesPerPixel)
-
-        guard let context = CGContext(
-            data: &pixels,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return nil
-        }
-
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        var minX = width
-        var minY = height
-        var maxX = -1
-        var maxY = -1
-
-        for y in 0..<height {
-            for x in 0..<width {
-                let offset = ((y * width) + x) * bytesPerPixel
-                let red = CGFloat(pixels[offset]) / 255
-                let green = CGFloat(pixels[offset + 1]) / 255
-                let blue = CGFloat(pixels[offset + 2]) / 255
-                let alpha = CGFloat(pixels[offset + 3]) / 255
-                let luminance = ((0.2126 * red) + (0.7152 * green) + (0.0722 * blue)) * alpha
-                guard luminance > 0.35 else { continue }
-
-                minX = min(minX, x)
-                minY = min(minY, y)
-                maxX = max(maxX, x)
-                maxY = max(maxY, y)
-            }
-        }
-
-        guard maxX >= minX, maxY >= minY else {
-            return nil
-        }
-
-        let padding = max(2, Int(round(Double(max(width, height)) * 0.04)))
-        let paddedMinX = max(0, minX - padding)
-        let paddedMinY = max(0, minY - padding)
-        let paddedMaxX = min(width - 1, maxX + padding)
-        let paddedMaxY = min(height - 1, maxY + padding)
-
-        return CGRect(
-            x: paddedMinX,
-            y: paddedMinY,
-            width: paddedMaxX - paddedMinX + 1,
-            height: paddedMaxY - paddedMinY + 1
-        )
-    }
-
-    private static func drawnStandardAgentsTemplateIcon() -> NSImage? {
+    private static func standardAgentsMenuBarVectorIcon() -> NSImage {
         let pointSize = NSSize(width: 18, height: 18)
-        let image = NSImage(size: pointSize)
-        image.lockFocus()
-        guard let context = NSGraphicsContext.current?.cgContext else {
-            image.unlockFocus()
-            return nil
+        let image = NSImage(size: pointSize, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else {
+                return false
+            }
+
+            let inset = rect.width * 0.09
+            let iconRect = rect.insetBy(dx: inset, dy: inset)
+            context.saveGState()
+            context.setFillColor(NSColor.black.cgColor)
+            context.translateBy(x: iconRect.minX, y: iconRect.minY + iconRect.height)
+            context.scaleBy(x: iconRect.width / 150, y: -iconRect.height / 150)
+            context.addPath(standardAgentsLogoPath())
+            context.fillPath(using: .winding)
+            context.restoreGState()
+            return true
         }
-
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: pointSize).fill()
-
-        context.saveGState()
-        context.translateBy(x: 0, y: pointSize.height)
-        context.scaleBy(x: pointSize.width / 150, y: -pointSize.height / 150)
-        context.addPath(standardAgentsLogoPath())
-        context.setFillColor(NSColor.black.cgColor)
-        context.fillPath(using: .winding)
-        context.restoreGState()
-        image.unlockFocus()
-
         image.isTemplate = true
         image.accessibilityDescription = CursorAPIBrand.displayName
         return image

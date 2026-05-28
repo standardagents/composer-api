@@ -1,0 +1,76 @@
+name: Package macOS smoke
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Build and verify development DMG
+    runs-on: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test Worker
+        run: npm run test
+
+      - name: Test macOS package
+        run: swift test --package-path macos/CursorAPI
+
+      - name: Build app bundle
+        run: macos/CursorAPI/Scripts/package-app.sh --development
+
+      - name: Verify app bundle
+        run: macos/CursorAPI/Scripts/verify-package.sh "macos/CursorAPI/dist/API for Cursor.app"
+
+      - name: Create DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          dmg_path="$(macos/CursorAPI/Scripts/create-dmg.sh "macos/CursorAPI/dist/API for Cursor.app")"
+          echo "path=$dmg_path" >> "$GITHUB_OUTPUT"
+
+      - name: Generate appcast smoke
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          tools_dir="macos/CursorAPI/.build/artifacts/sparkle/Sparkle/bin"
+          appcast_path="$(
+            SPARKLE_PRIVATE_KEY="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" \
+            SPARKLE_SIGN_UPDATE="$tools_dir/sign_update" \
+            macos/CursorAPI/Scripts/generate-appcast.sh "${{ steps.dmg.outputs.path }}"
+          )"
+          grep -q "${CURSOR_API_RELEASE_BASE_URL:-https://api-for-composer.standardagents.ai/releases}/" "$appcast_path"
+          grep -q 'sparkle:edSignature=' "$appcast_path"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-for-cursor-macos-smoke
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            macos/CursorAPI/dist/appcast.xml

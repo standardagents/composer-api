@@ -36,6 +36,10 @@ if [ -n "$SPARKLE_GENERATE_APPCAST" ]; then
   "$SPARKLE_GENERATE_APPCAST" "${args[@]}" "$RELEASES_DIR"
   [ -s "$RELEASES_DIR/appcast.xml" ] || fail "generate_appcast did not create appcast.xml"
   cp "$RELEASES_DIR/appcast.xml" "$APPCAST_PATH"
+  grep -q "${DOWNLOAD_BASE_URL%/}/" "$APPCAST_PATH" || fail "generated appcast is missing the release download URL"
+  if [ -n "$SPARKLE_PRIVATE_KEY" ]; then
+    grep -q 'sparkle:edSignature=' "$APPCAST_PATH" || fail "generated appcast is missing Sparkle EdDSA signature"
+  fi
   echo "$APPCAST_PATH"
   exit 0
 fi
@@ -91,4 +95,6 @@ cat > "$APPCAST_PATH" <<XML
 </rss>
 XML
 
+grep -q "${DOWNLOAD_BASE_URL%/}/" "$APPCAST_PATH" || fail "generated appcast is missing the release download URL"
+grep -q 'sparkle:edSignature=' "$APPCAST_PATH" || fail "generated appcast is missing Sparkle EdDSA signature"
 echo "$APPCAST_PATH"

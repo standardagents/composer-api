@@ -44,6 +44,11 @@ The old hosted API domain remains configured until the cutover is verified. Do n
 
 ## Cut A Release
 
+The `Package macOS smoke` workflow should be green on the commit being released.
+It builds the development app bundle, verifies Sparkle and the bundled bridge
+runtime, creates a DMG, and generates a signed appcast smoke file with a
+throwaway Sparkle key without requiring Apple signing credentials.
+
 Tag a release:
 
 ```bash
