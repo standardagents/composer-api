@@ -71,6 +71,12 @@ The `Release macOS app` workflow builds, signs, notarizes, generates the appcast
 
 ## Verify A Release
 
+Run the public release gate:
+
+```bash
+scripts/verify-production-release.sh
+```
+
 1. Download from `/download`.
 2. Mount the DMG and drag the app to `/Applications`.
 3. Launch the app and confirm macOS does not show an unidentified developer warning.
