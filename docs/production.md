@@ -58,9 +58,14 @@ throwaway Sparkle key without requiring Apple signing credentials.
 Tag a release:
 
 ```bash
+git status --short
 git tag v0.1.0
 git push origin v0.1.0
 ```
+
+Always tag the commit that contains the release workflow and packaging changes
+you intend to ship. If a previous tag already exists or points at an older
+commit, cut a new version tag instead of rerunning the stale tag workflow.
 
 The `Release macOS app` workflow builds, signs, notarizes, generates the appcast, uploads to R2, and attaches release assets to the GitHub release.
 
