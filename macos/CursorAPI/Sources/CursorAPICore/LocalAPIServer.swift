@@ -995,14 +995,29 @@ public final class LocalAPIServer: @unchecked Sendable {
     }
 
     private func sessionAffinity(_ request: HTTPRequest) -> String? {
-        request.header("x-session-affinity")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-opencode-session-id")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-opencode-session")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-cursorapi-session")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-cursorapi-project")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-project-path")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-workspace-path")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
-            ?? request.header("x-working-directory")?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        for name in [
+            "x-session-affinity",
+            "x-opencode-session-id",
+            "x-opencode-session",
+            "x-cursorapi-session",
+            "x-cursorapi-project",
+            "x-project-path",
+            "x-workspace-path",
+            "x-working-directory"
+        ] {
+            if let value = nonEmptyHeader(request.header(name)) {
+                return value
+            }
+        }
+        return nil
+    }
+
+    private func nonEmptyHeader(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
     }
 
     private func serviceObject(settings: CursorAPISettings, responseState: LocalResponseSessionStore.Stats) -> [String: Any] {
