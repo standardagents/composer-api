@@ -56,12 +56,18 @@ fi
   || fail "bundled bridge runtime cannot load node:http2"
 [ -s "$RESOURCES_DIR/APIForCursor.icns" ] || fail "app icon is missing"
 [ -s "$RESOURCES_DIR/APIForCursor.png" ] || fail "runtime app icon PNG is missing"
-swift - "$RESOURCES_DIR/APIForCursor.icns" <<'SWIFT' || fail "app icon does not contain the packaged artwork"
+ICON_VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-icon.XXXXXX")"
+trap 'rm -rf "$ICON_VERIFY_DIR"' EXIT
+iconutil -c iconset "$RESOURCES_DIR/APIForCursor.icns" -o "$ICON_VERIFY_DIR/APIForCursor.iconset" >/dev/null \
+  || fail "app icon cannot be expanded"
+ICON_VERIFY_PNG="$ICON_VERIFY_DIR/APIForCursor.iconset/icon_512x512@2x.png"
+[ -s "$ICON_VERIFY_PNG" ] || fail "app icon is missing 1024px artwork"
+swift - "$ICON_VERIFY_PNG" <<'SWIFT' || fail "app icon does not contain the packaged artwork"
 import AppKit
 import Foundation
 
-let iconURL = URL(fileURLWithPath: CommandLine.arguments[1])
-guard let image = NSImage(contentsOf: iconURL),
+let imageURL = URL(fileURLWithPath: CommandLine.arguments[1])
+guard let image = NSImage(contentsOf: imageURL),
       let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
     exit(1)
 }
