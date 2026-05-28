@@ -15,6 +15,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
     public var localAgentEndpoint: String
     public var clientVersion: String
     public var launchAtLogin: Bool
+    public var menuBarOnly: Bool
 
     public init(
         port: UInt16 = 8787,
@@ -24,7 +25,8 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         backendBaseURL: String = "",
         localAgentEndpoint: String = "",
         clientVersion: String = "sdk-1.0.13",
-        launchAtLogin: Bool = false
+        launchAtLogin: Bool = false,
+        menuBarOnly: Bool = false
     ) {
         self.port = port
         self.cursorAPIKey = cursorAPIKey
@@ -34,6 +36,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         self.localAgentEndpoint = localAgentEndpoint
         self.clientVersion = clientVersion
         self.launchAtLogin = launchAtLogin
+        self.menuBarOnly = menuBarOnly
     }
 
     public var baseURL: URL {
@@ -65,6 +68,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         case localAgentEndpoint
         case clientVersion
         case launchAtLogin
+        case menuBarOnly
     }
 
     public init(from decoder: any Decoder) throws {
@@ -77,6 +81,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         localAgentEndpoint = try container.decodeIfPresent(String.self, forKey: .localAgentEndpoint) ?? ""
         clientVersion = try container.decodeIfPresent(String.self, forKey: .clientVersion) ?? "sdk-1.0.13"
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin) ?? false
+        menuBarOnly = try container.decodeIfPresent(Bool.self, forKey: .menuBarOnly) ?? false
     }
 
     public func encode(to encoder: any Encoder) throws {
@@ -88,6 +93,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         try container.encode(localAgentEndpoint, forKey: .localAgentEndpoint)
         try container.encode(clientVersion, forKey: .clientVersion)
         try container.encode(launchAtLogin, forKey: .launchAtLogin)
+        try container.encode(menuBarOnly, forKey: .menuBarOnly)
     }
 }
 

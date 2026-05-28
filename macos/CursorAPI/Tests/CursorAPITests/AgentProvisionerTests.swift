@@ -549,7 +549,7 @@ final class AgentProvisionerTests: XCTestCase {
 
         let statuses = try provisioner.installAll(settings: settings)
 
-        XCTAssertEqual(Set(statuses.map(\.id)), Set(AgentIntegrationID.allCases))
+        XCTAssertEqual(Set(statuses.map(\.id)), Set(AgentProvisioner.visibleIntegrationIDs))
         XCTAssertTrue(statuses.allSatisfy(\.installed))
         XCTAssertTrue(statuses.allSatisfy { $0.actionTitle == "Installed" })
 
@@ -580,18 +580,12 @@ final class AgentProvisionerTests: XCTestCase {
         let codex = try String(contentsOf: home.appending(path: ".codex/config.toml"), encoding: .utf8)
         let kilo = try String(contentsOf: home.appending(path: ".config/kilo/kilo.jsonc"), encoding: .utf8)
         let pi = try String(contentsOf: home.appending(path: ".pi/agent/models.json"), encoding: .utf8)
-        let continueConfig = try String(contentsOf: home.appending(path: ".continue/config.yaml"), encoding: .utf8)
-        let aiderConfig = try String(contentsOf: home.appending(path: ".aider.conf.yml"), encoding: .utf8)
-        let rooConfig = try String(contentsOf: home.appending(path: ".config/api-for-cursor/roo-code-settings.json"), encoding: .utf8)
 
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: opencode), 1)
         XCTAssertEqual(countOccurrences(of: "[model_providers.cursorapi]", in: codex), 1)
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: kilo), 1)
         XCTAssertEqual(countOccurrences(of: "\"cursorapi\"", in: pi), 1)
-        XCTAssertEqual(countOccurrences(of: "# api-for-cursor-start", in: continueConfig), 1)
-        XCTAssertEqual(countOccurrences(of: "# api-for-cursor-aider-start", in: aiderConfig), 1)
-        XCTAssertTrue(rooConfig.contains("\"api-for-cursor-composer-fast\""))
-        for currentConfig in [opencode, codex, kilo, pi, continueConfig, aiderConfig, rooConfig] {
+        for currentConfig in [opencode, codex, kilo, pi] {
             XCTAssertFalse(currentConfig.contains("http://127.0.0.1:8787/v1"))
             XCTAssertTrue(currentConfig.contains("http://127.0.0.1:9999/v1"))
         }

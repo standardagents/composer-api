@@ -74,6 +74,7 @@ public struct PreparedChatRequest: Equatable, Sendable {
     public var storeResponse: Bool
     public var responseInputItems: [JSONValue]
     public var toolContext: ToolCallContext?
+    public var incrementalPrompt: String?
 }
 
 public enum OpenAICompatibility {
@@ -83,8 +84,7 @@ public enum OpenAICompatibility {
     public static func modelList() -> [String: Any] {
         [
             "object": "list",
-            "data": ComposerModels.all.map(modelObject),
-            "models": ComposerModels.all.map(codexModelObject)
+            "data": ComposerModels.all.map(modelObject)
         ]
     }
 
@@ -93,16 +93,7 @@ public enum OpenAICompatibility {
             "id": model.id,
             "object": "model",
             "created": 1_779_148_800,
-            "owned_by": "cursor",
-            "name": model.name,
-            "cost": [
-                "input": model.inputCost,
-                "output": model.outputCost
-            ],
-            "limit": [
-                "context": model.contextWindow,
-                "output": model.outputLimit
-            ]
+            "owned_by": "cursor"
         ]
     }
 
@@ -154,17 +145,27 @@ public enum OpenAICompatibility {
         let tools = parseTools(raw["tools"], disabled: (raw["tool_choice"] as? String) == "none")
         let toolContext = toolCallContext(fromMessages: messages)
         let model = try ComposerModels.resolvedModelID(for: raw["model"] as? String)
+        let latestUserTextHint = latestUserText(fromMessages: messages)
+        let sawToolResultHint = messages.contains { (($0["role"] as? String) ?? "user") == "tool" }
+        let includeToolInventory = shouldIncludeToolInventory(
+            tools: tools,
+            toolChoice: raw["tool_choice"],
+            latestUserText: latestUserTextHint,
+            sawToolResult: sawToolResultHint
+        )
         var transcript = [
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
             "When the conversation includes LOCAL TOOL RESULT records, treat them as completed SDK tool_call results for your previous tool requests and continue from those results.",
             "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are called through SDK mcp with providerIdentifier, toolName, and args.",
-            "For general file creation when no specific client tool is requested, prefer SDK shell when a shell client tool is available; otherwise request write calls with both path and fileText.",
+            "For local file inspection, edits, commands, and project work, use SDK mcp with providerIdentifier \"client\" so the outer client executes the operation.",
             "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a tool call and received a LOCAL TOOL RESULT confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
-        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
+        if includeToolInventory {
+            appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
+        }
         transcript.append("")
         transcript.append("Conversation:")
         var rememberedToolCalls: [String: ResponseToolCallMemory] = [:]
@@ -233,7 +234,14 @@ public enum OpenAICompatibility {
             previousResponseID: nil,
             storeResponse: false,
             responseInputItems: [],
-            toolContext: toolContext
+            toolContext: toolContext,
+            incrementalPrompt: incrementalChatPrompt(
+                messages: messages,
+                tools: tools,
+                toolChoice: raw["tool_choice"],
+                context: toolContext,
+                raw: raw
+            )
         )
     }
 
@@ -266,7 +274,8 @@ public enum OpenAICompatibility {
             previousResponseID: nil,
             storeResponse: false,
             responseInputItems: [],
-            toolContext: nil
+            toolContext: nil,
+            incrementalPrompt: nil
         )
     }
 
@@ -310,8 +319,136 @@ public enum OpenAICompatibility {
             previousResponseID: nil,
             storeResponse: false,
             responseInputItems: normalizedResponseInputItems(raw["input"]),
-            toolContext: nil
+            toolContext: nil,
+            incrementalPrompt: nil
         )
+    }
+
+    public static func bridgeToolSpecs(for prepared: PreparedChatRequest) -> [OpenAIToolSpec] {
+        guard !prepared.tools.isEmpty, shouldAttachBridgeTools(for: prepared) else {
+            return []
+        }
+        if shouldForwardAllBridgeTools(for: prepared) {
+            return orderedBridgeTools(prepared.tools, preferred: preferredBridgeCanonicals(forPrompt: prepared.prompt))
+        }
+        let preferred = preferredBridgeToolNames(for: prepared)
+        guard !preferred.isEmpty else {
+            return orderedBridgeTools(compatibleBridgeTools(in: prepared.tools), preferred: preferredBridgeCanonicals(forPrompt: prepared.prompt))
+        }
+        let normalizedPreferred = Set(preferred.map(normalizedName))
+        let canonicalPreferred = Set(preferred.map(canonicalToolName))
+        let filtered = prepared.tools.filter { tool in
+            normalizedPreferred.contains(normalizedName(tool.name))
+                || canonicalPreferred.contains(canonicalToolName(tool.name))
+                || canonicalPreferred.contains { schemaLooksCompatible(sdkToolName: $0, tool: tool) }
+        }
+        if !filtered.isEmpty {
+            return orderedBridgeTools(filtered, preferred: preferred)
+        }
+        let compatible = compatibleBridgeTools(in: prepared.tools)
+        return orderedBridgeTools(compatible.isEmpty ? prepared.tools : compatible, preferred: preferred)
+    }
+
+    private static func orderedBridgeTools(_ tools: [OpenAIToolSpec], preferred: [String]) -> [OpenAIToolSpec] {
+        guard tools.count > 1 else { return tools }
+        let order = preferred.enumerated().reduce(into: [String: Int]()) { result, item in
+            let value = canonicalToolName(item.element)
+            if result[value] == nil {
+                result[value] = item.offset
+            }
+        }
+        return tools.enumerated().sorted { lhs, rhs in
+            let leftOrder = bridgeToolOrder(lhs.element, preferredOrder: order)
+            let rightOrder = bridgeToolOrder(rhs.element, preferredOrder: order)
+            if leftOrder != rightOrder {
+                return leftOrder < rightOrder
+            }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
+    }
+
+    private static func bridgeToolOrder(_ tool: OpenAIToolSpec, preferredOrder: [String: Int]) -> Int {
+        let canonical = canonicalToolName(tool.name)
+        if let direct = preferredOrder[canonical] {
+            return direct
+        }
+        for (name, order) in preferredOrder.sorted(by: { $0.value < $1.value }) {
+            if schemaLooksCompatible(sdkToolName: name, tool: tool) {
+                return order
+            }
+        }
+        return 1_000
+    }
+
+    private static func shouldAttachBridgeTools(for prepared: PreparedChatRequest) -> Bool {
+        prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST")
+            || prepared.prompt.contains("LOCAL TOOL RESULT:")
+            || prepared.prompt.contains(toolResultContinuation)
+            || prepared.prompt.contains("You must call at least one tool.")
+            || prepared.prompt.contains("Use SDK mcp now with providerIdentifier")
+    }
+
+    private static func shouldForwardAllBridgeTools(for prepared: PreparedChatRequest) -> Bool {
+        prepared.prompt.contains("You must call at least one tool.")
+            && !prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST")
+    }
+
+    private static func preferredBridgeToolNames(for prepared: PreparedChatRequest) -> [String] {
+        var names: [String] = []
+        for tool in prepared.tools {
+            if prepared.prompt.contains("toolName \"\(tool.name)\"") {
+                names.append(tool.name)
+            }
+        }
+        if !names.isEmpty {
+            return names
+        }
+        return preferredBridgeCanonicals(forPrompt: prepared.prompt)
+    }
+
+    private static func preferredBridgeCanonicals(forPrompt prompt: String) -> [String] {
+        let lower = prompt.lowercased()
+        var names: [String] = []
+        func add(_ values: [String]) {
+            for value in values where !names.contains(value) {
+                names.append(value)
+            }
+        }
+
+        let wantsCommand = lower.range(of: #"\b(run|execute|start|launch)\b[\s\S]{0,120}\b(command|shell|terminal|server|test|build)\b"#, options: .regularExpression) != nil
+        let wantsMutation = lower.range(of: #"\b(create|write|save|overwrite|edit|modify|update|delete|remove|make)\b"#, options: .regularExpression) != nil
+        let wantsProjectWork = lower.range(of: #"\b(build|create|make|scaffold|generate|implement|setup|set up|fix)\b"#, options: .regularExpression) != nil
+            && lower.range(of: #"\b(app|application|site|website|project|component|page|vite|react|next|vue|svelte|todo|dashboard|cli|bug|feature)\b"#, options: .regularExpression) != nil
+        let wantsInspection = lower.range(of: #"\b(read|show|list|inspect|open|find|search|grep|look at|check|review|scan|where)\b"#, options: .regularExpression) != nil
+            && (lower.contains("file") || lower.contains("folder") || lower.contains("directory") || lower.contains("repo") || lower.contains("repository") || lower.contains("project") || lower.contains("codebase") || lower.contains("workspace") || lower.contains("~/") || lower.contains("/"))
+
+        if wantsMutation {
+            add(["write", "edit", "delete", "read", "grep", "glob", "ls", "shell"])
+        }
+        if wantsProjectWork {
+            add(["read", "grep", "glob", "ls", "write", "edit", "delete", "shell", "todowrite", "task", "createplan"])
+        }
+        if wantsInspection {
+            add(["read", "grep", "glob", "ls", "semsearch", "shell"])
+        }
+        if wantsCommand {
+            add(["shell"])
+        }
+        if lower.contains("local tool result:") || lower.contains(toolResultContinuation.lowercased()) {
+            add(["read", "grep", "glob", "ls", "write", "edit", "delete", "shell", "todowrite", "task", "createplan"])
+        }
+        if names.isEmpty {
+            add(["read", "grep", "glob", "ls", "write", "edit", "delete", "shell"])
+        }
+        return names
+    }
+
+    private static func compatibleBridgeTools(in tools: [OpenAIToolSpec]) -> [OpenAIToolSpec] {
+        let canonicals = ["read", "grep", "glob", "ls", "write", "edit", "delete", "shell", "readlints", "semsearch", "todowrite", "task", "createplan", "generateimage", "recordscreen"]
+        return tools.filter { tool in
+            canonicals.contains(canonicalToolName(tool.name))
+                || canonicals.contains { schemaLooksCompatible(sdkToolName: $0, tool: tool) }
+        }
     }
 
     static func prepareResponsesRequest(_ body: Data, rememberedToolCalls: [String: ResponseToolCallMemory]) throws -> PreparedChatRequest {
@@ -321,17 +458,27 @@ public enum OpenAICompatibility {
         let tools = parseTools(raw["tools"], disabled: (raw["tool_choice"] as? String) == "none")
         let toolContext = toolCallContext(fromResponseInput: raw["input"], instructions: instructions)
         let previousResponseID = (raw["previous_response_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+        let input = raw["input"]
+        let latestUserText = latestUserText(from: input)
+        let includeToolInventory = shouldIncludeToolInventory(
+            tools: tools,
+            toolChoice: raw["tool_choice"],
+            latestUserText: latestUserText,
+            sawToolResult: responseInputHasToolOutput(input)
+        )
         var transcript = [
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a function_call and wait for the function_call_output.",
             "When the input includes function_call_output records, treat them as completed local tool results for your previous function_call requests and continue from those results.",
             "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are called through SDK mcp with providerIdentifier, toolName, and args.",
-            "For general file creation when no specific client tool is requested, prefer SDK shell when a shell client tool is available; otherwise request write calls with both path and fileText.",
+            "For local file inspection, edits, commands, and project work, use SDK mcp with providerIdentifier \"client\" so the outer client executes the operation.",
             "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a function_call and received a function_call_output confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
         ]
-        appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
+        if includeToolInventory {
+            appendToolInventory(&transcript, tools: tools, toolChoice: raw["tool_choice"], context: toolContext)
+        }
         if let instructions, !instructions.isEmpty {
             transcript.append("")
             transcript.append("INSTRUCTIONS:")
@@ -340,8 +487,6 @@ public enum OpenAICompatibility {
         transcript.append("")
         transcript.append("INPUT:")
         var rememberedToolCalls = rememberedToolCalls
-        let input = raw["input"]
-        let latestUserText = latestUserText(from: input)
         let appendedInput = appendResponsesInput(input, to: &transcript, remembered: &rememberedToolCalls, tools: tools)
         if !appendedInput.appended {
             transcript.append("[empty]")
@@ -349,6 +494,7 @@ public enum OpenAICompatibility {
         if appendedInput.sawToolOutput {
             transcript.append("")
             transcript.append(toolResultContinuation)
+            transcript.append("Continue the assistant response for the latest user request now. Do not summarize the local tool output as the final answer unless the user asked for that. If the latest user request specified exact text to reply after the tool result, output exactly that text.")
         }
         let localToolRequired = shouldRequireLocalTool(for: latestUserText, tools: tools)
         let localToolDone = hasResponseWorkspaceMutationToolCallAfterLatestUser(input, tools: tools)
@@ -370,7 +516,8 @@ public enum OpenAICompatibility {
             previousResponseID: previousResponseID,
             storeResponse: raw["store"] as? Bool ?? true,
             responseInputItems: normalizedResponseInputItems(input),
-            toolContext: toolContext
+            toolContext: toolContext,
+            incrementalPrompt: nil
         )
     }
 
@@ -444,6 +591,15 @@ public enum OpenAICompatibility {
             "object": "response.input_tokens",
             "input_tokens": inputTokenEstimate(characters: prepared.promptCharacters)
         ]
+    }
+
+    public static func localChatShortcutOutput(_ body: Data) throws -> CursorSDKOutput? {
+        let raw = try jsonObject(body)
+        guard let messages = raw["messages"] as? [[String: Any]],
+              let title = localTitleGenerationOutput(fromMessages: messages) else {
+            return nil
+        }
+        return CursorSDKOutput(text: title, toolCalls: [], agentID: "local-title", runID: "run-local-title")
     }
 
     public static func responseCompactionObject(
@@ -1063,6 +1219,39 @@ public enum OpenAICompatibility {
         return ""
     }
 
+    private static func latestUserText(fromMessages messages: [[String: Any]]) -> String {
+        for item in messages.reversed() {
+            let role = (item["role"] as? String) ?? "user"
+            guard role == "user" else { continue }
+            let text = contentText(item["content"], role: role)
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text
+            }
+        }
+        return ""
+    }
+
+    private static func responseInputHasToolOutput(_ value: Any?) -> Bool {
+        if let object = value as? [String: Any] {
+            let type = (object["type"] as? String) ?? ""
+            let role = (object["role"] as? String) ?? ""
+            if type == "function_call_output" || role == "tool" {
+                return true
+            }
+            if let output = object["output"], !(output is NSNull) {
+                return true
+            }
+            if let content = object["content"] {
+                return responseInputHasToolOutput(content)
+            }
+            return false
+        }
+        if let items = value as? [Any] {
+            return items.contains { responseInputHasToolOutput($0) }
+        }
+        return false
+    }
+
     private static func normalizedResponseInputItems(_ value: Any?) -> [JSONValue] {
         if let value = value as? String {
             return [responseInputMessage(text: value, id: "item_0")]
@@ -1223,18 +1412,92 @@ public enum OpenAICompatibility {
         return nil
     }
 
+    private static func localTitleGenerationOutput(fromMessages messages: [[String: Any]]) -> String? {
+        let systemText = messages
+            .filter { (($0["role"] as? String) ?? "user") == "system" }
+            .map { contentText($0["content"], role: "system").lowercased() }
+            .joined(separator: "\n")
+        guard systemText.contains("title generator"),
+              systemText.contains("thread title") || systemText.contains("generate a brief title") else {
+            return nil
+        }
+        let userTexts = messages
+            .filter { (($0["role"] as? String) ?? "user") == "user" }
+            .map { contentText($0["content"], role: "user") }
+            .map(cleanTitleSeed)
+            .filter { !$0.isEmpty }
+        let hasTitlePrompt = messages.contains { message in
+            let role = (message["role"] as? String) ?? "user"
+            return role == "user"
+                && contentText(message["content"], role: role).lowercased().contains("generate a title for this conversation")
+        }
+        guard hasTitlePrompt else {
+            return nil
+        }
+        guard let seed = userTexts.last else {
+            return "New Conversation"
+        }
+        return conciseTitle(from: seed)
+    }
+
+    private static func cleanTitleSeed(_ value: String) -> String {
+        var output = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        output = output.replacingOccurrences(
+            of: #"(?i)^generate a title for this conversation:\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+        while output.count >= 2,
+              let first = output.first,
+              let last = output.last,
+              ((first == "\"" && last == "\"") || (first == "'" && last == "'")) {
+            output.removeFirst()
+            output.removeLast()
+            output = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return output
+    }
+
+    private static func conciseTitle(from value: String) -> String {
+        let cleaned = cleanTitleSeed(value)
+        guard !cleaned.isEmpty else { return "New Conversation" }
+        if cleaned.count <= 50 {
+            return cleaned
+        }
+        let prefix = String(cleaned.prefix(50))
+        if let lastSpace = prefix.lastIndex(where: { $0.isWhitespace }),
+           prefix.distance(from: prefix.startIndex, to: lastSpace) >= 16 {
+            return String(prefix[..<lastSpace]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func shouldIncludeToolInventory(tools: [OpenAIToolSpec], toolChoice: Any?, latestUserText: String, sawToolResult: Bool) -> Bool {
+        guard !tools.isEmpty else { return false }
+        if sawToolResult {
+            return true
+        }
+        if toolChoiceFunctionName(toolChoice) != nil || (toolChoice as? String) == "required" {
+            return true
+        }
+        return shouldRequireLocalTool(for: latestUserText, tools: tools)
+    }
+
     private static func appendToolInventory(_ transcript: inout [String], tools: [OpenAIToolSpec], toolChoice: Any?, context: ToolCallContext?) {
         guard !tools.isEmpty else { return }
         transcript.append("")
         transcript.append("LOCAL TOOL INVENTORY:")
         transcript.append("Client tool targets: \(tools.map(\.name).joined(separator: ", "))")
         transcript.append("These are client execution targets. Prefer the SDK mcp route for the exact client tool name and schema.")
-        transcript.append("For local work, emit one SDK tool call from the SDK TOOL ROUTING MAP. The preferred route is SDK mcp with providerIdentifier and toolName pointing at the exact client tool.")
-        transcript.append("Built-in SDK shell/read/write/edit/glob/grep/ls-style routes are compatibility fallbacks only. Prefer SDK mcp for harness tools and MCP/server tools so the client schema is preserved.")
+        transcript.append("For local work, emit one SDK mcp tool call with providerIdentifier \"client\" and toolName pointing at the exact client tool or a client_* forwarding tool.")
+        transcript.append("Do not use SDK built-in shell/read/write/edit/glob/grep/ls/delete tools directly; they execute inside the SDK bridge runtime instead of the outer client.")
         transcript.append("When the user names a specific allowed client tool, use the SDK mcp route for that exact client tool and do not substitute a different tool.")
         transcript.append("If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool.")
-        if hasCompatibleTool("shell", in: tools) {
-            transcript.append("A shell client tool is available. For general file creation or overwrite requests, prefer SDK mcp to that shell client tool with mkdir -p and a quoted heredoc.")
+        if hasDedicatedCompatibleTool(["write", "edit", "read", "grep", "glob", "ls", "delete"], in: tools) {
+            transcript.append("For file reads, writes, edits, search, listing, and deletes, prefer exact client file tools through SDK mcp. Do not use shell/bash for those operations when write/read/edit/glob/grep/ls/delete tools are available.")
+        } else if hasCompatibleTool("shell", in: tools) {
+            transcript.append("A shell client tool is available as the fallback local execution route. For file creation through shell, use mkdir -p and a quoted heredoc.")
         }
         for tool in tools {
             let record = toolInventoryRecord(tool)
@@ -1249,6 +1512,101 @@ public enum OpenAICompatibility {
         } else if (toolChoice as? String) == "required" {
             transcript.append("You must call at least one tool.")
         }
+    }
+
+    private static func incrementalChatPrompt(
+        messages: [[String: Any]],
+        tools: [OpenAIToolSpec],
+        toolChoice: Any?,
+        context: ToolCallContext?,
+        raw: [String: Any]
+    ) -> String {
+        let startIndex = incrementalMessageStartIndex(messages)
+        let currentMessages = Array(messages[startIndex...])
+        let latestUserTextHint = latestUserText(fromMessages: currentMessages)
+        let sawToolResultHint = currentMessages.contains { (($0["role"] as? String) ?? "user") == "tool" }
+        let includeToolInventory = shouldIncludeToolInventory(
+            tools: tools,
+            toolChoice: toolChoice,
+            latestUserText: latestUserTextHint,
+            sawToolResult: sawToolResultHint
+        )
+        var transcript = [
+            "Continue the same local Cursor SDK agent session.",
+            "Use the current client turn below. Rely on prior SDK session context for older conversation unless this turn includes explicit local tool results.",
+            "When local work is needed, emit exactly one SDK tool call and wait for the local tool result. Do not claim local work happened without a LOCAL TOOL RESULT."
+        ]
+        if includeToolInventory {
+            appendToolInventory(&transcript, tools: tools, toolChoice: toolChoice, context: context)
+        }
+        transcript.append("")
+        transcript.append("CURRENT CLIENT TURN:")
+
+        var rememberedToolCalls: [String: ResponseToolCallMemory] = [:]
+        var sawToolResult = false
+        var latestUserText = ""
+        var mutationToolCallAfterLatestUser = false
+
+        for item in currentMessages {
+            let role = (item["role"] as? String) ?? "user"
+            let text = contentText(item["content"], role: role)
+            if role == "tool" {
+                sawToolResult = true
+                let toolCallID = (item["tool_call_id"] as? String) ?? ""
+                let toolName = (item["name"] as? String) ?? rememberedToolCalls[toolCallID]?.name ?? ""
+                let label = [toolName.isEmpty ? nil : "name=\(toolName)", toolCallID.isEmpty ? nil : "tool_call_id=\(toolCallID)"]
+                    .compactMap { $0 }
+                    .joined(separator: " ")
+                transcript.append("TOOL RESULT\(label.isEmpty ? "" : " (\(label))"): \(text.isEmpty ? "[empty]" : text)")
+                transcript.append("LOCAL TOOL RESULT: \(toolResultFeedback(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls, tools: tools))")
+                if let repairHint = toolResultRepairHint(toolCallID: toolCallID, toolName: toolName, text: text, remembered: rememberedToolCalls, tools: tools, context: context) {
+                    transcript.append(repairHint)
+                }
+            } else {
+                transcript.append("\(role.uppercased()): \(text.isEmpty ? "[empty]" : text)")
+                if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    latestUserText = text
+                    mutationToolCallAfterLatestUser = false
+                }
+            }
+
+            if let toolCalls = item["tool_calls"] as? [[String: Any]] {
+                appendToolCallTranscript(&transcript, role: role, toolCalls: toolCalls)
+                rememberToolCalls(toolCalls, into: &rememberedToolCalls)
+                let requestedTool = explicitlyRequestedToolName(in: latestUserText, tools: tools)
+                if !latestUserText.isEmpty,
+                   toolCalls.contains(where: { toolCall in
+                       isWorkspaceMutationToolCall(toolCall, tools: tools)
+                           || (requestedTool.map { requested in
+                               isSpecificToolCall(toolCall, requestedTool: requested, tools: tools)
+                           } ?? false)
+                   }) {
+                    mutationToolCallAfterLatestUser = true
+                }
+            }
+        }
+
+        if sawToolResult {
+            transcript.append("")
+            transcript.append(toolResultContinuation)
+        }
+        let localToolRequired = shouldRequireLocalTool(for: latestUserText, tools: tools)
+        if localToolRequired, !mutationToolCallAfterLatestUser {
+            appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText)
+        }
+        appendOptions(&transcript, raw)
+        return transcript.joined(separator: "\n")
+    }
+
+    private static func incrementalMessageStartIndex(_ messages: [[String: Any]]) -> Int {
+        guard !messages.isEmpty else { return 0 }
+        let lastUserIndex = messages.indices.reversed().first { index in
+            ((messages[index]["role"] as? String) ?? "user") == "user"
+        }
+        if let lastUserIndex {
+            return max(0, min(lastUserIndex, messages.count - 12))
+        }
+        return max(0, messages.count - 8)
     }
 
     private static func appendSDKRoutingMap(_ transcript: inout [String], tools: [OpenAIToolSpec], context: ToolCallContext?) {
@@ -1328,8 +1686,12 @@ public enum OpenAICompatibility {
 
     private static func toolInventoryRecord(_ tool: OpenAIToolSpec) -> [String: Any] {
         var record: [String: Any] = ["name": tool.name]
-        if let description = tool.description { record["description"] = description }
-        if let parameters = tool.parameters { record["parameters"] = parameters.foundationValue }
+        if let description = tool.description, !description.isEmpty {
+            record["description"] = description.count > 180 ? "\(description.prefix(180))..." : description
+        }
+        if tool.parameters != nil {
+            record["parameters"] = "provided through the client MCP tool schema"
+        }
         if let target = mcpTarget(forClientToolName: tool.name, includeMapped: true) {
             record["sdk_mcp"] = [
                 "providerIdentifier": target.provider,
@@ -1348,10 +1710,12 @@ public enum OpenAICompatibility {
             transcript.append("\(requestedToolHint(for: requestedTool)) After the client returns a LOCAL TOOL RESULT, continue.")
             return
         }
-        if hasCompatibleTool("shell", in: tools) {
-            transcript.append("Use the preferred SDK mcp route for the client shell/bash tool. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
+        if hasDedicatedCompatibleTool(["write", "edit"], in: tools) {
+            transcript.append("For creating or updating files, use SDK mcp for an exact client write/edit file tool with matching arguments. Do not use shell/bash for file writes when a write/edit tool is available. After the client returns a LOCAL TOOL RESULT, continue.")
+        } else if hasCompatibleTool("shell", in: tools) {
+            transcript.append("Use SDK mcp for the client shell/bash tool. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
         } else {
-            transcript.append("For creating or overwriting a file, use the preferred SDK mcp route for a client write/edit file tool with matching arguments. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("For creating or overwriting a file, use SDK mcp for an exact client write/edit file tool with matching arguments. After the client returns a LOCAL TOOL RESULT, continue.")
         }
     }
 
@@ -1421,6 +1785,16 @@ public enum OpenAICompatibility {
         let wantsProjectScaffold = lower.range(of: #"\b(build|create|make|scaffold|generate|implement|setup|set up)\b"#, options: .regularExpression) != nil
             && lower.range(of: #"\b(app|application|site|website|project|component|page|vite|react|next|vue|svelte|todo|dashboard|cli)\b"#, options: .regularExpression) != nil
         if wantsProjectScaffold, hasAnyCompatibleTool(["write", "shell"], in: tools) {
+            return true
+        }
+        let wantsInspection = lower.range(of: #"\b(read|show|list|inspect|open|find|search|grep|look at|check|review|scan|where)\b"#, options: .regularExpression) != nil
+            && (hasPathSignal
+                || lower.contains("repo")
+                || lower.contains("repository")
+                || lower.contains("project")
+                || lower.contains("codebase")
+                || lower.contains("workspace"))
+        if wantsInspection, hasAnyCompatibleTool(["read", "grep", "glob", "ls", "semsearch", "shell"], in: tools) {
             return true
         }
         let wantsCommand = lower.range(of: #"\b(run|execute|start|launch)\b"#, options: .regularExpression) != nil
@@ -1619,6 +1993,19 @@ public enum OpenAICompatibility {
 
     private static func hasAnyCompatibleTool(_ canonicalNames: [String], in tools: [OpenAIToolSpec]) -> Bool {
         canonicalNames.contains { hasCompatibleTool($0, in: tools) }
+    }
+
+    private static func hasDedicatedCompatibleTool(_ canonicalNames: [String], in tools: [OpenAIToolSpec]) -> Bool {
+        let canonicalSet = Set(canonicalNames.map(canonicalToolName))
+        return tools.contains { tool in
+            if canonicalSet.contains(canonicalToolName(tool.name)) {
+                return true
+            }
+            if hasCompatibleTool("shell", in: [tool]) {
+                return false
+            }
+            return canonicalSet.contains { schemaLooksCompatible(sdkToolName: $0, tool: tool) }
+        }
     }
 
     private static func hasCompatibleTool(_ canonicalName: String, in tools: [OpenAIToolSpec]) -> Bool {

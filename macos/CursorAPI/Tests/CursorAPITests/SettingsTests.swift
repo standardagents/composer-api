@@ -19,6 +19,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(settings.port, 9999)
         XCTAssertFalse(settings.hasCursorAPIKey)
         XCTAssertFalse(settings.keychainCursorAPIKeyAvailable)
+        XCTAssertFalse(settings.menuBarOnly)
     }
 
     func testKeychainAvailabilityCountsAsSavedAPIKeyWithoutSecretInMemory() {
@@ -71,6 +72,7 @@ final class SettingsTests: XCTestCase {
         let text = String(decoding: data, as: UTF8.self)
 
         XCTAssertFalse(text.contains("keychainCursorAPIKeyAvailable"))
+        XCTAssertTrue(text.contains("\"menuBarOnly\""))
     }
 
     func testBundledTransportDefaultsFillMissingSDKSettings() {

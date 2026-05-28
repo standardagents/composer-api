@@ -48,6 +48,16 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
 
     public init() {}
 
+    public static func warmUpBridge(settings: CursorAPISettings) {
+        Task {
+            await CursorSDKBridgeLifecycle.shared.warmUp(settings: settings)
+        }
+    }
+
+    public static func shutdownBridge() async {
+        await CursorSDKBridgeLifecycle.shared.shutdown()
+    }
+
     private struct BridgeRunResult {
         var output: CursorSDKOutput
         var emittedText: String
@@ -95,7 +105,8 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
     ) async throws -> CursorSDKOutput {
         let shouldRetryMissing = shouldRetryMissingLocalTool(prepared)
-        guard shouldRetryMissing || !prepared.tools.isEmpty else {
+        let shouldRetryUnsupported = shouldRetryUnsupportedLocalTool(prepared)
+        guard shouldRetryMissing || shouldRetryUnsupported else {
             return try await runSDKRequest(
                 agentID: agentID,
                 runID: runID,
@@ -153,6 +164,12 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
 
     private func shouldRetryMissingLocalTool(_ prepared: PreparedChatRequest) -> Bool {
         !prepared.tools.isEmpty && prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST")
+    }
+
+    private func shouldRetryUnsupportedLocalTool(_ prepared: PreparedChatRequest) -> Bool {
+        guard !prepared.tools.isEmpty else { return false }
+        return prepared.prompt.contains("You must call at least one tool.")
+            || prepared.prompt.contains("Use SDK ")
     }
 
     private func retryPrompt(afterMissingToolAttempt prepared: PreparedChatRequest, attempt: Int) -> String {
@@ -275,10 +292,12 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             "requestId": runID,
             "model": prepared.cursorModelID,
             "prompt": prepared.prompt,
+            "incrementalPrompt": prepared.incrementalPrompt ?? prepared.prompt,
+            "promptAlreadyPrepared": true,
             "sessionKey": prepared.sessionKey ?? agentID,
             "workingDirectory": prepared.toolContext?.workingDirectory ?? "",
             "streamEvents": true,
-            "tools": Self.bridgeToolObjects(prepared.tools)
+            "tools": Self.bridgeToolObjects(prepared)
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
         let bytes: URLSession.AsyncBytes
@@ -423,9 +442,13 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         return false
     }
 
-    private static func bridgeToolObjects(_ tools: [OpenAIToolSpec]) -> [[String: Any]] {
-        tools.map { tool in
+    private static func bridgeToolObjects(_ prepared: PreparedChatRequest) -> [[String: Any]] {
+        let tools = OpenAICompatibility.bridgeToolSpecs(for: prepared)
+        return tools.map { tool in
             var object: [String: Any] = ["name": tool.name]
+            if bridgeUsesSDKBuiltin(forClientToolName: tool.name) {
+                return object
+            }
             if let description = tool.description, !description.isEmpty {
                 object["description"] = description
             }
@@ -433,6 +456,29 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
                 object["parameters"] = parameters.foundationValue
             }
             return object
+        }
+    }
+
+    private static func bridgeUsesSDKBuiltin(forClientToolName name: String) -> Bool {
+        switch name.lowercased().filter({ $0.isLetter || $0.isNumber }) {
+        case "shell", "bash", "run", "runcommand",
+             "write", "writefile",
+             "read", "readfile",
+             "edit", "editfile",
+             "delete", "deletefile", "remove", "removefile",
+             "glob", "fileglob",
+             "grep", "search",
+             "ls", "list", "listfiles",
+             "readlints", "diagnostics",
+             "semsearch", "semanticsearch",
+             "todowrite", "todos", "updatetodos",
+             "task", "subagent", "subagenttask",
+             "createplan",
+             "generateimage", "imagegeneration", "imagegen",
+             "recordscreen", "screenrecord", "screenrecording":
+            return true
+        default:
+            return false
         }
     }
 
@@ -512,6 +558,26 @@ actor CursorSDKSessionStore {
             sessionOrder.removeFirst()
             agents.removeValue(forKey: evicted)
         }
+    }
+}
+
+private actor CursorSDKBridgeLifecycle {
+    static let shared = CursorSDKBridgeLifecycle()
+
+    private var warmUpTask: Task<Void, Never>?
+
+    func warmUp(settings: CursorAPISettings) {
+        warmUpTask?.cancel()
+        warmUpTask = Task.detached {
+            guard !Task.isCancelled else { return }
+            _ = try? await CursorSDKBridgeServer.shared.endpoint(settings: settings)
+        }
+    }
+
+    func shutdown() async {
+        warmUpTask?.cancel()
+        warmUpTask = nil
+        await CursorSDKBridgeServer.shared.shutdown()
     }
 }
 

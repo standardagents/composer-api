@@ -8,6 +8,10 @@ struct LocalAPIActivitySnapshot: Equatable {
     var successfulRequests = 0
     var failedRequests = 0
     var streamingRequests = 0
+    var inputTokens = 0
+    var outputTokens = 0
+    var cachedInputTokens = 0
+    var costDollars = 0.0
     var recentRequests: [LocalAPIRequestEvent] = []
 
     var lastRequest: LocalAPIRequestEvent? {
@@ -61,6 +65,18 @@ final class CursorAPIAppModel: ObservableObject {
         settings.baseURL.absoluteString
     }
 
+    var chatCompletionsURL: String {
+        "\(baseURL)/chat/completions"
+    }
+
+    var responsesURL: String {
+        "\(baseURL)/responses"
+    }
+
+    var modelsURL: String {
+        "\(baseURL)/models"
+    }
+
     var hasCursorAPIKey: Bool {
         settings.hasCursorAPIKey
     }
@@ -96,6 +112,20 @@ final class CursorAPIAppModel: ObservableObject {
         }
         return message == (CursorAPIError.unauthorized.errorDescription ?? "")
             || message.localizedCaseInsensitiveContains("authorization")
+    }
+
+    var sdkCheckSucceeded: Bool {
+        if case .success = sdkCheckState {
+            return true
+        }
+        return false
+    }
+
+    var sdkCheckFailed: Bool {
+        if case .failure = sdkCheckState {
+            return true
+        }
+        return false
     }
 
     var pendingIntegrationInstallCount: Int {
@@ -140,10 +170,7 @@ final class CursorAPIAppModel: ObservableObject {
         isRunning: Bool,
         needsKeychainPermission: Bool
     ) -> String {
-        if status.installed || !status.canInstall {
-            return status.actionTitle
-        }
-        return isRunning ? status.actionTitle : "Start & \(status.actionTitle)"
+        status.actionTitle
     }
 
     var canPrepareAgentConfigs: Bool {
@@ -192,6 +219,7 @@ final class CursorAPIAppModel: ObservableObject {
             settings.port = activePort
             isRunning = true
             updateStatusText()
+            LocalCursorSDKHarness.warmUpBridge(settings: settings)
             if activePort != requestedPort {
                 store.save(settings)
                 statusText = "Port \(requestedPort) was busy; listening on \(baseURL)"
@@ -222,6 +250,14 @@ final class CursorAPIAppModel: ObservableObject {
         updateStatusText()
     }
 
+    func shutdown() async {
+        server.stop()
+        isRunning = false
+        needsKeychainPermission = false
+        await LocalCursorSDKHarness.shutdownBridge()
+        updateStatusText()
+    }
+
     func restartServer() {
         guard canStartServer else {
             stopServer()
@@ -245,6 +281,21 @@ final class CursorAPIAppModel: ObservableObject {
         if canStartServer {
             startServer()
         }
+    }
+
+    func saveKeyStartAndCheckIfReady() {
+        saveKeyAndStartIfReady()
+        if canCheckSDK {
+            checkSDKConnectivity()
+        }
+    }
+
+    func setMenuBarOnly(_ enabled: Bool) {
+        guard settings.menuBarOnly != enabled else { return }
+        var updated = settings
+        updated.menuBarOnly = enabled
+        settings = updated
+        store.save(updated)
     }
 
     func saveSettings() {
@@ -371,6 +422,12 @@ final class CursorAPIAppModel: ObservableObject {
         }
         if event.streaming {
             activity.streamingRequests += 1
+        }
+        if let usage = event.usage {
+            activity.inputTokens += usage.inputTokens
+            activity.outputTokens += usage.outputTokens
+            activity.cachedInputTokens += usage.cachedInputTokens
+            activity.costDollars += usage.costDollars
         }
         activity.recentRequests.insert(event, at: 0)
         if activity.recentRequests.count > Self.recentRequestLimit {

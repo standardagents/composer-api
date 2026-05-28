@@ -26,6 +26,31 @@ private struct HTTPStreamResponse {
     var status: Int
     var headers: [String: String]
     var chunks: AsyncThrowingStream<Data, any Error>
+    var usage: LocalAPIUsageBox?
+    var observation: StreamObservation?
+}
+
+private struct StreamObservation {
+    var method: String
+    var path: String
+    var started: Date
+}
+
+private final class LocalAPIUsageBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: LocalAPIUsage?
+
+    func set(_ value: LocalAPIUsage?) {
+        lock.withLock {
+            storage = value
+        }
+    }
+
+    func value() -> LocalAPIUsage? {
+        lock.withLock {
+            storage
+        }
+    }
 }
 
 public struct LocalAPIRequestEvent: Equatable, Sendable {
@@ -34,15 +59,31 @@ public struct LocalAPIRequestEvent: Equatable, Sendable {
     public var status: Int
     public var durationMilliseconds: Int
     public var streaming: Bool
+    public var usage: LocalAPIUsage?
     public var finishedAt: Date
 
-    public init(method: String, path: String, status: Int, durationMilliseconds: Int, streaming: Bool, finishedAt: Date = Date()) {
+    public init(method: String, path: String, status: Int, durationMilliseconds: Int, streaming: Bool, usage: LocalAPIUsage? = nil, finishedAt: Date = Date()) {
         self.method = method
         self.path = path
         self.status = status
         self.durationMilliseconds = durationMilliseconds
         self.streaming = streaming
+        self.usage = usage
         self.finishedAt = finishedAt
+    }
+}
+
+public struct LocalAPIUsage: Equatable, Sendable {
+    public var inputTokens: Int
+    public var outputTokens: Int
+    public var cachedInputTokens: Int
+    public var costDollars: Double
+
+    public init(inputTokens: Int = 0, outputTokens: Int = 0, cachedInputTokens: Int = 0, costDollars: Double = 0) {
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cachedInputTokens = cachedInputTokens
+        self.costDollars = costDollars
     }
 }
 
@@ -56,6 +97,7 @@ public final class LocalAPIServer: @unchecked Sendable {
     private let responseSessions: LocalResponseSessionStore
     private let requestObserver: RequestObserver?
     private var listener: NWListener?
+    private var connections: [ObjectIdentifier: NWConnection] = [:]
 
     public private(set) var port: UInt16?
 
@@ -130,9 +172,27 @@ public final class LocalAPIServer: @unchecked Sendable {
         listener?.cancel()
         listener = nil
         port = nil
+        queue.async { [weak self] in
+            guard let self else { return }
+            let connections = Array(self.connections.values)
+            self.connections.removeAll()
+            for connection in connections {
+                connection.cancel()
+            }
+        }
     }
 
     private func accept(_ connection: NWConnection) {
+        let id = ObjectIdentifier(connection)
+        connections[id] = connection
+        connection.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed, .cancelled:
+                self?.connections[id] = nil
+            default:
+                break
+            }
+        }
         connection.start(queue: queue)
         read(connection: connection, accumulated: Data(), sentContinue: false)
     }
@@ -185,14 +245,71 @@ public final class LocalAPIServer: @unchecked Sendable {
         let method = request.method.uppercased()
         let path = normalizedAPIPath(request.path)
         let routed = await routedResponse(for: request, method: method, path: path)
-        requestObserver?(LocalAPIRequestEvent(
-            method: method,
-            path: path,
-            status: routed.status,
-            durationMilliseconds: max(0, Int(Date().timeIntervalSince(started) * 1000)),
-            streaming: routed.isStreaming
-        ))
-        return routed
+        switch routed {
+        case .response(let response):
+            requestObserver?(LocalAPIRequestEvent(
+                method: method,
+                path: path,
+                status: response.status,
+                durationMilliseconds: max(0, Int(Date().timeIntervalSince(started) * 1000)),
+                streaming: false,
+                usage: Self.usage(from: response)
+            ))
+            return routed
+        case .stream(var response):
+            response.observation = StreamObservation(method: method, path: path, started: started)
+            return .stream(response)
+        }
+    }
+
+    private static func usage(from response: HTTPResponse) -> LocalAPIUsage? {
+        guard response.status < 400,
+              let root = try? JSONSerialization.jsonObject(with: response.body) as? [String: Any],
+              let usageObject = root["usage"] as? [String: Any] else {
+            return nil
+        }
+        return usage(fromObject: root, usage: usageObject)
+    }
+
+    private static func usage(fromObject root: [String: Any]) -> LocalAPIUsage? {
+        guard let usageObject = root["usage"] as? [String: Any] else {
+            return nil
+        }
+        return usage(fromObject: root, usage: usageObject)
+    }
+
+    private static func usage(fromObject root: [String: Any], usage usageObject: [String: Any]) -> LocalAPIUsage? {
+        let inputTokens = intValue(usageObject["input_tokens"]) ?? intValue(usageObject["prompt_tokens"]) ?? 0
+        let outputTokens = intValue(usageObject["output_tokens"]) ?? intValue(usageObject["completion_tokens"]) ?? 0
+        let inputDetails = usageObject["input_tokens_details"] as? [String: Any]
+        let promptDetails = usageObject["prompt_tokens_details"] as? [String: Any]
+        let cachedTokens = intValue(inputDetails?["cached_tokens"]) ?? intValue(promptDetails?["cached_tokens"]) ?? 0
+        let modelID = stringValue(root["model"]) ?? "composer-2.5"
+        let model = ComposerModels.model(for: modelID) ?? ComposerModels.all[0]
+        let billableInput = max(0, inputTokens - cachedTokens)
+        let cost = (Double(billableInput) * model.inputCost + Double(outputTokens) * model.outputCost) / 1_000_000
+        return LocalAPIUsage(inputTokens: inputTokens, outputTokens: outputTokens, cachedInputTokens: cachedTokens, costDollars: cost)
+    }
+
+    private static func stringValue(_ value: Any?) -> String? {
+        if let value = value as? String {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        if let value = value as? Int {
+            return value
+        }
+        if let value = value as? NSNumber {
+            return value.intValue
+        }
+        if let value = value as? String {
+            return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
     }
 
     private func routedResponse(for request: HTTPRequest, method: String, path: String) async -> RoutedHTTPResponse {
@@ -233,16 +350,18 @@ public final class LocalAPIServer: @unchecked Sendable {
             }
             if method == "POST", path == "/v1/completions" {
                 var prepared = try OpenAICompatibility.prepareCompletionRequest(request.body)
-                prepared.sessionKey = sessionAffinity(request)
+                prepared.sessionKey = sessionAffinity(request) ?? prepared.toolContext?.workingDirectory
                 let settings = settingsProvider()
                 try harness.validate(settings: settings, authorization: request.header("authorization"))
                 let id = "cmpl_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
                 let created = Int(Date().timeIntervalSince1970)
                 if prepared.stream {
+                    let usage = LocalAPIUsageBox()
                     return .stream(HTTPStreamResponse(
                         status: 200,
                         headers: streamingHeaders(),
-                        chunks: completionChunks(id: id, created: created, prepared: prepared, settings: settings, authorization: request.header("authorization"))
+                        chunks: completionChunks(id: id, created: created, prepared: prepared, settings: settings, authorization: request.header("authorization"), usage: usage),
+                        usage: usage
                     ))
                 }
                 let output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
@@ -250,16 +369,34 @@ public final class LocalAPIServer: @unchecked Sendable {
             }
             if method == "POST", path == "/v1/chat/completions" {
                 var prepared = try OpenAICompatibility.prepareChatRequest(request.body)
-                prepared.sessionKey = sessionAffinity(request)
+                let shortcutOutput = try OpenAICompatibility.localChatShortcutOutput(request.body)
+                prepared.sessionKey = sessionAffinity(request) ?? prepared.toolContext?.workingDirectory
                 let settings = settingsProvider()
                 try harness.validate(settings: settings, authorization: request.header("authorization"))
                 let id = "chatcmpl_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
                 let created = Int(Date().timeIntervalSince1970)
+                if let shortcutOutput {
+                    if prepared.stream {
+                        let responseObject = OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: shortcutOutput)
+                        let usage = LocalAPIUsageBox()
+                        usage.set(Self.usage(fromObject: responseObject))
+                        let streamData = try OpenAICompatibility.chatCompletionStream(id: id, created: created, prepared: prepared, output: shortcutOutput)
+                        return .stream(HTTPStreamResponse(
+                            status: 200,
+                            headers: streamingHeaders(),
+                            chunks: singleChunkStream(streamData),
+                            usage: usage
+                        ))
+                    }
+                    return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: shortcutOutput))))
+                }
                 if prepared.stream {
+                    let usage = LocalAPIUsageBox()
                     return .stream(HTTPStreamResponse(
                         status: 200,
                         headers: streamingHeaders(),
-                        chunks: chatCompletionChunks(id: id, created: created, prepared: prepared, settings: settings, authorization: request.header("authorization"))
+                        chunks: chatCompletionChunks(id: id, created: created, prepared: prepared, settings: settings, authorization: request.header("authorization"), usage: usage),
+                        usage: usage
                     ))
                 }
                 let output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
@@ -268,7 +405,8 @@ public final class LocalAPIServer: @unchecked Sendable {
             if method == "POST", path == "/v1/responses" {
                 let currentResponseInputItems = try OpenAICompatibility.responseInputItems(from: request.body)
                 var responseContextInputItems = currentResponseInputItems
-                var prepared = try OpenAICompatibility.prepareResponsesRequest(request.body)
+                let currentPrepared = try OpenAICompatibility.prepareResponsesRequest(request.body)
+                var prepared = currentPrepared
                 if let previousResponseID = prepared.previousResponseID {
                     guard await responseSessions.knowsResponse(responseID: previousResponseID) else {
                         throw CursorAPIError.notFound
@@ -281,6 +419,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                     )
                     let promptBody = try OpenAICompatibility.responseRequestBody(request.body, replacingInputWith: responseContextInputItems)
                     prepared = try OpenAICompatibility.prepareResponsesRequest(promptBody, rememberedToolCalls: rememberedToolCalls)
+                    prepared.incrementalPrompt = prepared.prompt
                     prepared.responseInputItems = currentResponseInputItems
                 }
                 let settings = settingsProvider()
@@ -293,6 +432,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 )
                 let created = Int(Date().timeIntervalSince1970)
                 if prepared.stream {
+                    let usage = LocalAPIUsageBox()
                     return .stream(HTTPStreamResponse(
                         status: 200,
                         headers: streamingHeaders(),
@@ -302,8 +442,10 @@ public final class LocalAPIServer: @unchecked Sendable {
                             prepared: prepared,
                             responseContextInputItems: responseContextInputItems,
                             settings: settings,
-                            authorization: request.header("authorization")
-                        )
+                            authorization: request.header("authorization"),
+                            usage: usage
+                        ),
+                        usage: usage
                     ))
                 }
                 let output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
@@ -375,12 +517,22 @@ public final class LocalAPIServer: @unchecked Sendable {
         return .response(response)
     }
 
+    private func singleChunkStream(_ data: Data) -> AsyncThrowingStream<Data, any Error> {
+        AsyncThrowingStream { continuation in
+            if !data.isEmpty {
+                continuation.yield(data)
+            }
+            continuation.finish()
+        }
+    }
+
     private func completionChunks(
         id: String,
         created: Int,
         prepared: PreparedChatRequest,
         settings: CursorAPISettings,
-        authorization: String?
+        authorization: String?,
+        usage: LocalAPIUsageBox?
     ) -> AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -401,6 +553,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                     }
 
                     let output = resolvedOutput(finalOutput: finalOutput, emittedText: emittedText, emittedToolCalls: [])
+                    usage?.set(Self.usage(fromObject: OpenAICompatibility.completionResponse(id: id, created: created, prepared: prepared, output: output)))
                     if output.text.count > emittedText.count, output.text.hasPrefix(emittedText) {
                         let suffix = String(output.text.dropFirst(emittedText.count))
                         continuation.yield(OpenAICompatibility.completionStreamText(id: id, created: created, model: prepared.model, text: suffix))
@@ -422,13 +575,14 @@ public final class LocalAPIServer: @unchecked Sendable {
         created: Int,
         prepared: PreparedChatRequest,
         settings: CursorAPISettings,
-        authorization: String?
+        authorization: String?,
+        usage: LocalAPIUsageBox?
     ) -> AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream { continuation in
             Task {
                 do {
                     continuation.yield(OpenAICompatibility.chatCompletionStreamStart(id: id, created: created, model: prepared.model))
-                    let bufferTextUntilToolDecision = !prepared.tools.isEmpty
+                    let bufferTextUntilToolDecision = shouldBufferTextUntilToolDecision(prepared)
                     var emittedText = ""
                     var emittedToolCalls: [CursorToolCall] = []
                     var finalOutput: CursorSDKOutput?
@@ -450,6 +604,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                     }
 
                     let output = resolvedOutput(finalOutput: finalOutput, emittedText: emittedText, emittedToolCalls: emittedToolCalls)
+                    usage?.set(Self.usage(fromObject: OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: output)))
                     let shouldEmitText = output.toolCalls.isEmpty
                     if shouldEmitText, output.text.count > emittedText.count, output.text.hasPrefix(emittedText) {
                         let suffix = String(output.text.dropFirst(emittedText.count))
@@ -488,7 +643,8 @@ public final class LocalAPIServer: @unchecked Sendable {
         prepared: PreparedChatRequest,
         responseContextInputItems: [JSONValue],
         settings: CursorAPISettings,
-        authorization: String?
+        authorization: String?,
+        usage: LocalAPIUsageBox?
     ) -> AsyncThrowingStream<Data, any Error> {
         AsyncThrowingStream { continuation in
             Task {
@@ -496,7 +652,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                     for chunk in OpenAICompatibility.responseStreamStart(id: id, created: created, prepared: prepared) {
                         continuation.yield(chunk)
                     }
-                    let bufferTextUntilToolDecision = !prepared.tools.isEmpty
+                    let bufferTextUntilToolDecision = shouldBufferTextUntilToolDecision(prepared)
                     var emittedText = ""
                     var emittedToolCalls: [CursorToolCall] = []
                     var finalOutput: CursorSDKOutput?
@@ -563,6 +719,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                         startTextIfNeeded()
                     }
                     let completedResponse = OpenAICompatibility.responseObject(id: id, created: created, prepared: prepared, output: output)
+                    usage?.set(Self.usage(fromObject: completedResponse))
                     await responseSessions.storeToolCalls(
                         responseID: id,
                         toolCalls: OpenAICompatibility.responseToolCallMemory(id: id, prepared: prepared, output: output)
@@ -617,6 +774,17 @@ public final class LocalAPIServer: @unchecked Sendable {
         return output
     }
 
+    private func shouldBufferTextUntilToolDecision(_ prepared: PreparedChatRequest) -> Bool {
+        guard !prepared.tools.isEmpty else { return false }
+        if prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST") {
+            return true
+        }
+        return prepared.prompt.range(
+            of: #"\b(run|execute|start|launch)\b[\s\S]{0,120}\b(command|shell|terminal|server)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil
+    }
+
     private func send(connection: NWConnection, response: HTTPResponse) {
         var headers = response.headers
         if !headers.keys.contains(where: { $0.caseInsensitiveCompare("Content-Length") == .orderedSame }) {
@@ -635,6 +803,19 @@ public final class LocalAPIServer: @unchecked Sendable {
     }
 
     private func sendStreaming(connection: NWConnection, response: HTTPStreamResponse) async {
+        defer {
+            if let observation = response.observation {
+                requestObserver?(LocalAPIRequestEvent(
+                    method: observation.method,
+                    path: observation.path,
+                    status: response.status,
+                    durationMilliseconds: max(0, Int(Date().timeIntervalSince(observation.started) * 1000)),
+                    streaming: true,
+                    usage: response.usage?.value()
+                ))
+            }
+            connection.cancel()
+        }
         var headers = response.headers
         headers["Transfer-Encoding"] = "chunked"
         headers["Connection"] = "close"
@@ -655,7 +836,6 @@ public final class LocalAPIServer: @unchecked Sendable {
             try? await sendData(errorChunk, connection: connection)
             try? await sendData(Data("0\r\n\r\n".utf8), connection: connection)
         }
-        connection.cancel()
     }
 
     private func sendData(_ data: Data, connection: NWConnection) async throws {

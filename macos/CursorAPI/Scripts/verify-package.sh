@@ -7,6 +7,7 @@ DIST_DIR="$(dirname "$APP_PATH")"
 ZIP_PATH="$DIST_DIR/API for Cursor.zip"
 INFO_PLIST="$APP_PATH/Contents/Info.plist"
 MACOS_DIR="$APP_PATH/Contents/MacOS"
+FRAMEWORKS_DIR="$APP_PATH/Contents/Frameworks"
 RESOURCES_DIR="$APP_PATH/Contents/Resources"
 BUNDLE_DIR="$RESOURCES_DIR/CursorAPI_CursorAPI.bundle"
 TRANSPORT_PLIST="$RESOURCES_DIR/CursorAPITransportDefaults.plist"
@@ -39,6 +40,9 @@ plist_has_nonempty_value() {
 [ "$(plist_value CFBundleIconFile "$INFO_PLIST")" = "APIForCursor" ] || fail "CFBundleIconFile changed"
 
 [ -x "$MACOS_DIR/$APP_NAME" ] || fail "main executable is missing or not executable"
+[ -d "$FRAMEWORKS_DIR/Sparkle.framework" ] || fail "Sparkle.framework is missing"
+otool -L "$MACOS_DIR/$APP_NAME" | grep -q '@rpath/Sparkle.framework' || fail "main executable is not linked to Sparkle"
+otool -l "$MACOS_DIR/$APP_NAME" | grep -q '@executable_path/../Frameworks' || fail "main executable cannot load bundled frameworks"
 [ -s "$RESOURCES_DIR/cursor-sdk-local-agent-bridge.mjs" ] || fail "SDK bridge script is missing"
 [ -d "$RESOURCES_DIR/node_modules/@cursor/sdk" ] || fail "bundled @cursor/sdk dependencies are missing"
 if [ -x "$RESOURCES_DIR/node" ]; then
@@ -84,8 +88,8 @@ guard let context = CGContext(
 context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
 
 var visiblePixels = 0
-var bridgeGreenPixels = 0
-var brightBridgePixels = 0
+var darkBasePixels = 0
+var brightLogoPixels = 0
 
 for offset in stride(from: 0, to: pixels.count, by: 4) {
     let red = Int(pixels[offset])
@@ -96,18 +100,19 @@ for offset in stride(from: 0, to: pixels.count, by: 4) {
     guard alpha > 32 else { continue }
     visiblePixels += 1
 
-    if green > 140, red > 90, blue < 130 {
-        bridgeGreenPixels += 1
+    if red < 24, green < 24, blue < 24 {
+        darkBasePixels += 1
     }
     if red > 220, green > 220, blue > 220 {
-        brightBridgePixels += 1
+        brightLogoPixels += 1
     }
 }
 
 let totalPixels = width * height
-guard visiblePixels > totalPixels * 7 / 10,
-      bridgeGreenPixels > totalPixels / 120,
-      brightBridgePixels > totalPixels / 120 else {
+guard visiblePixels > totalPixels * 11 / 20,
+      visiblePixels < totalPixels * 3 / 4,
+      darkBasePixels > totalPixels * 2 / 5,
+      brightLogoPixels > totalPixels / 12 else {
     exit(1)
 }
 SWIFT
@@ -133,6 +138,10 @@ for key in clientVersion
 do
   plist_has_nonempty_value "$key" "$TRANSPORT_PLIST" || fail "bundled SDK default $key is missing"
 done
+plist_has_nonempty_value SUFeedURL "$INFO_PLIST" || fail "Sparkle SUFeedURL is missing"
+if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+  [ "$(plist_value SUPublicEDKey "$INFO_PLIST")" = "$SPARKLE_PUBLIC_ED_KEY" ] || fail "Sparkle SUPublicEDKey does not match the release key"
+fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH" >/dev/null
 

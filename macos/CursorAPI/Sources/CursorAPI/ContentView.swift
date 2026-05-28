@@ -4,37 +4,42 @@ import SwiftUI
 
 struct ContentView: View {
     @ObservedObject var model: CursorAPIAppModel
-    @State private var topPage: TopPage = .connection
-    @State private var apiKeyReplacementRequestID = 0
+    @State private var showingAPIKeyDialog = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-            Divider()
-            if let lastError = model.lastError {
-                AppNoticeBanner(
-                    title: model.statusText == "Could not start" ? "Could not start" : "\(CursorAPIBrand.displayName) needs attention",
-                    message: lastError,
-                    dismiss: model.dismissError
-                )
-                .padding(.horizontal, 24)
-                .padding(.top, 14)
-            }
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    switch topPage {
-                    case .connection:
-                        connectionPane
-                    case .settings:
-                        settingsPane
-                    }
+        ZStack {
+            AppTheme.windowBackground
+                .ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 0) {
+                header
+
+                if let lastError = model.lastError {
+                    AppNoticeBanner(
+                        title: model.statusText == "Could not start" ? "Could not start" : "\(CursorAPIBrand.displayName) needs attention",
+                        message: lastError,
+                        dismiss: model.dismissError
+                    )
+                    .padding(.horizontal, 24)
+                    .padding(.top, 14)
                 }
-                .padding(24)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        guidedContent
+                    }
+                    .padding(24)
+                }
             }
         }
         .background(AppTheme.windowBackground)
+        .onAppear {
+            model.startServerWithoutPromptIfReady()
+        }
         .onChange(of: model.settings.cursorAPIKey) { _, _ in
             model.apiKeyDidChange()
+        }
+        .sheet(isPresented: $showingAPIKeyDialog) {
+            APIKeyDialog(model: model)
         }
     }
 
@@ -47,72 +52,510 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            CursorLogo()
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(CursorAPIBrand.displayName)
-                    .font(.system(size: 20, weight: .semibold))
-                Text("Local OpenAI-compatible API for Composer 2.5")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
+            UsageSummaryHeader(activity: model.apiActivity)
 
             Spacer()
 
-            HStack(spacing: 8) {
-                StatusPill(tone: model.sdkConfigured && model.hasCursorAPIKey && !model.needsKeychainPermission ? .ok : .warning, text: model.sdkStatusText)
+            MenuBarModeToggle(
+                isOn: Binding(
+                    get: { model.settings.menuBarOnly },
+                    set: { model.setMenuBarOnly($0) }
+                )
+            )
+
+            HStack(spacing: 6) {
+                StatusPill(tone: statusTone, text: statusLabel)
                 StatusPill(
                     tone: model.isRunning ? (model.needsKeychainPermission ? .warning : .ok) : .muted,
-                    text: model.isRunning ? (model.needsKeychainPermission ? "Locked" : "Running") : "Stopped"
+                    text: model.isRunning ? "Server On" : "Server Off"
                 )
-                HeaderPageTabs(selection: $topPage)
+            }
+
+            APIKeyHeaderButton(
+                isChecking: model.isCheckingSDK,
+                isVerified: model.sdkCheckSucceeded && !model.needsKeychainPermission,
+                needsAttention: !model.hasCursorAPIKey || model.needsKeychainPermission || model.sdkCheckFailed
+            ) {
+                showingAPIKeyDialog = true
             }
         }
-        .padding(.horizontal, 44)
-        .padding(.top, 14)
-        .padding(.bottom, 13)
-        .background(AppTheme.headerBackground)
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
     }
 
-    private var connectionPane: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionTitle("Local API")
-            ConnectionPage(model: model) {
-                topPage = .settings
-                apiKeyReplacementRequestID += 1
+    private var guidedContent: some View {
+        Group {
+            if !model.hasCursorAPIKey {
+                APIKeyOnlyPanel(model: model)
+            } else if model.needsKeychainPermission {
+                UnlockOnlyPanel(model: model)
+            } else if !model.sdkConfigured {
+                TransportSetupPanel()
+            } else {
+                VStack(alignment: .leading, spacing: 16) {
+                    EndpointPanel(model: model)
+                    SimpleIntegrationsPanel(model: model)
+                }
             }
-            integrationsSection
         }
     }
 
-    private var settingsPane: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            SectionTitle("Settings")
-            SettingsPage(model: model, apiKeyReplacementRequestID: apiKeyReplacementRequestID)
+    private var statusLabel: String {
+        if !model.hasCursorAPIKey {
+            return "Needs Key"
         }
+        if model.needsKeychainPermission {
+            return "Key Locked"
+        }
+        if !model.sdkConfigured {
+            return "Bridge Missing"
+        }
+        return "Ready"
     }
 
-    private var integrationsSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                SectionTitle("One-Click Setup")
+    private var statusTone: StatusPill.Tone {
+        model.hasCursorAPIKey && !model.needsKeychainPermission && model.sdkConfigured ? .ok : .warning
+    }
+}
+
+struct MenuBarModeToggle: View {
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "menubar.rectangle")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+                Text("Menu Bar")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                MenuBarSwitch(isOn: isOn)
+            }
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+        .background(AppTheme.controlBackground.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.separator.opacity(0.7), lineWidth: 0.5)
+        }
+        .help("Run as a macOS menu bar app")
+        .accessibilityLabel("Run as a macOS menu bar app")
+        .accessibilityValue(isOn ? "on" : "off")
+        .accessibilityAddTraits(.isButton)
+        .focusable(false)
+        .focusEffectDisabled()
+    }
+}
+
+struct MenuBarSwitch: View {
+    var isOn: Bool
+
+    var body: some View {
+        ZStack(alignment: isOn ? .trailing : .leading) {
+            Capsule()
+                .fill(isOn ? Color.accentColor : AppTheme.separator.opacity(0.55))
+            Circle()
+                .fill(Color.white)
+                .shadow(color: .black.opacity(0.18), radius: 1, y: 1)
+                .padding(2)
+        }
+        .frame(width: 31, height: 18)
+        .animation(.easeOut(duration: 0.12), value: isOn)
+    }
+}
+
+struct UsageSummaryHeader: View {
+    var activity: LocalAPIActivitySnapshot
+
+    var body: some View {
+        HStack(spacing: 10) {
+            UsageMetric(label: "In", value: compact(activity.inputTokens))
+            UsageMetric(label: "Out", value: compact(activity.outputTokens))
+            UsageMetric(label: "Cached", value: compact(activity.cachedInputTokens))
+            UsageMetric(label: "Cost", value: cost(activity.costDollars))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(AppTheme.controlBackground.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppTheme.separator.opacity(0.7), lineWidth: 0.5)
+        }
+        .help("Estimated local API usage recorded by this app")
+    }
+
+    private func compact(_ value: Int) -> String {
+        if value >= 1_000_000 {
+            return String(format: "%.1fM", Double(value) / 1_000_000)
+        }
+        if value >= 1_000 {
+            return String(format: "%.1fk", Double(value) / 1_000)
+        }
+        return "\(value)"
+    }
+
+    private func cost(_ value: Double) -> String {
+        if value == 0 {
+            return "$0"
+        }
+        return value < 0.01 ? String(format: "$%.4f", value) : String(format: "$%.2f", value)
+    }
+}
+
+struct UsageMetric: View {
+    var label: String
+    var value: String
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(value)
+                .font(.system(.caption, design: .rounded).weight(.semibold))
+                .foregroundStyle(.primary)
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(minWidth: 44, alignment: .trailing)
+    }
+}
+
+struct APIKeyOnlyPanel: View {
+    @ObservedObject var model: CursorAPIAppModel
+    @State private var draftKey = ""
+    @FocusState private var keyFieldFocused: Bool
+
+    private var trimmedDraftKey: String {
+        draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSaveKey: Bool {
+        trimmedDraftKey.count >= 16
+    }
+
+    var body: some View {
+        GlassPanel {
+            VStack(alignment: .leading, spacing: 18) {
+                Label("Add your Cursor API key", systemImage: "key.fill")
+                    .font(.title3.weight(.semibold))
+                Text("The local API starts after the key is saved. The key is stored in macOS Keychain and is only read by \(CursorAPIBrand.displayName).")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 10) {
+                    SecureField("crsr_...", text: $draftKey)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($keyFieldFocused)
+                    PillActionButton("Save Key") {
+                        model.settings.cursorAPIKey = trimmedDraftKey
+                        model.saveKeyStartAndCheckIfReady()
+                        draftKey = ""
+                        keyFieldFocused = false
+                    }
+                    .disabled(!canSaveKey)
+                }
+            }
+        }
+        .onAppear {
+            keyFieldFocused = true
+        }
+    }
+}
+
+struct UnlockOnlyPanel: View {
+    @ObservedObject var model: CursorAPIAppModel
+
+    var body: some View {
+        GlassPanel {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundStyle(.blue)
+                    .frame(width: 42, height: 42)
+                    .background(Color.blue.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Unlock the saved API key")
+                        .font(.title3.weight(.semibold))
+                    Text("macOS needs permission before the local API can read the key from Keychain.")
+                        .foregroundStyle(.secondary)
+                }
+
                 Spacer()
-                PillActionButton(model.installAllIntegrationsTitle) {
-                    model.installAllIntegrations()
-                }
-                .disabled(!model.canInstallAllIntegrations)
-                IconActionButton(systemName: "arrow.clockwise", help: "Refresh installed status") {
-                    model.refreshIntegrations()
+
+                PillActionButton("Unlock Key") {
+                    model.startServer()
                 }
             }
+        }
+    }
+}
 
-            if let notice = model.agentSetupNoticeText {
-                AgentSetupNotice(message: notice)
+struct EndpointPanel: View {
+    @ObservedObject var model: CursorAPIAppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Local API")
+                    .font(.title3.weight(.semibold))
+                Text(model.statusText)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
 
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+            VStack(spacing: 0) {
+                EndpointRow(title: "Root", value: model.baseURL)
+                EndpointRow(title: "Chat", value: model.chatCompletionsURL)
+                EndpointRow(title: "Responses", value: model.responsesURL)
+                EndpointRow(title: "Models", value: model.modelsURL)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct EndpointRow: View {
+    var title: String
+    var value: String
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 74, alignment: .leading)
+            Text(value)
+                .font(.system(.callout, design: .monospaced))
+                .textSelection(.enabled)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 0)
+            CopyEndpointControl(value: value)
+        }
+        .padding(.vertical, 7)
+    }
+}
+
+struct CopyEndpointControl: View {
+    var value: String
+    @State private var copied = false
+    @State private var copyGeneration = 0
+
+    var body: some View {
+        Group {
+            if copied {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Color.green)
+                    .frame(width: 24, height: 24)
+            } else {
+                LucideCopyIcon()
+                    .stroke(
+                        Color.secondary,
+                        style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
+                    )
+                    .frame(width: 16, height: 16)
+                    .frame(width: 24, height: 24)
+            }
+        }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: copy)
+            .help(copied ? "Copied" : "Copy")
+            .accessibilityLabel(copied ? "Copied" : "Copy")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                copy()
+            }
+            .focusable(false)
+            .focusEffectDisabled()
+    }
+
+    private func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+        copied = true
+        copyGeneration += 1
+        let generation = copyGeneration
+        Task {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            await MainActor.run {
+                if copyGeneration == generation {
+                    copied = false
+                }
+            }
+        }
+    }
+}
+
+struct LucideCopyIcon: Shape {
+    func path(in rect: CGRect) -> Path {
+        let size = min(rect.width, rect.height)
+        let scale = size / 24
+        let origin = CGPoint(
+            x: rect.midX - size / 2,
+            y: rect.midY - size / 2
+        )
+        func x(_ value: CGFloat) -> CGFloat { origin.x + value * scale }
+        func y(_ value: CGFloat) -> CGFloat { origin.y + value * scale }
+
+        var path = Path()
+        path.addRoundedRect(
+            in: CGRect(x: x(8), y: y(8), width: 14 * scale, height: 14 * scale),
+            cornerSize: CGSize(width: 2 * scale, height: 2 * scale)
+        )
+        path.move(to: CGPoint(x: x(4), y: y(16)))
+        path.addCurve(
+            to: CGPoint(x: x(2), y: y(14)),
+            control1: CGPoint(x: x(2.9), y: y(16)),
+            control2: CGPoint(x: x(2), y: y(15.1))
+        )
+        path.addLine(to: CGPoint(x: x(2), y: y(4)))
+        path.addCurve(
+            to: CGPoint(x: x(4), y: y(2)),
+            control1: CGPoint(x: x(2), y: y(2.9)),
+            control2: CGPoint(x: x(2.9), y: y(2))
+        )
+        path.addLine(to: CGPoint(x: x(14), y: y(2)))
+        path.addCurve(
+            to: CGPoint(x: x(16), y: y(4)),
+            control1: CGPoint(x: x(15.1), y: y(2)),
+            control2: CGPoint(x: x(16), y: y(2.9))
+        )
+        return path
+    }
+}
+
+struct APIKeyHeaderButton: View {
+    var isChecking: Bool
+    var isVerified: Bool
+    var needsAttention: Bool
+    var action: () -> Void
+
+    var body: some View {
+        Group {
+            if isChecking {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.72)
+            } else {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(iconColor)
+            }
+        }
+            .frame(width: 24, height: 24)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .help("api key")
+            .accessibilityLabel("API key")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction {
+                action()
+            }
+            .focusable(false)
+            .focusEffectDisabled()
+    }
+
+    private var iconColor: Color {
+        if isVerified {
+            return .green
+        }
+        if needsAttention {
+            return .orange
+        }
+        return .secondary
+    }
+}
+
+struct APIKeyDialog: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: CursorAPIAppModel
+    @State private var draftKey = ""
+    @FocusState private var keyFieldFocused: Bool
+
+    private var trimmedDraftKey: String {
+        draftKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSaveKey: Bool {
+        trimmedDraftKey.count >= 16
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "key.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Text("API Key")
+                    .font(.title3.weight(.semibold))
+                Spacer()
+            }
+
+            Text(model.hasCursorAPIKey ? "Enter a new Cursor API key to replace the saved key." : "Enter a Cursor API key to start the local API.")
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            SecureField("crsr_...", text: $draftKey)
+                .textFieldStyle(.roundedBorder)
+                .focused($keyFieldFocused)
+                .onSubmit(save)
+
+            Text("Saved locally in macOS Keychain and used only by \(CursorAPIBrand.displayName).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Spacer()
+                PillActionButton("Cancel") {
+                    dismiss()
+                }
+                PillActionButton(model.hasCursorAPIKey ? "Replace Key" : "Save Key") {
+                    save()
+                }
+                .disabled(!canSaveKey)
+            }
+        }
+        .padding(22)
+        .frame(width: 420)
+        .onAppear {
+            DispatchQueue.main.async {
+                keyFieldFocused = true
+            }
+        }
+    }
+
+    private func save() {
+        guard canSaveKey else { return }
+        model.settings.cursorAPIKey = trimmedDraftKey
+        model.saveKeyStartAndCheckIfReady()
+        draftKey = ""
+        keyFieldFocused = false
+        dismiss()
+    }
+}
+
+struct SimpleIntegrationsPanel: View {
+    @ObservedObject var model: CursorAPIAppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Agent Setup")
+                .font(.title3.weight(.semibold))
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 ForEach(model.integrations) { status in
-                    IntegrationRow(
+                    SimpleIntegrationRow(
                         status: status,
                         actionTitle: model.actionTitle(for: status),
                         canPrepareAgentConfigs: model.canPrepareAgentConfigs
@@ -122,8 +565,52 @@ struct ContentView: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+}
 
+struct SimpleIntegrationRow: View {
+    var status: AgentIntegrationStatus
+    var actionTitle: String
+    var canPrepareAgentConfigs: Bool
+    var install: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            IntegrationIcon(id: status.id, installed: status.installed)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(status.id.displayName)
+                    .font(.body.weight(.semibold))
+                Text(status.detail)
+                    .font(.callout)
+                    .foregroundStyle(status.needsUpdate ? Color.orange : Color.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            PillActionButton(actionTitle) {
+                install()
+            }
+            .disabled(status.installed || !status.canInstall || !canPrepareAgentConfigs)
+        }
+        .padding(.vertical, 8)
+        .padding(.trailing, 10)
+    }
+}
+
+struct GlassPanel<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        content
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(AppTheme.separator.opacity(0.6), lineWidth: 0.5)
+            }
+    }
 }
 
 struct AgentSetupNotice: View {
@@ -275,9 +762,7 @@ struct IconActionButton: View {
     var action: () -> Void
 
     var body: some View {
-        Image(systemName: systemName)
-            .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(.secondary)
+        icon
             .frame(width: 24, height: 24)
             .contentShape(Rectangle())
             .onTapGesture(perform: action)
@@ -289,6 +774,22 @@ struct IconActionButton: View {
             }
             .focusable(false)
             .focusEffectDisabled()
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        if systemName == "doc.on.doc" {
+            LucideCopyIcon()
+                .stroke(
+                    Color.secondary,
+                    style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
+                )
+                .frame(width: 16, height: 16)
+        } else {
+            Image(systemName: systemName)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -392,7 +893,7 @@ struct APIKeyRequiredPanel: View {
                     .focused($keyFieldFocused)
                 PillActionButton(model.sdkConfigured ? "Save & Start" : "Save Key") {
                     model.settings.cursorAPIKey = trimmedDraftKey
-                    model.saveKeyAndStartIfReady()
+                    model.saveKeyStartAndCheckIfReady()
                     draftKey = ""
                     keyFieldFocused = false
                 }
@@ -843,7 +1344,7 @@ struct APIKeySettingsControl: View {
                         .focused($keyFieldFocused)
                     PillActionButton(model.hasCursorAPIKey ? "Save Key" : "Add Key") {
                         model.settings.cursorAPIKey = trimmedDraftKey
-                        model.saveSettings()
+                        model.saveKeyStartAndCheckIfReady()
                         draftKey = ""
                         isReplacing = false
                         keyFieldFocused = false

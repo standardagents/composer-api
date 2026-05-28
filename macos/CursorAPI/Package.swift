@@ -10,6 +10,9 @@ let package = Package(
         .library(name: "CursorAPICore", targets: ["CursorAPICore"]),
         .executable(name: "CursorAPI", targets: ["CursorAPI"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0")
+    ],
     targets: [
         .target(
             name: "CursorAPICore",
@@ -19,7 +22,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "CursorAPI",
-            dependencies: ["CursorAPICore"],
+            dependencies: [
+                "CursorAPICore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             resources: [
                 .process("Resources")
             ],

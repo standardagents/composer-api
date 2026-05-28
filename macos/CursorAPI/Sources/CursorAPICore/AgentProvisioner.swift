@@ -12,6 +12,14 @@ public final class AgentProvisioner: @unchecked Sendable {
     private static let rooFastProfileName = "\(CursorAPIBrand.displayName) Fast"
     private static let rooProfileID = "api-for-cursor-composer"
     private static let rooFastProfileID = "api-for-cursor-composer-fast"
+    public static let visibleIntegrationIDs: [AgentIntegrationID] = [
+        .opencode,
+        .codex,
+        .vscode,
+        .cline,
+        .kilo,
+        .pi
+    ]
 
     private let homeDirectory: URL
     private let fileManager: FileManager
@@ -28,7 +36,7 @@ public final class AgentProvisioner: @unchecked Sendable {
     }
 
     public func statuses(settings: CursorAPISettings) -> [AgentIntegrationStatus] {
-        AgentIntegrationID.allCases.map { status(for: $0, settings: settings) }
+        Self.visibleIntegrationIDs.map { status(for: $0, settings: settings) }
     }
 
     public func status(for id: AgentIntegrationID, settings: CursorAPISettings) -> AgentIntegrationStatus {

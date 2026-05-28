@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Darwin
 
 struct CursorSDKBridgeEndpoint: Sendable {
     var url: URL
@@ -16,6 +17,9 @@ actor CursorSDKBridgeServer {
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
+        if let endpoint, process?.isRunning == true {
+            return endpoint
+        }
         if let endpoint, await isHealthy(endpoint.healthURL) {
             return endpoint
         }
@@ -117,10 +121,25 @@ actor CursorSDKBridgeServer {
         return URL(fileURLWithPath: path)
     }
 
+    func shutdown() {
+        stop()
+    }
+
     private func stop() {
-        process?.terminate()
-        process = nil
+        let process = self.process
+        self.process = nil
         endpoint = nil
+        if let process, process.isRunning {
+            process.terminate()
+            let deadline = Date().addingTimeInterval(1)
+            while process.isRunning, Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+            if process.isRunning {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+                process.waitUntilExit()
+            }
+        }
         try? logHandle?.close()
         logHandle = nil
     }

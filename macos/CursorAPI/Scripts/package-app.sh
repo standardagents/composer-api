@@ -13,11 +13,16 @@ APP_DIR="$ROOT_DIR/dist/$APP_NAME.app"
 LEGACY_APP_DIR="$ROOT_DIR/dist/CursorAPI.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
+FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 ICONSET_DIR="$RESOURCES_DIR/APIForCursor.iconset"
 APP_ICON_SOURCE="$ROOT_DIR/Sources/CursorAPI/Resources/APIForCursor.png"
 BRIDGE_SCRIPT_SOURCE="$REPOSITORY_DIR/scripts/cursor-sdk-local-agent-bridge.mjs"
 REQUIRE_BUNDLED_TRANSPORT="${CURSOR_API_REQUIRE_BUNDLED_TRANSPORT:-0}"
+RELEASE_BUILD=0
+CODE_SIGN_IDENTITY="${CURSOR_API_CODE_SIGN_IDENTITY:--}"
+APPCAST_URL="${CURSOR_API_APPCAST_URL:-https://api-for-composer.standardagents.ai/appcast.xml}"
+SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-}"
 BRIDGE_RUNTIME_SOURCE="${CURSOR_API_BRIDGE_RUNTIME_BINARY:-${CURSOR_API_BUN_BINARY:-${CURSOR_API_NODE_BINARY:-}}}"
 BRIDGE_RUNTIME_NAME="${CURSOR_API_BRIDGE_RUNTIME_NAME:-}"
 
@@ -25,6 +30,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --release)
       REQUIRE_BUNDLED_TRANSPORT=1
+      RELEASE_BUILD=1
       ;;
     --development)
       REQUIRE_BUNDLED_TRANSPORT=0
@@ -45,6 +51,9 @@ Environment:
                                     Node when available, then Bun.
   CURSOR_API_BRIDGE_RUNTIME_NAME    Runtime resource name when the binary name
                                     is ambiguous: bun or node.
+  CURSOR_API_CODE_SIGN_IDENTITY     Signing identity. Defaults to ad-hoc (-).
+  CURSOR_API_APPCAST_URL            Sparkle appcast URL.
+  SPARKLE_PUBLIC_ED_KEY             Sparkle EdDSA public key for release builds.
 USAGE
       exit 0
       ;;
@@ -56,11 +65,21 @@ USAGE
   shift
 done
 export CURSOR_API_REQUIRE_BUNDLED_TRANSPORT="$REQUIRE_BUNDLED_TRANSPORT"
+if [ "$RELEASE_BUILD" = "1" ] && [ -z "$SPARKLE_PUBLIC_ED_KEY" ]; then
+  echo "SPARKLE_PUBLIC_ED_KEY is required for release packages so Sparkle can verify updates." >&2
+  exit 1
+fi
 
 swift build --package-path "$ROOT_DIR" -c release
 rm -rf "$APP_DIR" "$LEGACY_APP_DIR"
-mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
+mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 cp "$BUILD_DIR/CursorAPI" "$MACOS_DIR/$EXECUTABLE_NAME"
+SPARKLE_FRAMEWORK_SOURCE="$BUILD_DIR/Sparkle.framework"
+[ -d "$SPARKLE_FRAMEWORK_SOURCE" ] || { echo "Missing Sparkle.framework at $SPARKLE_FRAMEWORK_SOURCE" >&2; exit 1; }
+cp -R "$SPARKLE_FRAMEWORK_SOURCE" "$FRAMEWORKS_DIR/"
+if ! otool -l "$MACOS_DIR/$EXECUTABLE_NAME" | grep -q '@executable_path/../Frameworks'; then
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$EXECUTABLE_NAME"
+fi
 if [ -d "$BUILD_DIR/CursorAPI_CursorAPI.bundle" ]; then
   cp -R "$BUILD_DIR/CursorAPI_CursorAPI.bundle" "$RESOURCES_DIR/"
 fi
@@ -559,6 +578,13 @@ APP_VERSION_XML="$(xml_escape "$APP_VERSION")"
 APP_BUILD_XML="$(xml_escape "$APP_BUILD")"
 APP_COPYRIGHT_XML="$(xml_escape "$APP_COPYRIGHT")"
 APP_INFO_XML="$(xml_escape "$APP_NAME $APP_VERSION")"
+APPCAST_URL_XML="$(xml_escape "$APPCAST_URL")"
+SPARKLE_PUBLIC_ED_KEY_XML="$(xml_escape "$SPARKLE_PUBLIC_ED_KEY")"
+SPARKLE_KEY_PLIST=""
+if [ -n "$SPARKLE_PUBLIC_ED_KEY" ]; then
+  SPARKLE_KEY_PLIST="  <key>SUPublicEDKey</key>
+  <string>$SPARKLE_PUBLIC_ED_KEY_XML</string>"
+fi
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -594,10 +620,21 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
   <true/>
   <key>NSHumanReadableCopyright</key>
   <string>$APP_COPYRIGHT_XML</string>
+  <key>SUFeedURL</key>
+  <string>$APPCAST_URL_XML</string>
+  <key>SUAutomaticallyUpdate</key>
+  <true/>
+$SPARKLE_KEY_PLIST
 </dict>
 </plist>
 PLIST
-codesign --force --deep --sign - "$APP_DIR" >/dev/null
+if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
+  codesign --force --deep --sign - "$FRAMEWORKS_DIR/Sparkle.framework" >/dev/null
+  codesign --force --deep --sign - "$APP_DIR" >/dev/null
+else
+  codesign --force --deep --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$FRAMEWORKS_DIR/Sparkle.framework" >/dev/null
+  codesign --force --deep --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP_DIR" >/dev/null
+fi
 rm -f "$ROOT_DIR/dist/API for Cursor.zip" "$ROOT_DIR/dist/CursorAPI.zip"
 ditto -c -k --keepParent "$APP_DIR" "$ROOT_DIR/dist/API for Cursor.zip"
 "$ROOT_DIR/Scripts/verify-package.sh" "$APP_DIR"

@@ -68,10 +68,11 @@ describe("Cursor SDK local-agent bridge", () => {
     });
   });
 
-  it("routes public Composer aliases through the SDK default model selector", () => {
-    expect(normalizeModel("composer-2.5")).toBe("default");
-    expect(normalizeModel("composer-2.5-fast")).toBe("default");
-    expect(normalizeModel("composer-latest")).toBe("default");
+  it("keeps public Composer aliases distinct before SDK model selection", () => {
+    expect(normalizeModel("composer-2.5")).toBe("composer-2.5");
+    expect(normalizeModel("composer-2.5-fast")).toBe("composer-2.5-fast");
+    expect(normalizeModel("cursorapi/composer-2.5-fast")).toBe("composer-2.5-fast");
+    expect(normalizeModel("composer-latest")).toBe("composer-2.5");
     expect(normalizeModel("auto")).toBe("default");
     expect(normalizeModel("gpt-5.5")).toBe("gpt-5.5");
   });
@@ -801,9 +802,6 @@ describe("Cursor SDK local-agent bridge", () => {
 
     expect(tools.some((tool) => tool.name === "client_shell")).toBe(true);
     expect(tools.some((tool) => tool.name === "client_task")).toBe(true);
-    expect(tools.some((tool) => tool.name === "client_create_plan")).toBe(true);
-    expect(tools.some((tool) => tool.name === "client_generate_image")).toBe(true);
-    expect(tools.some((tool) => tool.name === "client_record_screen")).toBe(true);
     expect(tools.find((tool) => tool.name === "probe_write_file")).toMatchObject({
       description: "Writes a marker through the harness MCP server.",
       inputSchema: {
@@ -811,6 +809,9 @@ describe("Cursor SDK local-agent bridge", () => {
         required: ["file_path", "contents"]
       }
     });
+    expect(tools.map((tool) => tool.name).indexOf("probe_write_file")).toBeLessThan(
+      tools.map((tool) => tool.name).indexOf("client_shell")
+    );
   });
 
   it("unwraps common dynamic client tool schema wrappers", () => {
@@ -1791,16 +1792,18 @@ describe("Cursor SDK local-agent bridge", () => {
     });
   });
 
-  it("tells the SDK to use client MCP tools instead of built-in local tools", () => {
-    const prompt = bridgePrompt("USER: create a file");
+  it("tells the SDK to forward compatible client tools through MCP", () => {
+    const prompt = bridgePrompt("USER: create a file", [
+      { name: "bash" },
+      { name: "write" }
+    ]);
 
+    expect(prompt).toContain("outer client tools are: bash, write");
+    expect(prompt).toContain("Use SDK mcp with providerIdentifier \"client\" for every local operation");
     expect(prompt).toContain("client_shell");
-    expect(prompt).toContain("client_task");
-    expect(prompt).toContain("client_create_plan");
-    expect(prompt).toContain("client_generate_image");
-    expect(prompt).toContain("client_record_screen");
-    expect(prompt).toContain("Do not use the SDK built-in shell");
-    expect(prompt).toContain("LOCAL TOOL RESULT records for your previous tool call");
+    expect(prompt).toContain("Prefer exact client tools and dedicated client MCP tools");
+    expect(prompt).toContain("LOCAL TOOL RESULT records are present");
+    expect(prompt).toContain("emit exactly one client MCP forwarding tool call and no prose");
   });
 
   it("uses SDK-compatible local options that do not wedge local runs", () => {
@@ -1820,25 +1823,52 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(createOptions).not.toHaveProperty("mcpServers");
     expect(createOptions.local).not.toHaveProperty("sandboxOptions");
     expect(createOptions.local).not.toHaveProperty("settingSources");
-    expect(sendOptions.model).toEqual({ id: "composer-2.5" });
-    expect(sendOptions.mcpServers.client.args).toEqual([bridgeScriptPath, "--client-mcp-server"]);
-    expect(sendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CALLBACK_URL).toContain("/client-tool-call");
-    expect(sendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY).toMatch(/^[a-f0-9]{32}$/);
-    expect(sendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("client_shell");
+    expect(sendOptions.model).toEqual({ id: "default" });
+    expect(sendOptions).not.toHaveProperty("mcpServers");
     expect(sendOptions).not.toHaveProperty("local");
+    expect(localAgentSendOptions(input, { force: true }).local).toEqual({ force: true });
   });
 
-  it("keeps SDK session affinity stable while sending current tool schemas per request", () => {
+  it("routes the public Composer fast model through the SDK default selector", () => {
+    const input = {
+      apiKey: "test-key",
+      model: "composer-2.5-fast",
+      workingDirectory: "/tmp/project",
+      clientTools: []
+    };
+
+    expect(localAgentCreateOptions(input).model).toEqual({ id: "default" });
+    expect(localAgentSendOptions(input).model).toEqual({ id: "default" });
+  });
+
+  it("keeps SDK session affinity stable while sending client tools through MCP", () => {
     const baseInput = {
       apiKey: "test-key",
       model: "composer-2.5",
       workingDirectory: "/tmp/project",
       sessionKey: "shared-session",
-      clientTools: []
+      clientTools: [
+        {
+          name: "webfetch",
+          parameters: {
+            type: "object",
+            properties: { url: { type: "string" } },
+            required: ["url"]
+          }
+        }
+      ]
     };
     const dynamicInput = {
       ...baseInput,
       clientTools: [
+        {
+          name: "webfetch",
+          parameters: {
+            type: "object",
+            properties: { url: { type: "string" } },
+            required: ["url"]
+          }
+        },
         {
           name: "probe_write_file",
           parameters: {
@@ -1859,6 +1889,8 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY).toEqual(
       baseSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY
     );
+    expect(baseSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("webfetch");
+    expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("webfetch");
     expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("probe_write_file");
   });
 });

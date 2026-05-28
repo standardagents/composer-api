@@ -5,21 +5,21 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/src/styles.css" />
-    <meta name="theme-color" content="#1c1d18" />
+    <meta name="theme-color" content="#f7f5ef" />
 
     <title>API for Cursor</title>
     <meta
       name="description"
-      content="OpenAI-compatible chat completions and responses for Cursor."
+      content="A local macOS app that gives OpenCode, Codex, and OpenAI-compatible clients a local API for Cursor Composer."
     />
 
     <meta property="og:type" content="website" />
     <meta property="og:title" content="API for Cursor" />
     <meta
       property="og:description"
-      content="OpenAI-compatible chat completions and responses for Cursor."
+      content="Download the local macOS app for Cursor Composer models, OpenCode, Codex, and OpenAI-compatible clients."
     />
-    <meta property="og:image" content="https://cursor-api.standardagents.ai/og-image.png" />
+    <meta property="og:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
 
@@ -27,150 +27,193 @@
     <meta name="twitter:title" content="API for Cursor" />
     <meta
       name="twitter:description"
-      content="OpenAI-compatible chat completions and responses for Cursor."
+      content="A local macOS app that gives OpenCode, Codex, and OpenAI-compatible clients a local API for Cursor Composer."
     />
-    <meta name="twitter:image" content="https://cursor-api.standardagents.ai/og-image.png" />
+    <meta name="twitter:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
     <meta name="twitter:image:alt" content="API for Cursor" />
   </head>
   <body>
     <main id="landing">
-      <div class="shell">
-        <header class="topbar">
-          <a class="brand" href="/" aria-label="Standard Agents — API for Cursor">
-            <img class="brand-logo" src="/standard-agents-logo.svg" alt="Standard Agents" />
-            <span class="brand-divider" aria-hidden="true"></span>
-            <span class="brand-product">API&nbsp;for&nbsp;Cursor</span>
-          </a>
+      <aside class="notice" aria-label="Endpoint update">
+        <button type="button" class="notice-button" data-endpoint-modal-open>
+          <span>Where did the API endpoints go?</span>
+          <i data-lucide="arrow-right" data-size="14"></i>
+        </button>
+      </aside>
 
-          <nav class="top-actions" aria-label="Primary">
-            <a class="top-link" href="/chat">
-              <i data-lucide="message-square-plus"></i>
-              <span>Cursor Chat</span>
-            </a>
-            <a class="top-link" href="#docs">
-              <i data-lucide="book-open"></i>
-              <span>Docs</span>
-            </a>
-            <a
-              id="repo-link"
-              class="top-link"
-              href="https://github.com/standardagents/composer-api"
-              target="_blank"
-              rel="noreferrer"
-            >
-              <i data-lucide="github"></i>
-              <span>GitHub</span>
-              <span class="star-pill" aria-label="GitHub stars">
-                <i data-lucide="star"></i>
-                <span id="star-value">&mdash;</span>
+      <header class="site-header">
+        <a class="brand" href="/" aria-label="API for Cursor">
+          <img class="brand-icon" src="/api-for-cursor-icon.png" alt="" width="48" height="48" />
+          <span class="brand-text">API for Cursor</span>
+        </a>
+        <nav class="header-actions" aria-label="Primary navigation">
+          <a href="#screenshots">Screenshots</a>
+          <a href="#release">Release</a>
+          <a class="download-link" href="/download">
+            <i data-lucide="download" data-size="17"></i>
+            Download
+          </a>
+        </nav>
+      </header>
+
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-shade" aria-hidden="true"></div>
+        <div class="hero-content">
+          <p class="kicker">Local Composer API for macOS</p>
+          <h1 id="hero-title">API for Cursor</h1>
+          <p class="hero-copy">
+            Run a small local server that makes Cursor Composer models available to OpenCode,
+            Codex, VS Code extensions, and any OpenAI-compatible client.
+          </p>
+          <div class="hero-actions">
+            <a class="download-button" href="/download">
+              <i data-lucide="download" data-size="21"></i>
+              <span>
+                <strong>Download for macOS</strong>
+                <small>DMG installer, macOS 14+</small>
               </span>
             </a>
-          </nav>
-        </header>
+            <button class="secondary-button" type="button" data-copy="http://127.0.0.1:8787/v1">
+              <span>Copy local base URL</span>
+              <i data-lucide="copy" data-size="18"></i>
+            </button>
+          </div>
+        </div>
+      </section>
 
-        <section class="hero" aria-labelledby="hero-title">
-          <img class="hero-watermark" src="/cursor-arrow.svg" alt="" aria-hidden="true" width="512" height="512" />
-          <p class="hero-badge">
-            <i data-lucide="plug-zap"></i>
-            OpenAI-SDK compatible
+      <section class="overview" aria-label="Production-ready local API">
+        <div class="overview-item">
+          <i data-lucide="monitor-dot" data-size="24"></i>
+          <h2>Local first</h2>
+          <p>The server runs on your Mac, so agent tools keep working against your project files instead of a hosted sandbox.</p>
+        </div>
+        <div class="overview-item">
+          <i data-lucide="server" data-size="24"></i>
+          <h2>OpenAI-compatible</h2>
+          <p>Chat Completions, Responses, and Models endpoints are exposed at a local /v1 base URL.</p>
+        </div>
+        <div class="overview-item">
+          <i data-lucide="refresh-cw" data-size="24"></i>
+          <h2>Auto-updating</h2>
+          <p>Sparkle update feeds let signed releases roll forward without asking users to reinstall manually.</p>
+        </div>
+      </section>
+
+      <section id="screenshots" class="screenshots" aria-labelledby="screenshots-title">
+        <div class="section-heading">
+          <p class="kicker">Works where agents already run</p>
+          <h2 id="screenshots-title">One local app, first-class agent setup.</h2>
+        </div>
+
+        <div class="shot-grid">
+          <article class="shot shot-app">
+            <div class="mac-window light-window" aria-label="API for Cursor app preview">
+              <div class="window-controls" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+              <div class="app-preview-head">
+                <img src="/api-for-cursor-icon.png" alt="" width="72" height="72" />
+                <div>
+                  <h3>API for Cursor</h3>
+                  <p>Listening on http://127.0.0.1:8787/v1</p>
+                </div>
+                <span class="status-pill">Server On</span>
+              </div>
+              <div class="endpoint-table">
+                <div><strong>Models</strong><code>http://127.0.0.1:8787/v1/models</code></div>
+                <div><strong>Chat</strong><code>http://127.0.0.1:8787/v1/chat/completions</code></div>
+                <div><strong>Responses</strong><code>http://127.0.0.1:8787/v1/responses</code></div>
+              </div>
+              <div class="agent-row">
+                <span><img src="/standard-agents-mark-white.svg" alt="" /> OpenCode</span>
+                <span>Installed</span>
+              </div>
+              <div class="agent-row">
+                <span><img src="/openai-logo.svg" alt="" /> Codex</span>
+                <span>Installed</span>
+              </div>
+            </div>
+            <h3>Start once, use everywhere</h3>
+            <p>Paste your Cursor key in the app, start the local API, then configure supported agents with one click.</p>
+          </article>
+
+          <article class="shot shot-opencode">
+            <img src="/opencode-composer-2-5.webp" alt="OpenCode selecting Composer 2.5 through API for Cursor" />
+            <h3>OpenCode sees Composer models</h3>
+            <p>OpenCode keeps its local filesystem and shell loop while the model route goes through the local API.</p>
+          </article>
+
+          <article class="shot shot-codex">
+            <div class="codex-preview" aria-label="Codex provider preview">
+              <div class="codex-title">
+                <img src="/openai-logo.svg" alt="" width="38" height="38" />
+                <span>Codex</span>
+                <small>custom provider</small>
+              </div>
+              <div class="model-option selected">
+                <span>composer-2.5</span>
+                <strong>Ready</strong>
+              </div>
+              <div class="model-option">
+                <span>composer-2.5-fast</span>
+                <strong>Fast</strong>
+              </div>
+              <pre><code>[model_providers.cursor-composer]
+base_url = "http://127.0.0.1:8787/v1"</code></pre>
+            </div>
+            <h3>Codex-compatible provider</h3>
+            <p>Use the same OpenAI-compatible base URL in Codex and other tools that support custom providers.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="release" class="release" aria-labelledby="release-title">
+        <div>
+          <p class="kicker">Production release path</p>
+          <h2 id="release-title">Signed DMG installs, notarization, and update feeds.</h2>
+          <p>
+            Releases are built by GitHub Actions, packaged as a DMG, notarized by Apple,
+            published to Cloudflare R2, and announced to the app through a Sparkle appcast.
           </p>
-          <h1 id="hero-title">
-            <span class="hero-title-kicker">API for</span>
-            <span class="hero-title-gradient">Cursor</span>
-          </h1>
-          <p class="hero-lede">Cursor does not expose a standard inference API. This does.</p>
-
-          <div class="hero-actions">
-            <a class="btn btn-primary" href="/chat">
-              <i data-lucide="message-square-plus"></i>
-              Open Cursor Chat
-            </a>
-            <a class="btn btn-ghost" href="#docs">
-              <i data-lucide="book-open"></i>
-              Read the setup docs
-            </a>
-          </div>
-        </section>
-
-        <section id="docs" class="docs" aria-labelledby="docs-title">
-          <div class="docs-topline">
-            <a class="docs-markdown-link" href="/setup.md" target="_blank" rel="noreferrer">
-              <i data-lucide="code-2"></i>
-              View as markdown
-            </a>
-          </div>
-          <header class="docs-head">
-            <span class="kicker"><i data-lucide="terminal"></i> Setup</span>
-            <h2 id="docs-title">How to use API for Cursor</h2>
-            <p>Cursor does not expose a standard inference API. API for Cursor accepts familiar OpenAI-style requests and transforms the formats into something Cursor can use.</p>
-            <p>Use the OpenAI SDK, Vercel AI SDK, or any client that can set a custom base URL. Authenticate every request with your Cursor API key as a Bearer token.</p>
-          </header>
-
-          <div class="docs-layout">
-            <nav id="docs-nav" class="docs-nav" aria-label="Documentation sections"></nav>
-            <article id="docs-content" class="markdown-doc" aria-live="polite"></article>
-          </div>
-        </section>
-
-        <section id="faq" class="faq" aria-labelledby="faq-title">
-          <header class="faq-head">
-            <span class="kicker"><i data-lucide="circle-help"></i> FAQ</span>
-            <h2 id="faq-title">Questions people usually ask</h2>
-          </header>
-
-          <div class="faq-grid">
-            <article class="faq-item">
-              <h3>How much does it cost?</h3>
-              <p>You need a cursor subscription to use this api. Every request must be signed by your api key - cursor plans start at $20/month. We (StandardAgents) are not making any money on this.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Is this ok with Cursor?</h3>
-              <p>We really hope so! You still need a Cursor account to use this API, and it applies to your limits just like any other integration would. The folks at Cursor seem to be good-faith actors. Of course, if they publish their own API in the future, we would wholeheartedly recommend you use that instead.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>How does it work?</h3>
-              <p>API for Cursor accepts familiar OpenAI-style requests, then sends them on to Cursor in a format it can handle. Streaming requests stream back as server-sent events; non-streaming requests are buffered and returned as normal JSON.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Who is Standard Agents?</h3>
-              <p>Standard Agents is a team in Virginia building reliable agent infrastructure. Follow <a href="https://x.com/jpschroeder" target="_blank" rel="noreferrer">@jpschroeder</a> for updates.</p>
-              <p>If you want early access to what we are building, register below. If you are interested in having our team assist you in building agents, contact <a href="mailto:info@standardagents.ai">info@standardagents.ai</a>.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Do you store my Cursor API key?</h3>
-              <p>No. Your client sends the key as a Bearer token on each request, and API for Cursor forwards it to Cursor for that request.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Can I use the OpenAI or Vercel AI SDK?</h3>
-              <p>Yes. Point the SDK at this proxy's base URL and keep using the same chat completions or responses shape you already know.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Which models work?</h3>
-              <p>Call <code>/v1/models</code> for the current verified list. Cursor's public model catalog includes models like <code>gpt-5.5</code>, but this proxy path currently rejects that id, so we do not advertise it here until it works.</p>
-            </article>
-
-            <article class="faq-item">
-              <h3>Is this production-ready?</h3>
-              <p>If you want to use something like this in production, contact <a href="mailto:info@standardagents.ai">info@standardagents.ai</a>. We can help you build the right agent infrastructure around your product instead of treating a demo proxy as the whole system.</p>
-            </article>
-          </div>
-        </section>
-
-        <footer class="site-footer">
-          <span>Built by <a href="https://github.com/standardagents" target="_blank" rel="noreferrer">Standard Agents</a></span>
-          <span class="footer-dot" aria-hidden="true">&middot;</span>
-          <span>Cursor is a trademark of Anysphere. Not affiliated.</span>
-        </footer>
-      </div>
+        </div>
+        <a class="download-button dark" href="/download">
+          <i data-lucide="download" data-size="21"></i>
+          <span>
+            <strong>Download latest DMG</strong>
+            <small>Auto-updates after install</small>
+          </span>
+        </a>
+      </section>
     </main>
 
     <div id="chat-root" hidden></div>
+
+    <div class="modal-backdrop" data-endpoint-modal hidden>
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="endpoint-modal-title">
+        <button class="modal-close" type="button" data-endpoint-modal-close aria-label="Close">
+          <i data-lucide="x" data-size="20"></i>
+        </button>
+        <p class="kicker">Endpoint update</p>
+        <h2 id="endpoint-modal-title">The hosted API is moving out of the request path.</h2>
+        <p>
+          Cursor asked us to take down the hosted API endpoint. We are keeping the current routes
+          online temporarily while this local app is verified, but the production path is now the
+          local macOS app.
+        </p>
+        <p>
+          The local app is the better long-term experience: your API key stays on your machine,
+          agent tools run against your real project folders, and OpenCode or Codex can connect to
+          a normal OpenAI-compatible localhost URL.
+        </p>
+        <a class="download-button dark" href="/download">
+          <i data-lucide="download" data-size="20"></i>
+          <span>
+            <strong>Download for macOS</strong>
+            <small>Use the local API instead</small>
+          </span>
+        </a>
+      </section>
+    </div>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

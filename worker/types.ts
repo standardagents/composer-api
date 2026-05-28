@@ -1,6 +1,7 @@
 export interface Env {
   ASSETS: Fetcher;
   DB: D1Database;
+  RELEASES?: R2Bucket;
   CURSOR_SDK_BRIDGE_CONTAINER?: DurableObjectNamespace;
   ENCRYPTION_KEY?: string;
   CURSOR_API_BASE?: string;

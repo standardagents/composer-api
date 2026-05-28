@@ -77,6 +77,9 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
     if (url.pathname === "/api/early-access" && request.method === "POST") {
       return await handleEarlyAccess(request, env, deps);
     }
+    if (isReleaseRoute(url.pathname)) {
+      return await handleReleaseRoute(request, env, url);
+    }
 
     const route = matchOpenAiRoute(url.pathname);
     if (route) {
@@ -102,6 +105,72 @@ export async function handleRequest(request: Request, env: Env, ctx: ExecutionCo
   } catch (error) {
     return errorResponse(error);
   }
+}
+
+const LATEST_DMG_NAME = "API-for-Cursor-latest.dmg";
+const RELEASE_OBJECT_PREFIX = "releases/";
+
+function isReleaseRoute(pathname: string): boolean {
+  return pathname === "/download" || pathname === "/appcast.xml" || pathname.startsWith("/releases/");
+}
+
+async function handleReleaseRoute(request: Request, env: Env, url: URL): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") return notFound();
+
+  if (url.pathname === "/download") {
+    return Response.redirect(new URL(`/releases/${LATEST_DMG_NAME}`, url).toString(), 302);
+  }
+
+  if (!env.RELEASES) {
+    return notFound();
+  }
+
+  const key = releaseObjectKey(url.pathname);
+  if (!key) return notFound();
+
+  const object = await env.RELEASES.get(key);
+  if (!object) return notFound();
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("cache-control", cacheControlForReleaseKey(key));
+  if (!headers.has("content-type")) {
+    headers.set("content-type", contentTypeForReleaseKey(key));
+  }
+
+  const disposition = contentDispositionForReleaseKey(key);
+  if (disposition) headers.set("content-disposition", disposition);
+
+  return withCors(new Response(request.method === "HEAD" ? null : object.body, { headers }));
+}
+
+function releaseObjectKey(pathname: string): string | null {
+  if (pathname === "/appcast.xml") return "appcast.xml";
+  if (!pathname.startsWith("/releases/")) return null;
+
+  const name = decodeURIComponent(pathname.slice("/releases/".length));
+  if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) return null;
+  return `${RELEASE_OBJECT_PREFIX}${name}`;
+}
+
+function cacheControlForReleaseKey(key: string): string {
+  if (key === "appcast.xml" || key.endsWith(`/${LATEST_DMG_NAME}`)) {
+    return "public, max-age=60, stale-while-revalidate=300";
+  }
+  return "public, max-age=31536000, immutable";
+}
+
+function contentTypeForReleaseKey(key: string): string {
+  if (key === "appcast.xml") return "application/rss+xml; charset=utf-8";
+  if (key.endsWith(".dmg")) return "application/x-apple-diskimage";
+  return "application/octet-stream";
+}
+
+function contentDispositionForReleaseKey(key: string): string | null {
+  if (!key.endsWith(".dmg")) return null;
+  const filename = key.slice(key.lastIndexOf("/") + 1);
+  return `attachment; filename="${filename.replaceAll('"', "")}"`;
 }
 
 function staleViteAssetFallbackPath(pathname: string): string | null {

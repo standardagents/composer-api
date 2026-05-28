@@ -1,18 +1,14 @@
 # API for Cursor
 
-OpenAI-compatible `chat.completions` and `responses` endpoints backed by Cursor Composer.
+Local OpenAI-compatible `chat.completions` and `responses` endpoints backed by Cursor Composer.
 
-Live deployment: https://cursor-api.standardagents.ai
+Download site: https://api-for-composer.standardagents.ai
 
 ## What this is
 
-Cursor does not expose Composer 2.5 as a raw OpenAI-compatible model endpoint. API for Cursor adapts OpenAI-style requests into the format Cursor accepts:
+Cursor does not expose Composer as a raw OpenAI-compatible model endpoint. API for Cursor now ships as a local macOS app that starts a localhost `/v1` server, stores the Cursor API key locally, and configures local agent tools.
 
-- `POST /auth/exchange_user_api_key`
-- legacy chat transport configured through Worker secrets
-- a small SDK bridge for local-agent routes
-
-Each generic `/v1` request is stateless from the caller's perspective: the Worker creates a fresh request/conversation id, sends the full prompt, streams text back, and does not create a hosted agent. The recommended OpenCode route is `/opencodev2/v1`: it uses a small SDK-compatible local-agent harness, so OpenCode owns the local filesystem and shell tool loop while SDK tool-call events are translated back into OpenAI-compatible `tool_calls`. The legacy `/opencode/v1` route remains available for the older Cursor chat-endpoint behavior.
+The hosted Worker routes remain in the repository for temporary compatibility while the local app rollout is verified. Cursor has asked us to take down the hosted API path, so the production release path is the signed macOS app.
 
 ## Supported endpoints
 
@@ -22,16 +18,20 @@ Each generic `/v1` request is stateless from the caller's perspective: the Worke
 
 ## Usage
 
-Point any OpenAI-compatible client at the base URL and authenticate with your own
-Cursor API key as the bearer token. The key is forwarded to Cursor per request and
-is **not stored**: no signup, no encrypted-at-rest secret, no request logs.
+Install the macOS app from the DMG and start the local API. The default base URL is:
+
+```txt
+http://127.0.0.1:8787/v1
+```
+
+Point any OpenAI-compatible client at the local base URL and authenticate with any Bearer token your client requires. The app uses the Cursor API key stored locally in the app UI.
 
 ```ts
 import OpenAI from "openai";
 
 const client = new OpenAI({
-  apiKey: process.env.CURSOR_API_KEY, // your Cursor user API key
-  baseURL: "https://<deployment>/v1"
+  apiKey: "local",
+  baseURL: "http://127.0.0.1:8787/v1"
 });
 
 const completion = await client.chat.completions.create({
@@ -41,33 +41,23 @@ const completion = await client.chat.completions.create({
 ```
 
 ```bash
-curl https://<deployment>/v1/chat/completions \
-  -H "Authorization: Bearer $CURSOR_API_KEY" \
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "Authorization: Bearer local" \
   -H "Content-Type: application/json" \
   -d '{"model":"composer-2.5","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
-A Cursor user API key comes from the Cursor Dashboard under Integrations.
+A Cursor user API key comes from the Cursor Dashboard under Integrations. Enter it in the app; do not commit it to source control.
 
-To keep the key available in every new terminal, add it to your shell profile:
+## macOS production release
 
-```bash
-# zsh, the default shell on modern macOS
-printf '\nexport CURSOR_API_KEY="crsr_..."\n' >> ~/.zshrc
-source ~/.zshrc
+Release details live in [docs/production.md](docs/production.md).
 
-# bash
-printf '\nexport CURSOR_API_KEY="crsr_..."\n' >> ~/.bashrc
-source ~/.bashrc
-```
-
-For fish:
-
-```fish
-set -Ux CURSOR_API_KEY "crsr_..."
-```
-
-Do not commit your Cursor API key. Use your shell profile, your deployment provider's secret manager, or a local `.env` file ignored by git.
+- Builds are packaged as a signed DMG.
+- DMGs are notarized by Apple.
+- Sparkle is embedded for auto-updates.
+- Versioned DMGs, the latest DMG alias, and `appcast.xml` are uploaded to Cloudflare R2.
+- The Worker serves `/download`, `/releases/...`, and `/appcast.xml`.
 
 ## Legacy hosted-key flow (optional)
 
@@ -96,55 +86,7 @@ Token usage is estimated from character counts because Cursor's stream does not 
 
 ![Composer 2.5 in OpenCode](public/opencode-composer-2-5.webp)
 
-OpenCode should use a hosted OpenCode route, not the generic `/v1` route. The
-main OpenCode integration is the SDK-compatible local-agent harness at
-`/opencodev2/v1`. It does not create Cursor cloud agents; it mirrors the SDK's
-local-agent protocol and forwards local filesystem and shell execution back to
-OpenCode.
-
-Base URL:
-
-```txt
-https://cursor-api.standardagents.ai/opencodev2/v1
-```
-
-OpenCode uses these endpoints:
-
-- `GET /opencodev2/v1/models`
-- `POST /opencodev2/v1/chat/completions`
-
-Configure OpenCode with `@ai-sdk/openai-compatible` and select
-`cursorsdk/composer-2.5-sdk`, displayed as **Composer 2.5 SDK Harness**.
-
-For session affinity, the Worker stores only hashed owner/session keys and the
-local SDK agent id; it does not store the caller's Cursor API key. Production
-SDK runs use a tiny JavaScript bridge in
-`scripts/cursor-sdk-local-agent-bridge.mjs`. The bridge runs the real
-`@cursor/sdk` local agent runtime, cancels as soon as the model selects a local
-tool, and returns that tool call to the OpenAI-compatible client for execution.
-
-<details>
-<summary>Use the old /opencode/v1 route</summary>
-
-The old `/opencode/v1` route keeps the previous Cursor chat-endpoint behavior:
-the Worker forces Agent mode, keeps the conversation id stable for OpenCode's
-session-affinity header, and translates Cursor tool-call output into
-OpenAI-compatible `tool_calls`.
-
-Base URL:
-
-```txt
-https://cursor-api.standardagents.ai/opencode/v1
-```
-
-Old-route endpoints:
-
-- `GET /opencode/v1/models`
-- `POST /opencode/v1/chat/completions`
-
-Select `cursor/composer-2.5`, displayed as **Composer 2.5**.
-
-</details>
+Use the app's **Agent Setup** pane to install the local OpenCode provider. The configured provider points at the local base URL, not the hosted Worker.
 
 ## Local development
 

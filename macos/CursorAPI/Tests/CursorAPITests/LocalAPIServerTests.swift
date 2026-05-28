@@ -228,6 +228,9 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(events.map(\.path), ["/v1/models", "/v1/chat/completions", "/missing"])
         XCTAssertEqual(events.map(\.status), [200, 200, 404])
         XCTAssertEqual(events.map(\.streaming), [false, true, false])
+        XCTAssertNotNil(events[1].usage)
+        XCTAssertGreaterThan(events[1].usage?.inputTokens ?? 0, 0)
+        XCTAssertGreaterThan(events[1].usage?.outputTokens ?? 0, 0)
         XCTAssertTrue(events.allSatisfy { $0.durationMilliseconds >= 0 })
     }
 
@@ -282,18 +285,19 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         let dataModels = try XCTUnwrap(object["data"] as? [[String: Any]])
-        let codexModels = try XCTUnwrap(object["models"] as? [[String: Any]])
         let text = String(data: data, encoding: .utf8) ?? ""
         XCTAssertTrue(text.contains("composer-2.5"))
         XCTAssertTrue(text.contains("composer-2.5-fast"))
+        XCTAssertNil(object["models"])
         XCTAssertEqual(dataModels.compactMap { $0["id"] as? String }, ["composer-2.5", "composer-2.5-fast"])
-        XCTAssertEqual(codexModels.compactMap { $0["slug"] as? String }, ["composer-2.5", "composer-2.5-fast"])
-        XCTAssertEqual(codexModels.first?["display_name"] as? String, "Composer 2.5")
-        XCTAssertEqual(codexModels.first?["shell_type"] as? String, "shell_command")
-        XCTAssertEqual(codexModels.first?["visibility"] as? String, "list")
-        XCTAssertEqual(codexModels.first?["supported_in_api"] as? Bool, true)
-        XCTAssertEqual(codexModels.first?["context_window"] as? Int, 200_000)
-        XCTAssertNotNil(codexModels.first?["truncation_policy"] as? [String: Any])
+        for model in dataModels {
+            XCTAssertEqual(model["object"] as? String, "model")
+            XCTAssertEqual(model["owned_by"] as? String, "cursor")
+            XCTAssertNotNil(model["created"] as? Int)
+            XCTAssertNil(model["name"])
+            XCTAssertNil(model["cost"])
+            XCTAssertNil(model["limit"])
+        }
     }
 
     func testHeadReadEndpointsReturnStatusWithoutBody() async throws {
@@ -402,10 +406,10 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertEqual(object["id"] as? String, "composer-2.5-fast")
         XCTAssertEqual(object["object"] as? String, "model")
         XCTAssertEqual(object["owned_by"] as? String, "cursor")
-        XCTAssertEqual(object["name"] as? String, "Composer 2.5 Fast")
-        let limit = try XCTUnwrap(object["limit"] as? [String: Any])
-        XCTAssertEqual((limit["context"] as? NSNumber)?.intValue, 200_000)
-        XCTAssertEqual((limit["output"] as? NSNumber)?.intValue, 65_536)
+        XCTAssertNotNil(object["created"] as? Int)
+        XCTAssertNil(object["name"])
+        XCTAssertNil(object["cost"])
+        XCTAssertNil(object["limit"])
     }
 
     func testModelRetrieveEndpointAcceptsDashAlias() async throws {
@@ -1462,7 +1466,7 @@ final class LocalAPIServerTests: XCTestCase {
         }
         XCTAssertNotNil(properties["query"])
         XCTAssertTrue(prepared.prompt.contains("Client tool targets: repo_search"))
-        XCTAssertTrue(prepared.prompt.contains("Prefer the SDK mcp route for the exact client tool name and schema."))
+        XCTAssertTrue(prepared.prompt.contains("For local work, emit one SDK mcp tool call"))
     }
 
     func testChatFileRequestAddsRequiredLocalToolHint() throws {
@@ -1505,7 +1509,47 @@ final class LocalAPIServerTests: XCTestCase {
 
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
         XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
-        XCTAssertTrue(prepared.prompt.contains("Use the preferred SDK mcp route for the client shell/bash tool"))
+        XCTAssertTrue(prepared.prompt.contains("For creating or updating files, use SDK mcp for an exact client write/edit file tool"))
+    }
+
+    func testBridgeToolSpecsSkipsClientMCPForConversationalTurns() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model": "composer-2.5-fast",
+          "messages": [
+            {"role": "user", "content": "Reply with one short sentence."}
+          ],
+          "tools": [
+            {"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+            {"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}}
+          ]
+        }
+        """#.utf8))
+
+        XCTAssertTrue(OpenAICompatibility.bridgeToolSpecs(for: prepared).isEmpty)
+        XCTAssertFalse(prepared.prompt.contains("LOCAL TOOL INVENTORY"))
+    }
+
+    func testBridgeToolSpecsKeepsOnlyRelevantLocalToolsForFileTurns() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model": "composer-2.5-fast",
+          "messages": [
+            {"role": "user", "content": "Create ~/Desktop/example.html with hello in it."}
+          ],
+          "tools": [
+            {"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}},
+            {"type":"function","function":{"name":"write","parameters":{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]}}},
+            {"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}},
+            {"type":"function","function":{"name":"webfetch","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}}
+          ]
+        }
+        """#.utf8))
+        let names = OpenAICompatibility.bridgeToolSpecs(for: prepared).map(\.name)
+
+        XCTAssertEqual(names.prefix(2), ["write", "read"])
+        XCTAssertTrue(names.contains("bash"))
+        XCTAssertFalse(names.contains("webfetch"))
     }
 
     func testChatBuildAppRequestAddsRequiredLocalToolHintForSchemaCompatibleWriter() throws {
@@ -1545,7 +1589,7 @@ final class LocalAPIServerTests: XCTestCase {
 
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
         XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
-        XCTAssertTrue(prepared.prompt.contains("use the preferred SDK mcp route for a client write/edit file tool"))
+        XCTAssertTrue(prepared.prompt.contains("For creating or updating files, use SDK mcp for an exact client write/edit file tool"))
     }
 
     func testChatBuildAppRequestDoesNotRepeatRequiredHintAfterCustomWriterCall() throws {
@@ -1635,7 +1679,7 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
-        XCTAssertTrue(prepared.prompt.contains("Use the preferred SDK mcp route for the client shell/bash tool"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp for the client shell/bash tool"))
     }
 
     func testResponsesFileRequestAddsRequiredLocalToolHint() throws {
@@ -1674,7 +1718,7 @@ final class LocalAPIServerTests: XCTestCase {
 
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
         XCTAssertTrue(prepared.prompt.contains("Emit exactly one SDK tool call next and no prose."))
-        XCTAssertTrue(prepared.prompt.contains("Use the preferred SDK mcp route for the client shell/bash tool"))
+        XCTAssertTrue(prepared.prompt.contains("For creating or updating files, use SDK mcp for an exact client write/edit file tool"))
     }
 
     func testResponsesFileRequestDoesNotRepeatRequiredHintAfterApplyPatchCall() throws {
@@ -1900,12 +1944,11 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains("\"providerIdentifier\":\"client\""))
-        XCTAssertTrue(prepared.prompt.contains("\"toolName\":\"webfetch\""))
-        XCTAssertTrue(prepared.prompt.contains("\"args\":\"match this tool schema\""))
-        XCTAssertTrue(prepared.prompt.contains("\"sdk\":\"mcp\""))
-        XCTAssertTrue(prepared.prompt.contains("\"client\":\"webfetch\""))
-        XCTAssertTrue(prepared.prompt.contains("\"args\":\"match client schema\""))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: webfetch"))
+        XCTAssertTrue(prepared.prompt.contains("providerIdentifier \"client\""))
+        XCTAssertTrue(prepared.prompt.contains("toolName \"webfetch\""))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
+        XCTAssertTrue(prepared.prompt.contains("\"parameters\""))
         XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"webfetch\""))
     }
 
@@ -1937,9 +1980,10 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains("\"providerIdentifier\":\"client\""))
-        XCTAssertTrue(prepared.prompt.contains("\"toolName\":\"mcp__filesystem__write_file\""))
-        XCTAssertTrue(prepared.prompt.contains("\"client\":\"mcp__filesystem__write_file\""))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: mcp__filesystem__write_file"))
+        XCTAssertTrue(prepared.prompt.contains("providerIdentifier \"client\""))
+        XCTAssertTrue(prepared.prompt.contains("toolName \"mcp__filesystem__write_file\""))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
         XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"mcp__filesystem__write_file\""))
         XCTAssertFalse(prepared.prompt.contains("providerIdentifier \"filesystem\", toolName \"write_file\""))
     }
@@ -2624,7 +2668,7 @@ final class LocalAPIServerTests: XCTestCase {
 
         XCTAssertTrue(prepared.prompt.contains("The above tool calls have been executed. Continue your response based on these results."))
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
-        XCTAssertTrue(prepared.prompt.contains("Use the preferred SDK mcp route for the client shell/bash tool"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp for the client shell/bash tool"))
     }
 
     func testResponsesToolChoiceDirectFunctionShapeAddsPromptHint() throws {
@@ -2650,7 +2694,7 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertEqual(prepared.tools.map(\.name), ["shell"])
-        XCTAssertTrue(prepared.prompt.contains(#"Use SDK mcp now with providerIdentifier "client", toolName "shell""#))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"shell\""))
     }
 
     func testResponsesToolChoiceNestedFunctionShapeAddsPromptHint() throws {
@@ -2678,7 +2722,7 @@ final class LocalAPIServerTests: XCTestCase {
         """#.utf8))
 
         XCTAssertEqual(prepared.tools.map(\.name), ["shell"])
-        XCTAssertTrue(prepared.prompt.contains(#"Use SDK mcp now with providerIdentifier "client", toolName "shell""#))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"shell\""))
     }
 
     func testResponsesEndpointReturnsFunctionCallOutputItems() async throws {
@@ -2719,7 +2763,7 @@ final class LocalAPIServerTests: XCTestCase {
         let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
         {
           "model":"composer-2.5",
-          "messages":[{"role":"user","content":"run pwd"}],
+          "messages":[{"role":"user","content":"run the command pwd"}],
           "tools":[
             {
               "type":"function",
@@ -4431,10 +4475,9 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains(#""sdk":"shell""#))
-        XCTAssertTrue(prepared.prompt.contains(#""client":"run_command""#))
-        XCTAssertTrue(prepared.prompt.contains(#""sdk":"write""#))
-        XCTAssertTrue(prepared.prompt.contains(#""client":"workspace_file""#))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: run_command, workspace_file"))
+        XCTAssertTrue(prepared.prompt.contains("Do not use SDK built-in shell/read/write/edit/glob/grep/ls/delete tools directly"))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
 
         let object = OpenAICompatibility.chatCompletionResponse(
             id: "chatcmpl_test",
@@ -4522,8 +4565,8 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains(#""sdk":"write""#))
-        XCTAssertTrue(prepared.prompt.contains(#""client":"workspace_file""#))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: workspace_file"))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
 
         let object = OpenAICompatibility.chatCompletionResponse(
             id: "chatcmpl_test",
@@ -4655,8 +4698,8 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains(#""sdk":"glob""#))
-        XCTAssertTrue(prepared.prompt.contains(#""client":"find_files""#))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: find_files"))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
 
         let object = OpenAICompatibility.chatCompletionResponse(
             id: "chatcmpl_input_schema",
@@ -4712,13 +4755,9 @@ final class LocalAPIServerTests: XCTestCase {
         }
         """#.utf8))
 
-        XCTAssertTrue(prepared.prompt.contains(#""name":"find""#))
-        XCTAssertTrue(prepared.prompt.contains(#""sdk_mcp""#))
-        XCTAssertTrue(prepared.prompt.contains(#""providerIdentifier":"client""#))
-        XCTAssertTrue(prepared.prompt.contains(#""toolName":"find""#))
-        XCTAssertTrue(prepared.prompt.contains(#""sdk":"glob""#))
-        XCTAssertTrue(prepared.prompt.contains(#""client":"find""#))
-        XCTAssertTrue(prepared.prompt.contains(#"Use SDK mcp now with providerIdentifier "client", toolName "find""#))
+        XCTAssertTrue(prepared.prompt.contains("Client tool targets: find"))
+        XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
+        XCTAssertTrue(prepared.prompt.contains("Use SDK mcp now with providerIdentifier \"client\", toolName \"find\""))
 
         let object = OpenAICompatibility.chatCompletionResponse(
             id: "chatcmpl_test",
@@ -5194,25 +5233,8 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertTrue(prepared.prompt.contains("LOCAL TOOL REQUIRED FOR THE LATEST USER REQUEST"))
         XCTAssertTrue(prepared.prompt.contains("Client tool targets: bash, glob, write, edit"))
         XCTAssertFalse(prepared.prompt.contains("Allowed tool names: bash"))
+        XCTAssertTrue(prepared.prompt.contains("Do not use SDK built-in shell/read/write/edit/glob/grep/ls/delete tools directly"))
         XCTAssertTrue(prepared.prompt.contains("SDK TOOL ROUTING MAP:"))
-        let routes = try prepared.prompt
-            .split(separator: "\n")
-            .filter { $0.contains(#""sdk""#) && $0.contains(#""client""#) }
-            .map { line -> [String: Any] in
-                let data = Data(String(line).utf8)
-                return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            }
-        let globRoute = try XCTUnwrap(routes.first { ($0["sdk"] as? String) == "glob" })
-        let globRouteArgs = try XCTUnwrap(globRoute["clientArgs"] as? [String: Any])
-        XCTAssertEqual(globRoute["client"] as? String, "glob")
-        XCTAssertEqual(globRouteArgs["pattern"] as? String, "**/*")
-        XCTAssertEqual(globRouteArgs["path"] as? String, "/tmp/todo-vite")
-        let shellRoute = try XCTUnwrap(routes.first { ($0["sdk"] as? String) == "shell" })
-        let shellRouteArgs = try XCTUnwrap(shellRoute["clientArgs"] as? [String: Any])
-        XCTAssertEqual(shellRoute["client"] as? String, "bash")
-        XCTAssertEqual(shellRouteArgs["command"] as? String, "<command>")
-        XCTAssertEqual(shellRouteArgs["cwd"] as? String, ".")
-        XCTAssertEqual((shellRouteArgs["timeout_ms"] as? NSNumber)?.doubleValue, 120_000)
 
         let object = OpenAICompatibility.chatCompletionResponse(
             id: "chatcmpl_viteflow",
@@ -10214,7 +10236,7 @@ final class LocalAPIServerTests: XCTestCase {
         {
           "model":"composer-2.5",
           "stream":true,
-          "messages":[{"role":"user","content":"run pwd"}],
+          "messages":[{"role":"user","content":"run the command pwd"}],
           "tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}}]
         }
         """#.utf8)
@@ -10288,6 +10310,39 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 0.8)
     }
 
+    func testChatCompletionsShortCircuitsOpenCodeTitleGeneration() async throws {
+        let port = try unusedTCPPort()
+        let recorder = PreparedRequestRecorder()
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(text: "sdk title", recorder: recorder))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"""
+        {
+          "model":"composer-2.5-fast",
+          "stream":true,
+          "messages":[
+            {"role":"system","content":"You are a title generator. You output ONLY a thread title. Generate a brief title that would help the user find this conversation later."},
+            {"role":"user","content":"Generate a title for this conversation:"},
+            {"role":"user","content":"\"Build a faster SDK bridge for OpenCode\""}
+          ]
+        }
+        """#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let text = String(data: data, encoding: .utf8) ?? ""
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertTrue(text.contains("Build a faster SDK bridge for OpenCode"))
+        XCTAssertFalse(text.contains("sdk title"))
+        let recordedCount = await recorder.count()
+        XCTAssertEqual(recordedCount, 0)
+    }
+
     func testChatCompletionsStreamingIncludesUsageWhenRequested() async throws {
         let port = try unusedTCPPort()
         let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
@@ -10358,7 +10413,7 @@ final class LocalAPIServerTests: XCTestCase {
         {
           "model":"composer-2.5",
           "stream":true,
-          "input":"run pwd",
+          "input":"run the command pwd",
           "tools":[{"type":"function","name":"shell","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
         }
         """#.utf8)
@@ -10395,7 +10450,7 @@ final class LocalAPIServerTests: XCTestCase {
         {
           "model":"composer-2.5",
           "stream":true,
-          "input":"run pwd",
+          "input":"run the command pwd",
           "tools":[{"type":"function","name":"shell","parameters":{"type":"object","properties":{"command":{"type":"string"}}}}]
         }
         """#.utf8)
@@ -10733,6 +10788,10 @@ private actor PreparedRequestRecorder {
 
     func prompts() -> [String] {
         requests.map(\.prompt)
+    }
+
+    func count() -> Int {
+        requests.count
     }
 }
 

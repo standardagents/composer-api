@@ -4,10 +4,22 @@ import { handleRequest } from "./index";
 import { FakeD1, fakeCtx } from "./test-helpers";
 import type { Deps, Env } from "./types";
 
-function makeEnv(db: FakeD1, assetsFetch: Fetcher["fetch"] = () => Promise.resolve(new Response("asset"))): Env {
+interface MakeEnvOptions {
+  assetsFetch?: Fetcher["fetch"];
+  releases?: Record<string, { body: string; contentType?: string }>;
+}
+
+function makeEnv(
+  db: FakeD1,
+  assetsFetchOrOptions: Fetcher["fetch"] | MakeEnvOptions = () => Promise.resolve(new Response("asset"))
+): Env {
+  const options: MakeEnvOptions =
+    typeof assetsFetchOrOptions === "function" ? { assetsFetch: assetsFetchOrOptions } : assetsFetchOrOptions;
+  const assetsFetch = options.assetsFetch ?? (() => Promise.resolve(new Response("asset")));
   return {
     DB: db as unknown as D1Database,
     ASSETS: { fetch: assetsFetch } as unknown as Fetcher,
+    RELEASES: options.releases ? fakeR2(options.releases) : undefined,
     ENCRYPTION_KEY: "test-encryption-secret-with-enough-entropy",
     CURSOR_API_BASE: "https://api.cursor.test",
     CURSOR_BACKEND_BASE_URL: "https://cursor-backend.test",
@@ -18,7 +30,75 @@ function makeEnv(db: FakeD1, assetsFetch: Fetcher["fetch"] = () => Promise.resol
   };
 }
 
+function fakeR2(objects: Record<string, { body: string; contentType?: string }>): R2Bucket {
+  return {
+    async get(key: string) {
+      const item = objects[key];
+      if (!item) return null;
+      const body = new TextEncoder().encode(item.body);
+      return {
+        body: new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(body);
+            controller.close();
+          }
+        }),
+        httpEtag: `"${key}-etag"`,
+        httpMetadata: { contentType: item.contentType },
+        writeHttpMetadata(headers: Headers) {
+          if (item.contentType) headers.set("content-type", item.contentType);
+        }
+      } as unknown as R2ObjectBody;
+    }
+  } as unknown as R2Bucket;
+}
+
 describe("Worker", () => {
+  it("redirects the public download URL to the latest DMG release object", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db);
+    const { deps } = fakeDeps();
+
+    const response = await handleRequest(new Request("https://composer.test/download"), env, fakeCtx(), deps);
+
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toBe("https://composer.test/releases/API-for-Cursor-latest.dmg");
+  });
+
+  it("serves Sparkle appcast and DMG release objects from R2", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, {
+      releases: {
+        "appcast.xml": { body: "<rss></rss>", contentType: "application/rss+xml" },
+        "releases/API-for-Cursor-0.1.0-1.dmg": { body: "dmg-bytes", contentType: "application/x-apple-diskimage" }
+      }
+    });
+    const { deps } = fakeDeps();
+
+    const appcast = await handleRequest(new Request("https://composer.test/appcast.xml"), env, fakeCtx(), deps);
+    expect(appcast.status).toBe(200);
+    expect(appcast.headers.get("content-type")).toContain("application/rss+xml");
+    expect(appcast.headers.get("cache-control")).toContain("max-age=60");
+    await expect(appcast.text()).resolves.toBe("<rss></rss>");
+
+    const dmg = await handleRequest(new Request("https://composer.test/releases/API-for-Cursor-0.1.0-1.dmg"), env, fakeCtx(), deps);
+    expect(dmg.status).toBe(200);
+    expect(dmg.headers.get("content-type")).toContain("application/x-apple-diskimage");
+    expect(dmg.headers.get("cache-control")).toContain("immutable");
+    expect(dmg.headers.get("content-disposition")).toContain("API-for-Cursor-0.1.0-1.dmg");
+    await expect(dmg.text()).resolves.toBe("dmg-bytes");
+  });
+
+  it("returns 404 for missing release objects without falling through to assets", async () => {
+    const db = new FakeD1();
+    const env = makeEnv(db, { releases: {} });
+    const { deps } = fakeDeps();
+
+    const response = await handleRequest(new Request("https://composer.test/releases/missing.dmg"), env, fakeCtx(), deps);
+
+    expect(response.status).toBe(404);
+  });
+
   it("allows OpenCode session headers in CORS preflight", async () => {
     const db = new FakeD1();
     const env = makeEnv(db);

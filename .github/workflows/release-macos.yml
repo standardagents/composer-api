@@ -1,0 +1,176 @@
+name: Release macOS app
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "App version, for example 0.1.0"
+        required: true
+        type: string
+      build:
+        description: "Build number. Defaults to the GitHub run number."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    name: Build, sign, notarize, and publish DMG
+    runs-on: macos-15
+    env:
+      R2_RELEASE_BUCKET: api-for-composer-releases
+      CURSOR_API_APPCAST_URL: https://api-for-composer.standardagents.ai/appcast.xml
+      CURSOR_API_RELEASE_BASE_URL: https://api-for-composer.standardagents.ai/releases
+      CURSOR_API_CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+      SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+      SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve release metadata
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          build="${{ inputs.build }}"
+          if [ -z "$build" ]; then
+            build="$GITHUB_RUN_NUMBER"
+          fi
+          echo "CURSOR_API_APP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "CURSOR_API_APP_BUILD=$build" >> "$GITHUB_ENV"
+
+      - name: Validate release secrets
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in \
+            MACOS_DEVELOPER_ID_CERTIFICATE_BASE64 \
+            MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD \
+            MACOS_CODE_SIGN_IDENTITY \
+            SPARKLE_PUBLIC_ED_KEY \
+            SPARKLE_PRIVATE_KEY \
+            APPLE_ID \
+            APPLE_TEAM_ID \
+            APPLE_APP_PASSWORD \
+            CLOUDFLARE_API_TOKEN \
+            CLOUDFLARE_ACCOUNT_ID
+          do
+            value="$(printenv "$name" || true)"
+            if [ -z "$value" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            printf 'Missing required release secrets:\n' >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+        env:
+          MACOS_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          MACOS_CODE_SIGN_IDENTITY: ${{ secrets.MACOS_CODE_SIGN_IDENTITY }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Import Developer ID certificate
+        run: |
+          set -euo pipefail
+          cert_path="$RUNNER_TEMP/developer-id.p12"
+          keychain_path="$RUNNER_TEMP/release.keychain-db"
+          keychain_password="$(uuidgen)"
+          printf '%s' "$MACOS_DEVELOPER_ID_CERTIFICATE_BASE64" | base64 --decode > "$cert_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$cert_path" -P "$MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security list-keychains -d user -s "$keychain_path" login.keychain-db
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain_path"
+        env:
+          MACOS_DEVELOPER_ID_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+
+      - name: Build app bundle
+        run: macos/CursorAPI/Scripts/package-app.sh --release
+
+      - name: Create DMG
+        id: dmg
+        run: |
+          set -euo pipefail
+          dmg_path="$(macos/CursorAPI/Scripts/create-dmg.sh "macos/CursorAPI/dist/API for Cursor.app")"
+          echo "path=$dmg_path" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$dmg_path")" >> "$GITHUB_OUTPUT"
+
+      - name: Notarize DMG
+        run: macos/CursorAPI/Scripts/notarize-dmg.sh "${{ steps.dmg.outputs.path }}"
+
+      - name: Generate Sparkle appcast
+        id: appcast
+        run: |
+          set -euo pipefail
+          tools_dir="macos/CursorAPI/.build/artifacts/sparkle/Sparkle/bin"
+          appcast_path="$(
+            SPARKLE_GENERATE_APPCAST="$tools_dir/generate_appcast" \
+            macos/CursorAPI/Scripts/generate-appcast.sh "${{ steps.dmg.outputs.path }}"
+          )"
+          echo "path=$appcast_path" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release files to Cloudflare R2
+        run: |
+          set -euo pipefail
+          dmg="${{ steps.dmg.outputs.path }}"
+          dmg_name="${{ steps.dmg.outputs.name }}"
+          appcast="${{ steps.appcast.outputs.path }}"
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/releases/$dmg_name" \
+            --file "$dmg" \
+            --content-type application/x-apple-diskimage
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/releases/API-for-Cursor-latest.dmg" \
+            --file "$dmg" \
+            --content-type application/x-apple-diskimage
+          npx wrangler r2 object put "$R2_RELEASE_BUCKET/appcast.xml" \
+            --file "$appcast" \
+            --content-type application/rss+xml
+
+      - name: Upload GitHub Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-for-cursor-macos-${{ env.CURSOR_API_APP_VERSION }}-${{ env.CURSOR_API_APP_BUILD }}
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            ${{ steps.appcast.outputs.path }}
+
+      - name: Publish GitHub release assets
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.dmg.outputs.path }}
+            ${{ steps.appcast.outputs.path }}

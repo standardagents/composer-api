@@ -81,7 +81,7 @@ final class AppModelTests: XCTestCase {
         )
     }
 
-    func testIntegrationActionTitleUsesStartOnlyWhenServerIsStoppedAndKeyIsUnlocked() {
+    func testIntegrationActionTitleDoesNotPrefixStartBecauseServerAutostarts() {
         let status = AgentIntegrationStatus(
             id: .codex,
             installed: false,
@@ -95,7 +95,7 @@ final class AppModelTests: XCTestCase {
                 isRunning: false,
                 needsKeychainPermission: false
             ),
-            "Start & Install"
+            "Install"
         )
     }
 

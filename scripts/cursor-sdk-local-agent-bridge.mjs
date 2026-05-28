@@ -29,6 +29,7 @@ const clientToolCallbackPath = "/client-tool-call";
 const agentCache = new Map();
 const agentRunQueues = new Map();
 const activeClientToolCaptures = new Map();
+const forceNextRunAgentKeys = new Set();
 let server = null;
 
 if (isMainModule()) {
@@ -100,6 +101,10 @@ async function handleRequest(request, response) {
   const body = await readJsonBody(request);
   const apiKey = requiredString(body.apiKey, "apiKey");
   const prompt = requiredString(body.prompt, "prompt");
+  const incrementalPrompt = typeof body.incrementalPrompt === "string" && body.incrementalPrompt.trim()
+    ? body.incrementalPrompt
+    : prompt;
+  const promptAlreadyPrepared = body.promptAlreadyPrepared === true;
   const model = normalizeModel(typeof body.model === "string" ? body.model : "");
   const sessionKey = typeof body.sessionKey === "string" && body.sessionKey ? body.sessionKey : crypto.randomUUID();
   const workingDirectory = sdkWorkingDirectory(body.workingDirectory);
@@ -110,7 +115,8 @@ async function handleRequest(request, response) {
   const input = {
     apiKey,
     model,
-    prompt: bridgePrompt(prompt),
+    prompt: promptAlreadyPrepared ? prompt : bridgePrompt(prompt, clientTools),
+    incrementalPrompt: promptAlreadyPrepared ? incrementalPrompt : bridgePrompt(incrementalPrompt, clientTools),
     sessionKey,
     workingDirectory,
     requestId,
@@ -260,7 +266,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
         // The SDK may already be finishing the local run. The captured model
         // tool call is still the response we need to return to the client.
       });
-      if (options.waitForCancel !== false) {
+      if (options.waitForCancel === true) {
         await cancellation;
       }
     }
@@ -273,9 +279,11 @@ async function runLocalAgentBody(input, onRun, onEvent) {
   try {
     agentEntry = await getAgent(input);
     const agent = agentEntry.agent;
+    const prompt = agentEntry.cached && input.incrementalPrompt ? input.incrementalPrompt : input.prompt;
+    const force = forceNextRunAgentKeys.delete(cacheKey);
 
-    run = await agent.send(input.prompt, {
-      ...localAgentSendOptions(input),
+    run = await agent.send(prompt, {
+      ...localAgentSendOptions(input, { force }),
       idempotencyKey: input.requestId,
       onDelta: async ({ update }) => {
         const toolCall = toolCallFromDelta(update);
@@ -285,25 +293,25 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     onRun(run);
 
     if (cancelRequested) {
-      try {
-        await run.cancel();
-      } catch {}
+      run.cancel().catch(() => {});
     }
 
-    for await (const event of run.stream()) {
-      if (event.type === "assistant") {
-        for (const block of event.message?.content ?? []) {
-          if (block?.type === "text" && typeof block.text === "string") {
-            text += block.text;
-            if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+    if (!capturedToolCall) {
+      for await (const event of run.stream()) {
+        if (event.type === "assistant") {
+          for (const block of event.message?.content ?? []) {
+            if (block?.type === "text" && typeof block.text === "string") {
+              text += block.text;
+              if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+            }
           }
+          continue;
         }
-        continue;
-      }
-      if (event.type === "tool_call") {
-        if (event.status && event.status !== "running") continue;
-        await captureToolCall({ type: event.name, args: event.args });
-        if (capturedToolCall) break;
+        if (event.type === "tool_call") {
+          if (event.status && event.status !== "running") continue;
+          await captureToolCall({ type: event.name, args: event.args }, { waitForCancel: false });
+          if (capturedToolCall) break;
+        }
       }
     }
   } catch (error) {
@@ -315,7 +323,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
   }
 
   if (capturedToolCall) {
-    if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
+    if (agentEntry) forceNextRunAgentKeys.add(agentEntry.cacheKey);
     return {
       text: "",
       toolCalls: [capturedToolCall],
@@ -345,13 +353,13 @@ async function getAgent(input) {
   const cached = agentCache.get(cacheKey);
   if (cached) {
     cached.touchedAt = Date.now();
-    return { agent: cached.agent, cacheKey };
+    return { agent: cached.agent, cacheKey, cached: true };
   }
 
   const agent = await Agent.create(localAgentCreateOptions(input));
   agentCache.set(cacheKey, { agent, touchedAt: Date.now() });
   evictAgents();
-  return { agent, cacheKey };
+  return { agent, cacheKey, cached: false };
 }
 
 function evictAgent(cacheKey, agent) {
@@ -359,6 +367,7 @@ function evictAgent(cacheKey, agent) {
   if (cached?.agent === agent) {
     agentCache.delete(cacheKey);
   }
+  forceNextRunAgentKeys.delete(cacheKey);
   try {
     agent.close();
   } catch {}
@@ -394,7 +403,7 @@ async function captureActiveClientToolCall(cacheKey, toolCall) {
 function localAgentCreateOptions(input) {
   return {
     apiKey: input.apiKey,
-    model: { id: input.model },
+    model: sdkModelSelection(input.model),
     name: "API for Cursor local bridge",
     local: {
       cwd: input.workingDirectory
@@ -402,11 +411,21 @@ function localAgentCreateOptions(input) {
   };
 }
 
-function localAgentSendOptions(input) {
-  return {
-    model: { id: input.model },
-    mcpServers: clientForwardingMcpServers(input.clientTools, agentCacheKey(input))
+function localAgentSendOptions(input, optionsInput = {}) {
+  const options = {
+    model: sdkModelSelection(input.model)
   };
+  if (optionsInput.force === true) {
+    options.local = { force: true };
+  }
+  if (input.clientTools.length > 0) {
+    options.mcpServers = clientForwardingMcpServers(input.clientTools, agentCacheKey(input));
+  }
+  return options;
+}
+
+function clientToolsNeedingMcp(clientTools = []) {
+  return clientTools.filter((tool) => tool?.name);
 }
 
 function clientForwardingMcpServers(clientTools = [], cacheKey = "") {
@@ -1187,7 +1206,20 @@ function jsonValuesEqual(left, right) {
 
 function clientMcpToolDefinitions(clientTools = []) {
   const pathProperty = { type: "string", description: "File or directory path for the outer client." };
-  const tools = [
+  const fallbackTools = [
+    {
+      name: "client_write",
+      description: "Forward a file write to the outer client.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: pathProperty,
+          fileText: { type: "string" }
+        },
+        required: ["path", "fileText"],
+        additionalProperties: true
+      }
+    },
     {
       name: "client_shell",
       description: "Forward a shell command to the outer client. The bridge never executes it locally.",
@@ -1199,19 +1231,6 @@ function clientMcpToolDefinitions(clientTools = []) {
           timeout: { type: "number" }
         },
         required: ["command"],
-        additionalProperties: true
-      }
-    },
-    {
-      name: "client_write",
-      description: "Forward a file write to the outer client.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          path: pathProperty,
-          fileText: { type: "string" }
-        },
-        required: ["path", "fileText"],
         additionalProperties: true
       }
     },
@@ -1387,7 +1406,8 @@ function clientMcpToolDefinitions(clientTools = []) {
       }
     }
   ];
-  const seen = new Set(tools.map((tool) => tool.name));
+  const tools = [];
+  const seen = new Set();
   for (const tool of clientTools) {
     if (!tool.name || seen.has(tool.name)) continue;
     seen.add(tool.name);
@@ -1397,24 +1417,44 @@ function clientMcpToolDefinitions(clientTools = []) {
       inputSchema: clientMcpInputSchema(tool.parameters)
     });
   }
+  for (const tool of fallbackTools) {
+    if (seen.has(tool.name)) continue;
+    seen.add(tool.name);
+    tools.push(tool);
+  }
   return tools;
 }
 
-function bridgePrompt(prompt) {
+function bridgePrompt(prompt, clientTools = []) {
+  const mcpClientTools = clientToolsNeedingMcp(clientTools);
+  const exactTools = clientTools
+    .map((tool) => tool?.name)
+    .filter((name) => typeof name === "string" && name.trim())
+    .join(", ");
+  const exactMcpTools = mcpClientTools
+    .map((tool) => tool?.name)
+    .filter((name) => typeof name === "string" && name.trim())
+    .join(", ");
+  const toolInstruction = exactTools
+    ? `The outer client tools are: ${exactTools}.`
+    : "No outer client tools were provided for this request.";
+  const mcpInstruction = exactMcpTools
+    ? `Client-only tools are exposed through the client MCP server by exact name: ${exactMcpTools}.`
+    : "No client MCP forwarding tools are attached for this turn; answer without new local tool calls unless the prompt contains LOCAL TOOL RESULT records to continue from.";
+  const localServerInstruction = exactMcpTools
+    ? "A local MCP server named client exposes forwarding tools such as client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, and the exact outer client tool names."
+    : "No local MCP server tools are available on this turn.";
+
   return [
     "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
-    "The outer client owns local tool execution. When local work is needed, emit exactly one SDK tool call, then stop.",
-    "A local MCP server named client exposes forwarding tools: client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, client_todo_write, client_task, client_create_plan, client_generate_image, and client_record_screen.",
-    "The same client MCP server also exposes the current harness tools by exact tool name when the outer client provided a tool schema.",
-    "Use those client MCP forwarding tools for every local operation. Do not use the SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, todowrite, task, createPlan, generateImage, or recordScreen tools because those execute inside the bridge instead of the outer client.",
-    "If the prompt below says LOCAL TOOL REQUIRED, your response must be exactly one client MCP forwarding tool call and no prose.",
-    "If the prompt below contains LOCAL TOOL RESULT records for your previous tool call, treat those tools as already executed by the outer client. Continue from the result, return any requested final answer, and do not repeat the same tool call unless the result shows a failure or more local work is clearly required.",
-    "When the outer prompt says to use SDK shell, write, read, edit, delete, glob, grep, ls, readLints, semSearch, todowrite, task, createPlan, generateImage, or recordScreen, satisfy that by calling the matching client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, client_ls, client_read_lints, client_sem_search, client_todo_write, client_task, client_create_plan, client_generate_image, or client_record_screen MCP tool.",
-    "If the request below mentions an SDK routing map or asks for SDK mcp, satisfy that by calling the matching client MCP forwarding tool.",
-    "For harness MCP tools named like mcp__server__tool or server_tool, still call the local client MCP server with toolName set to the exact harness tool name. Do not call a separate provider/server unless that exact server is exposed by the SDK runtime.",
-    "For file creation, file edits, deletes, package installs, tests, builds, and project scaffolds, use client_shell or the exact harness shell tool with a complete command. Include mkdir -p for parent directories and quoted heredocs or a small script with the full intended content.",
-    "When creating Vite 8 React projects, use @vitejs/plugin-react ^5 with vite ^8, or omit the plugin if it is not needed. Do not pair Vite 8 with @vitejs/plugin-react 4.",
-    "For inspection-only work, use client_read, client_grep, client_glob, or client_ls. Do not claim local work is done until a tool result is present in the transcript.",
+    "The outer client owns local tool execution. The bridge must forward local operations; it must not execute SDK built-in shell/read/write/edit/glob/grep/ls/delete tools inside the bridge runtime.",
+    toolInstruction,
+    mcpInstruction,
+    localServerInstruction,
+    "Prefer exact client tools and dedicated client MCP tools such as write, read, edit, glob, grep, ls, delete, client_write, client_read, client_edit, client_glob, client_grep, client_ls, and client_delete before bash/client_shell. Use shell only for commands or when no dedicated client tool fits.",
+    "Use SDK mcp with providerIdentifier \"client\" for every local operation. Do not use SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, todowrite, task, createPlan, generateImage, or recordScreen.",
+    "If the prompt says LOCAL TOOL REQUIRED, emit exactly one client MCP forwarding tool call and no prose.",
+    "If LOCAL TOOL RESULT records are present, treat those tools as already executed by the outer client and continue from the result.",
     "",
     prompt
   ].join("\n");
@@ -1949,6 +1989,7 @@ function evictAgents() {
     const oldest = [...agentCache.entries()].sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
     if (!oldest) return;
     agentCache.delete(oldest[0]);
+    forceNextRunAgentKeys.delete(oldest[0]);
     try {
       oldest[1].agent.close();
     } catch {}
@@ -1956,12 +1997,21 @@ function evictAgents() {
 }
 
 function normalizeModel(model) {
-  const normalized = model.trim().toLowerCase();
+  const raw = model.trim();
+  const normalized = raw.toLowerCase().split("/").filter(Boolean).at(-1) || "";
   if (!normalized || normalized === "default" || normalized === "auto") return "default";
-  if (normalized === "composer-latest" || normalized === "composer" || normalized === "composer-2.5" || normalized === "composer-2-5") return "default";
-  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "default";
-  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "default";
-  return model.trim();
+  if (normalized === "composer-latest" || normalized === "composer" || normalized === "composer-2.5" || normalized === "composer-2-5") {
+    return "composer-2.5";
+  }
+  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5";
+  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "composer-2.5-fast";
+  return raw;
+}
+
+function sdkModelSelection(model) {
+  const normalized = normalizeModel(typeof model === "string" ? model : "");
+  if (normalized === "composer-2.5" || normalized === "composer-2.5-fast") return { id: "default" };
+  return { id: normalized };
 }
 
 function sdkWorkingDirectory(value) {
