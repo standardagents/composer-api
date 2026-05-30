@@ -11,14 +11,14 @@
     <title>API for Cursor</title>
     <meta
       name="description"
-      content="A local macOS app that gives OpenCode, Codex, and OpenAI-compatible clients a local API for Cursor Composer."
+      content="Run Cursor Composer models in OpenCode, Codex, VS Code, Cline, Kilo Code, and any OpenAI-compatible coding agent — through a local server on your Mac."
     />
 
     <meta property="og:type" content="website" />
     <meta property="og:title" content="API for Cursor" />
     <meta
       property="og:description"
-      content="Download the local macOS app for Cursor Composer models, OpenCode, Codex, and OpenAI-compatible clients."
+      content="Run Cursor Composer models in your local coding agents. One local, OpenAI-compatible server for OpenCode, Codex, VS Code, Cline, and more."
     />
     <meta property="og:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
     <meta property="og:image:width" content="1200" />
@@ -28,7 +28,7 @@
     <meta name="twitter:title" content="API for Cursor" />
     <meta
       name="twitter:description"
-      content="A local macOS app that gives OpenCode, Codex, and OpenAI-compatible clients a local API for Cursor Composer."
+      content="Run Cursor Composer models in your local coding agents. One local, OpenAI-compatible server for OpenCode, Codex, VS Code, Cline, and more."
     />
     <meta name="twitter:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
     <meta name="twitter:image:alt" content="API for Cursor" />
@@ -50,8 +50,8 @@
           </a>
           <nav class="header-nav" aria-label="Primary navigation">
             <a href="#features">Features</a>
-            <a href="#setup">Setup</a>
-            <a href="#release">Release</a>
+            <a href="#agents">Agents</a>
+            <a href="#endpoints">Endpoints</a>
           </nav>
           <a class="btn btn-pill" href="/download">
             <i data-lucide="download" data-size="16"></i>
@@ -63,7 +63,7 @@
       <section class="hero" aria-labelledby="hero-title">
         <button type="button" class="notice-chip glass" data-endpoint-modal-open>
           <span class="notice-dot" aria-hidden="true"></span>
-          <span>Where did the hosted API endpoints go?</span>
+          <span>Looking for the hosted API endpoints?</span>
           <i data-lucide="arrow-right" data-size="14"></i>
         </button>
 
@@ -72,13 +72,14 @@
         </div>
 
         <h1 id="hero-title">
-          <span class="hero-title-line">API for</span>
-          <span class="hero-title-line hero-title-accent">Cursor</span>
+          Run Composer models in your
+          <span class="hero-title-accent">local coding agents</span>
         </h1>
 
         <p class="hero-copy">
-          Run a small local server that makes Cursor Composer models available to OpenCode,
-          Codex, VS&nbsp;Code extensions, and any OpenAI-compatible client.
+          API for Cursor runs a local, OpenAI-compatible server on your Mac, so OpenCode,
+          Codex, VS&nbsp;Code, Cline, and any client that speaks <code>/v1</code> can use
+          Cursor Composer models against your real project files.
         </p>
 
         <div class="hero-actions">
@@ -86,7 +87,7 @@
             <i data-lucide="download" data-size="20"></i>
             <span class="btn-stack">
               <strong>Download for macOS</strong>
-              <small>DMG installer, macOS 14+</small>
+              <small>Free local app</small>
             </span>
           </a>
           <button class="btn btn-glass btn-lg" type="button" data-copy="http://127.0.0.1:8787/v1">
@@ -94,60 +95,19 @@
               <strong class="copy-label">Copy local base URL</strong>
               <small><code>http://127.0.0.1:8787/v1</code></small>
             </span>
-            <i data-lucide="copy" data-size="18" class="copy-icon"></i>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="copy-icon lucide-icon lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
             <i data-lucide="check" data-size="18" class="copied-icon"></i>
           </button>
         </div>
 
-        <div class="hero-showcase">
-          <div class="app-window glass" aria-label="API for Cursor app preview">
-            <div class="window-bar">
-              <span class="traffic" aria-hidden="true">
-                <span></span><span></span><span></span>
-              </span>
-              <span class="window-title">API for Cursor</span>
-            </div>
-            <div class="app-body">
-              <div class="app-head">
-                <img src="/api-for-cursor-icon.png" alt="" width="56" height="56" />
-                <div class="app-head-text">
-                  <h3>Local server</h3>
-                  <p><code>http://127.0.0.1:8787/v1</code></p>
-                </div>
-                <span class="status-pill">
-                  <span class="status-dot" aria-hidden="true"></span>
-                  Running
-                </span>
-              </div>
-
-              <div class="endpoint-list">
-                <div class="endpoint-row">
-                  <span class="endpoint-name">Models</span>
-                  <code>/v1/models</code>
-                </div>
-                <div class="endpoint-row">
-                  <span class="endpoint-name">Chat</span>
-                  <code>/v1/chat/completions</code>
-                </div>
-                <div class="endpoint-row">
-                  <span class="endpoint-name">Responses</span>
-                  <code>/v1/responses</code>
-                </div>
-              </div>
-
-              <div class="agent-list">
-                <div class="agent-chip">
-                  <span class="agent-id"><img src="/standard-agents-mark-white.svg" alt="" /> OpenCode</span>
-                  <span class="agent-state"><i data-lucide="check" data-size="14"></i> Configured</span>
-                </div>
-                <div class="agent-chip">
-                  <span class="agent-id"><img src="/openai-logo.svg" alt="" /> Codex</span>
-                  <span class="agent-state"><i data-lucide="check" data-size="14"></i> Configured</span>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <figure class="hero-shot" aria-label="API for Cursor showing the local API and agent setup">
+          <img
+            src="/screenshots/api-for-cursor-agent-setup.webp"
+            alt="API for Cursor app: a running local API with Root, Chat, Responses, and Models endpoints, plus one-click agent setup for OpenCode, Codex, VS Code, Cline, Kilo Code, and pi."
+            width="765"
+            height="595"
+          />
+        </figure>
       </section>
 
       <section id="features" class="features" aria-label="Why a local API">
@@ -162,79 +122,109 @@
           <p>Chat Completions, Responses, and Models endpoints are exposed at a standard local <code>/v1</code> base URL.</p>
         </article>
         <article class="feature-card glass" data-reveal>
-          <span class="feature-icon feature-icon--purple"><i data-lucide="refresh-cw" data-size="22"></i></span>
-          <h2>Auto-updating</h2>
-          <p>Sparkle update feeds let signed releases roll forward without asking you to reinstall manually.</p>
+          <span class="feature-icon feature-icon--purple"><i data-lucide="sparkles" data-size="22"></i></span>
+          <h2>One-click agent setup</h2>
+          <p>Configure Composer for OpenCode, Codex, VS&nbsp;Code, Cline, Kilo&nbsp;Code, and pi from a single Agent Setup panel.</p>
         </article>
       </section>
 
-      <section id="setup" class="setup" aria-labelledby="setup-title">
+      <section id="agents" class="agents" aria-labelledby="agents-title">
         <div class="section-heading" data-reveal>
           <p class="kicker">Works where agents already run</p>
-          <h2 id="setup-title">One local app. First-class agent setup.</h2>
+          <h2 id="agents-title">Set up in your favorite coding agents.</h2>
           <p class="section-sub">
-            Paste your Cursor key, start the local API, then point any OpenAI-compatible
-            client at <code>127.0.0.1</code>. No proxy hops, no hosted sandbox.
+            Start the local API, then wire Composer into the agents you already use.
+            Each one keeps its own shell loop and your real project files — only the model
+            route points at <code>127.0.0.1</code>.
           </p>
         </div>
 
-        <div class="setup-grid">
-          <article class="showcase-card glass showcase-card--wide" data-reveal>
-            <div class="showcase-media">
-              <img src="/opencode-composer-2-5.webp" alt="OpenCode selecting Composer 2.5 through API for Cursor" loading="lazy" />
-            </div>
-            <div class="showcase-text">
-              <h3>OpenCode sees Composer models</h3>
-              <p>OpenCode keeps its local filesystem and shell loop while the model route runs through the local API with one-click setup.</p>
-            </div>
+        <div class="agent-grid" data-reveal>
+          <article class="agent-tile">
+            <span class="agent-logo"><img src="/provider-logos/opencode.png" alt="OpenCode" loading="lazy" /></span>
+            <h3>OpenCode</h3>
+            <p>Composer models ready</p>
           </article>
-
-          <article class="showcase-card glass" data-reveal>
-            <div class="codex-card">
-              <div class="codex-head">
-                <img src="/openai-logo.svg" alt="" width="30" height="30" />
-                <span>Codex</span>
-                <small>custom provider</small>
-              </div>
-              <div class="codex-option codex-option--selected">
-                <span>composer-2.5</span>
-                <strong><i data-lucide="check" data-size="13"></i> Ready</strong>
-              </div>
-              <div class="codex-option">
-                <span>composer-2.5-fast</span>
-                <strong class="codex-tag"><i data-lucide="zap" data-size="13"></i> Fast</strong>
-              </div>
-              <pre><code><span class="c-sec">[model_providers.cursor-composer]</span>
-<span class="c-key">base_url</span> = <span class="c-str">"http://127.0.0.1:8787/v1"</span></code></pre>
-            </div>
-            <div class="showcase-text">
-              <h3>Codex-compatible provider</h3>
-              <p>Use the same OpenAI-compatible base URL in Codex and any tool that supports custom providers.</p>
-            </div>
+          <article class="agent-tile">
+            <span class="agent-logo agent-logo--ink"><img src="/provider-logos/codex.svg" alt="Codex" loading="lazy" /></span>
+            <h3>Codex</h3>
+            <p>Custom provider ready</p>
+          </article>
+          <article class="agent-tile">
+            <span class="agent-logo"><img src="/provider-logos/vscode.png" alt="VS Code" loading="lazy" /></span>
+            <h3>VS Code</h3>
+            <p>Model metadata ready</p>
+          </article>
+          <article class="agent-tile">
+            <span class="agent-logo"><img src="/provider-logos/cline.png" alt="Cline" loading="lazy" /></span>
+            <h3>Cline</h3>
+            <p>Provider profile ready</p>
+          </article>
+          <article class="agent-tile">
+            <span class="agent-logo"><img src="/provider-logos/kilo.svg" alt="Kilo Code" loading="lazy" /></span>
+            <h3>Kilo Code</h3>
+            <p>Provider profile ready</p>
+          </article>
+          <article class="agent-tile">
+            <span class="agent-logo"><img src="/provider-logos/pi.svg" alt="pi" loading="lazy" /></span>
+            <h3>pi</h3>
+            <p>Custom models ready</p>
           </article>
         </div>
       </section>
 
-      <section id="release" class="release-section" aria-labelledby="release-title">
-        <div class="release-card glass" data-reveal>
-          <div class="release-text">
-            <p class="kicker">Production release path</p>
-            <h2 id="release-title">Signed installs, notarized, auto-updating.</h2>
-            <p>
-              Releases are built by GitHub Actions, packaged as a DMG, notarized by Apple,
-              published to Cloudflare R2, and announced to the app through a Sparkle appcast.
-            </p>
-            <ul class="release-points">
-              <li><i data-lucide="lock" data-size="15"></i> Notarized &amp; signed</li>
-              <li><i data-lucide="refresh-cw" data-size="15"></i> Background updates</li>
-              <li><i data-lucide="terminal" data-size="15"></i> macOS 14 Sonoma+</li>
-            </ul>
-          </div>
-          <a class="btn btn-primary btn-lg release-cta" href="/download">
+      <section id="endpoints" class="endpoints" aria-labelledby="endpoints-title">
+        <div class="section-heading" data-reveal>
+          <p class="kicker">OpenAI-compatible</p>
+          <h2 id="endpoints-title">A standard local <code>/v1</code> surface.</h2>
+          <p class="section-sub">
+            Point any OpenAI-compatible client at the local base URL and the familiar
+            endpoints are right there — Models, Chat Completions, and Responses.
+          </p>
+        </div>
+
+        <div class="endpoint-board" data-reveal>
+          <button class="endpoint-line" type="button" data-copy="http://127.0.0.1:8787/v1/models">
+            <span class="endpoint-tag">GET</span>
+            <code>/v1/models</code>
+            <span class="endpoint-note">List Composer models</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="copy-icon lucide-icon lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
+            <i data-lucide="check" data-size="16" class="copied-icon"></i>
+          </button>
+          <button class="endpoint-line" type="button" data-copy="http://127.0.0.1:8787/v1/chat/completions">
+            <span class="endpoint-tag endpoint-tag--post">POST</span>
+            <code>/v1/chat/completions</code>
+            <span class="endpoint-note">Chat Completions API</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="copy-icon lucide-icon lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
+            <i data-lucide="check" data-size="16" class="copied-icon"></i>
+          </button>
+          <button class="endpoint-line" type="button" data-copy="http://127.0.0.1:8787/v1/responses">
+            <span class="endpoint-tag endpoint-tag--post">POST</span>
+            <code>/v1/responses</code>
+            <span class="endpoint-note">Responses API</span>
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="copy-icon lucide-icon lucide lucide-copy"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
+            <i data-lucide="check" data-size="16" class="copied-icon"></i>
+          </button>
+        </div>
+      </section>
+
+      <section class="showcase" aria-labelledby="showcase-title">
+        <figure class="showcase-frame" data-reveal>
+          <img src="/opencode-composer-2-5.webp" alt="OpenCode running with Composer 2.5 selected through API for Cursor" loading="lazy" />
+        </figure>
+        <div class="showcase-copy" data-reveal>
+          <p class="kicker">In your editor</p>
+          <h2 id="showcase-title">OpenCode, building with Composer&nbsp;2.5.</h2>
+          <p>
+            Composer&nbsp;2.5 shows up as a normal model in OpenCode — “Build · Composer&nbsp;2.5
+            Cursor API via Standard Agents” — while the agent keeps its local filesystem and
+            shell tools. Same flow in Codex and any tool with a custom provider.
+          </p>
+          <a class="btn btn-primary btn-lg" href="/download">
             <i data-lucide="download" data-size="20"></i>
             <span class="btn-stack">
-              <strong>Download latest DMG</strong>
-              <small>Auto-updates after install</small>
+              <strong>Download for macOS</strong>
+              <small>Free local app</small>
             </span>
           </a>
         </div>
@@ -246,10 +236,11 @@
             <img class="brand-icon" src="/api-for-cursor-icon.png" alt="" width="30" height="30" />
             <span class="brand-text">API for Cursor</span>
           </a>
-          <p class="footer-copy">A local macOS bridge for Cursor Composer models.</p>
+          <p class="footer-copy">Run Cursor Composer models in your local coding agents.</p>
           <div class="footer-links">
             <a href="#features">Features</a>
-            <a href="#setup">Setup</a>
+            <a href="#agents">Agents</a>
+            <a href="#endpoints">Endpoints</a>
             <a href="/download">Download</a>
           </div>
         </div>
@@ -263,23 +254,18 @@
         <button class="modal-close" type="button" data-endpoint-modal-close aria-label="Close">
           <i data-lucide="x" data-size="18"></i>
         </button>
-        <p class="kicker">Endpoint update</p>
-        <h2 id="endpoint-modal-title">The hosted API is moving out of the request path.</h2>
+        <p class="kicker">Hosted endpoints</p>
+        <h2 id="endpoint-modal-title">The API now runs locally.</h2>
         <p>
-          Cursor asked us to take down the hosted API endpoint. We are keeping the current routes
-          online temporarily while this local app is verified, but the production path is now the
-          local macOS app.
-        </p>
-        <p>
-          The local app is the better long-term experience: your API key stays on your machine,
-          agent tools run against your real project folders, and OpenCode or Codex can connect to
-          a normal OpenAI-compatible localhost URL.
+          The hosted API endpoints have moved into the local app. Your Cursor key stays on
+          your machine, and your agents connect to a normal OpenAI-compatible URL at
+          <code>http://127.0.0.1:8787/v1</code>.
         </p>
         <a class="btn btn-primary btn-lg" href="/download">
           <i data-lucide="download" data-size="20"></i>
           <span class="btn-stack">
             <strong>Download for macOS</strong>
-            <small>Use the local API instead</small>
+            <small>Run the local API</small>
           </span>
         </a>
       </section>
