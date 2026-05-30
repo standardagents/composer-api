@@ -1,0 +1,17 @@
+{
+  "name": "API for Cursor",
+  "short_name": "API for Cursor",
+  "description": "Local OpenAI-compatible API for Cursor Composer models.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f3ef",
+  "theme_color": "#f5f3ef",
+  "icons": [
+    {
+      "src": "/api-for-cursor-icon.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

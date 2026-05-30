@@ -65,6 +65,13 @@ BRIDGE_RUNTIME_PATH="$(cd "$(dirname "$BRIDGE_RUNTIME_PATH")" && pwd)/$(basename
       .catch(() => process.exit(1));
   ' >/dev/null
 ) || fail "bundled bridge runtime cannot load node:http2 and @cursor/sdk"
+if [ "$(basename "$BRIDGE_RUNTIME_PATH")" = "node" ] || [ "$(basename "$BRIDGE_RUNTIME_PATH")" = "bun" ]; then
+  runtime_entitlements="$(codesign -d --entitlements :- "$BRIDGE_RUNTIME_PATH" 2>/dev/null || true)"
+  printf "%s" "$runtime_entitlements" | grep -q "com.apple.security.cs.allow-jit" \
+    || fail "bundled bridge runtime is missing JIT entitlement"
+  printf "%s" "$runtime_entitlements" | grep -q "com.apple.security.cs.allow-unsigned-executable-memory" \
+    || fail "bundled bridge runtime is missing executable-memory entitlement"
+fi
 [ -s "$RESOURCES_DIR/APIForCursor.icns" ] || fail "app icon is missing"
 [ -s "$RESOURCES_DIR/APIForCursor.png" ] || fail "runtime app icon PNG is missing"
 ICON_VERIFY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/api-for-cursor-icon.XXXXXX")"

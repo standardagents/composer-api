@@ -18,7 +18,7 @@ async function route(): Promise<void> {
 
   chatRoot.hidden = true;
   landing.hidden = false;
-  document.title = "API for Cursor";
+  document.title = "API for Cursor - Cursor Composer in Any Coding Agent";
   mountLanding();
 }
 

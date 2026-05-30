@@ -23,6 +23,7 @@ RELEASE_BUILD=0
 CODE_SIGN_IDENTITY="${CURSOR_API_CODE_SIGN_IDENTITY:--}"
 APPCAST_URL="${CURSOR_API_APPCAST_URL:-https://api-for-composer.standardagents.ai/appcast.xml}"
 SPARKLE_PUBLIC_ED_KEY="${SPARKLE_PUBLIC_ED_KEY:-}"
+BRIDGE_RUNTIME_ENTITLEMENTS="$ROOT_DIR/BridgeRuntime.entitlements"
 BRIDGE_RUNTIME_SOURCE="${CURSOR_API_BRIDGE_RUNTIME_BINARY:-${CURSOR_API_BUN_BINARY:-${CURSOR_API_NODE_BINARY:-}}}"
 BRIDGE_RUNTIME_NAME="${CURSOR_API_BRIDGE_RUNTIME_NAME:-}"
 
@@ -631,11 +632,21 @@ PLIST
 
 codesign_one() {
   local path="$1"
-  if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
-    codesign --force --sign - "$path" >/dev/null
-  else
-    codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$path" >/dev/null
+  local args=(--force)
+  if [ -f "$BRIDGE_RUNTIME_ENTITLEMENTS" ]; then
+    case "$(basename "$path")" in
+      node|bun)
+        args+=(--entitlements "$BRIDGE_RUNTIME_ENTITLEMENTS")
+        ;;
+    esac
   fi
+  if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
+    args+=(--sign -)
+  else
+    args+=(--options runtime --timestamp --sign "$CODE_SIGN_IDENTITY")
+  fi
+  args+=("$path")
+  codesign "${args[@]}" >/dev/null
 }
 
 sign_nested_native_code() {
@@ -657,10 +668,10 @@ sign_nested_native_code() {
 sign_nested_native_code "$RESOURCES_DIR"
 if [ "$CODE_SIGN_IDENTITY" = "-" ]; then
   codesign --force --deep --sign - "$FRAMEWORKS_DIR/Sparkle.framework" >/dev/null
-  codesign --force --deep --sign - "$APP_DIR" >/dev/null
+  codesign --force --sign - "$APP_DIR" >/dev/null
 else
   codesign --force --deep --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$FRAMEWORKS_DIR/Sparkle.framework" >/dev/null
-  codesign --force --deep --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP_DIR" >/dev/null
+  codesign --force --options runtime --timestamp --sign "$CODE_SIGN_IDENTITY" "$APP_DIR" >/dev/null
 fi
 rm -f "$ROOT_DIR/dist/API for Cursor.zip" "$ROOT_DIR/dist/CursorAPI.zip"
 ditto -c -k --keepParent "$APP_DIR" "$ROOT_DIR/dist/API for Cursor.zip"
