@@ -31,7 +31,8 @@ site_html="$TMP_DIR/site.html"
 curl -fsSL "$BASE_URL/" -o "$site_html"
 check_contains "$site_html" "API for Cursor"
 check_contains "$site_html" "Download for macOS"
-check_contains "$site_html" "Where did the API endpoints go?"
+check_contains "$site_html" "Looking for the hosted API endpoints?"
+check_contains "$site_html" "Use Cursor's models with any harness"
 check_contains "$site_html" "OpenCode"
 check_contains "$site_html" "Codex"
 
@@ -54,8 +55,10 @@ grep -Eiq '^content-type: *(application/x-apple-diskimage|application/octet-stre
 curl -fsSL --range 0-0 "$BASE_URL/releases/API-for-Cursor-latest.dmg" -o "$TMP_DIR/latest-dmg-byte"
 [ -s "$TMP_DIR/latest-dmg-byte" ] || fail "latest DMG range request returned no bytes"
 
-echo "Verifying old hosted API is still gated before cutover"
+echo "Verifying legacy API host redirects to canonical host"
 old_api_code="$(http_code "$OLD_API_URL")"
-[ "$old_api_code" = "401" ] || fail "expected old hosted API to return 401 before cutover, got $old_api_code"
+[ "$old_api_code" = "308" ] || fail "expected legacy API host to redirect with 308, got $old_api_code"
+old_api_redirected_code="$(curl -LsS -o /dev/null -w '%{http_code}' "$OLD_API_URL")"
+[ "$old_api_redirected_code" = "401" ] || fail "expected redirected API request to remain gated with 401, got $old_api_redirected_code"
 
 echo "Production release verification passed."
