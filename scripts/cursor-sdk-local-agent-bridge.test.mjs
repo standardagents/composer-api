@@ -19,6 +19,7 @@ import {
   toolCallFromDelta,
   validateClientMcpToolCall
 } from "./cursor-sdk-local-agent-bridge.mjs";
+import { extractComposerToolOutput, parseComposerToolCalls } from "./composer-tool-markers.mjs";
 
 const bridgeScriptPath = fileURLToPath(new URL("./cursor-sdk-local-agent-bridge.mjs", import.meta.url));
 
@@ -75,6 +76,39 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(normalizeModel("composer-latest")).toBe("composer-2.5");
     expect(normalizeModel("auto")).toBe("default");
     expect(normalizeModel("gpt-5.5")).toBe("gpt-5.5");
+  });
+
+  it("parses embedded Composer tool-call markup into structured tool calls", () => {
+    const marker = [
+      "<|tool_calls_begin|><|tool_call_begin|>",
+      "search_files",
+      "<|tool_sep|>pattern",
+      "*",
+      "<|tool_sep|>target",
+      "files",
+      "<|tool_call_end|><|tool_calls_end|>"
+    ].join("\n");
+    expect(parseComposerToolCalls(marker)).toEqual([
+      { name: "search_files", arguments: { pattern: "*", target: "files" } }
+    ]);
+    expect(extractComposerToolOutput(`Checking files.\n${marker}`)).toEqual({
+      text: "Checking files.",
+      toolCalls: [{ name: "search_files", arguments: { pattern: "*", target: "files" } }]
+    });
+    const malformedKimi = [
+      "<|tool_calls<|tool_calls_begin|>",
+      "search_files",
+      "<|tool<|tool_sep|>pattern",
+      "*",
+      "<|tool<|tool_sep|>target",
+      "files",
+      "<|tool<|tool_sep|>limit",
+      "50",
+      "<|tool_calls<|tool_calls_end|>"
+    ].join("\n");
+    expect(parseComposerToolCalls(malformedKimi)).toEqual([
+      { name: "search_files", arguments: { pattern: "*", target: "files", limit: 50 } }
+    ]);
   });
 
   it("serializes overlapping runs for the same stateful SDK agent", async () => {

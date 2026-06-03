@@ -22,6 +22,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "deploy": "vite build && wrangler deploy",
+    "docker:api": "tsx docker/api-server.ts",
     "db:migrate:local": "wrangler d1 migrations apply composer-api --local",
     "db:migrate:remote": "wrangler d1 migrations apply composer-api --remote"
   },
@@ -44,6 +45,7 @@
     "@cloudflare/workers-types": "^4.20260520.0",
     "typescript": "^5.9.3",
     "vite": "^8.0.13",
+    "tsx": "^4.20.5",
     "vitest": "^4.0.15",
     "wrangler": "^4.93.0"
   }

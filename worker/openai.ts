@@ -130,7 +130,11 @@ export function prepareChatRequest(body: unknown, cursorModel: { id: string } | 
   const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
   const workspaceMutationDone = workspaceMutationRequired && hasRequiredLocalToolCall(messages, tools, latestUserText);
   const transcript: string[] = [tools.length ? TOOL_SYSTEM_DIRECTIVE : agentMode ? AGENT_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
-  appendChatTools(transcript, tools, record.tool_choice);
+  if (shouldPreferSdkToolInventory(model)) {
+    appendSdkToolInventory(transcript, tools, record.tool_choice, toolContext);
+  } else {
+    appendChatTools(transcript, tools, record.tool_choice);
+  }
   appendWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone);
   transcript.push("", "Conversation:");
   if (agentMode) transcript.push(...AGENT_MODE_PRIMER);
@@ -781,6 +785,13 @@ function toolParametersFrom(...records: Record<string, unknown>[]): unknown {
     }
   }
   return undefined;
+}
+
+function shouldPreferSdkToolInventory(model: string): boolean {
+  const normalized = model.trim().toLowerCase().split("/").filter(Boolean).at(-1) || "";
+  if (!normalized || normalized === "default" || normalized === "auto") return false;
+  if (normalized.includes("composer")) return false;
+  return true;
 }
 
 function appendChatTools(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown) {

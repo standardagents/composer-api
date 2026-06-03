@@ -3,6 +3,7 @@ import { exchangeCursorApiKey } from "./cursor";
 import { HttpError } from "./http";
 import type { CursorCollectedOutput, CursorTextEvent } from "./cursor";
 import type { CursorImage, CursorToolCall, Deps, Env } from "./types";
+import { extractComposerToolOutput } from "../scripts/composer-tool-markers.mjs";
 
 interface CursorSdkSession {
   agentId: string;
@@ -341,12 +342,23 @@ async function* streamCursorLocalSdkBridgeRun(
   }
 ): AsyncGenerator<CursorTextEvent> {
   const output = await cursorLocalSdkBridgeJson(env, deps, apiKey, input);
-  const text = typeof output.text === "string" ? output.text : "";
-  const toolCalls: CursorToolCall[] = [];
-  const rawToolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+  let text = typeof output.text === "string" ? output.text : "";
+  let rawToolCalls = Array.isArray(output.toolCalls) ? output.toolCalls : [];
+
+  if (!rawToolCalls.length && text) {
+    const extracted = extractComposerToolOutput(text);
+    if (extracted.toolCalls.length) {
+      text = extracted.text;
+      rawToolCalls = extracted.toolCalls.map((toolCall) => ({
+        name: toolCall.name,
+        arguments: toolCall.arguments
+      }));
+    }
+  }
 
   if (text) yield { type: "text", text };
 
+  const toolCalls: CursorToolCall[] = [];
   for (const rawToolCall of rawToolCalls) {
     if (!rawToolCall || typeof rawToolCall.name !== "string") continue;
     const toolCall = normalizeSdkToolCallForOpenCode({

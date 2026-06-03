@@ -6,6 +6,7 @@ import http from "node:http";
 import path from "node:path";
 import readline from "node:readline";
 import { fileURLToPath } from "node:url";
+import { ComposerToolCallFilter, extractComposerToolOutput } from "./composer-tool-markers.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, "..");
@@ -276,6 +277,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     await captureToolCall(toolCall, { waitForCancel: false });
     return capturedToolCall !== null;
   });
+  const toolMarkerFilter = new ComposerToolCallFilter();
   try {
     agentEntry = await getAgent(input);
     const agent = agentEntry.agent;
@@ -301,8 +303,19 @@ async function runLocalAgentBody(input, onRun, onEvent) {
         if (event.type === "assistant") {
           for (const block of event.message?.content ?? []) {
             if (block?.type === "text" && typeof block.text === "string") {
-              text += block.text;
-              if (onEvent && block.text) onEvent({ type: "text", text: block.text });
+              for (const event of toolMarkerFilter.push(block.text)) {
+                if (event.type === "text") {
+                  text += event.text;
+                  if (onEvent && event.text) onEvent({ type: "text", text: event.text });
+                } else if (event.type === "tool_call") {
+                  await captureToolCall(
+                    { type: event.toolCall.name, args: event.toolCall.arguments },
+                    { waitForCancel: false }
+                  );
+                  if (capturedToolCall) break;
+                }
+              }
+              if (capturedToolCall) break;
             }
           }
           continue;
@@ -333,14 +346,50 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     };
   }
 
+  for (const event of toolMarkerFilter.flush()) {
+    if (event.type === "tool_call") {
+      await captureToolCall({ type: event.toolCall.name, args: event.toolCall.arguments }, { waitForCancel: false });
+      if (capturedToolCall) break;
+    } else if (event.type === "text") {
+      text += event.text;
+    }
+  }
+
+  if (capturedToolCall) {
+    if (agentEntry) forceNextRunAgentKeys.add(agentEntry.cacheKey);
+    return {
+      text: "",
+      toolCalls: [capturedToolCall],
+      agentID: agentEntry?.agent.agentId || "",
+      runID: run?.id || input.requestId,
+      status: "tool_call"
+    };
+  }
+
   const result = await run.wait();
   if (result.status === "error") {
     if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
     throw sdkRunFailureError(result);
   }
   if (!text && typeof result.result === "string") text = result.result;
+  const extracted = extractComposerToolOutput(text);
+  if (extracted.toolCalls.length) {
+    for (const toolCall of extracted.toolCalls) {
+      const normalized = normalizeSDKToolCall({ type: toolCall.name, args: toolCall.arguments }, input.clientTools);
+      if (normalized && isForwardableSDKToolCall(normalized, input.clientTools)) {
+        if (agentEntry) forceNextRunAgentKeys.add(agentEntry.cacheKey);
+        return {
+          text: "",
+          toolCalls: [normalized],
+          agentID: agentEntry?.agent.agentId || "",
+          runID: run.id,
+          status: "tool_call"
+        };
+      }
+    }
+  }
   return {
-    text: stripFinalMarker(text),
+    text: stripFinalMarker(extracted.text || text),
     toolCalls: [],
     agentID: agentEntry?.agent.agentId || "",
     runID: run.id,
@@ -2086,6 +2135,10 @@ function writeNdjson(response, body) {
 function installBridgeProcessHandlers() {
   process.on("unhandledRejection", (reason) => {
     if (isBenignCancellationError(reason) || isBenignPipeError(reason)) return;
+    if (isSpawnEnvironmentError(reason)) {
+      console.error("Cursor SDK agent requires a shell (/bin/sh). Use a Debian-based bridge image or Composer models.", reason);
+      return;
+    }
     if (isRetryableSDKRunError(reason)) {
       console.warn("Ignored late retryable Cursor SDK upstream error.");
       return;
@@ -2095,6 +2148,10 @@ function installBridgeProcessHandlers() {
   });
   process.on("uncaughtException", (error) => {
     if (isBenignCancellationError(error) || isBenignPipeError(error)) return;
+    if (isSpawnEnvironmentError(error)) {
+      console.error("Cursor SDK agent requires a shell (/bin/sh). Use a Debian-based bridge image or Composer models.", error);
+      return;
+    }
     if (isRetryableSDKRunError(error)) {
       console.warn("Ignored late retryable Cursor SDK upstream error.");
       return;
@@ -2102,6 +2159,10 @@ function installBridgeProcessHandlers() {
     console.error(error);
     closeAndExit(1);
   });
+}
+
+function isSpawnEnvironmentError(error) {
+  return error?.code === "ENOENT" && String(error?.syscall || "").includes("spawn");
 }
 
 function isBenignCancellationError(error) {

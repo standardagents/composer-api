@@ -1,0 +1,49 @@
+services:
+  bridge:
+    container_name: bridge
+    build:
+      context: .
+      dockerfile: containers/cursor-sdk-bridge/Dockerfile
+    environment:
+      CURSOR_SDK_BRIDGE_TOKEN: ${CURSOR_SDK_BRIDGE_TOKEN:-}
+      CURSOR_SDK_WORKING_DIRECTORY: /workspace
+    volumes:
+      - ${WORKSPACE:-.}:/workspace:rw
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8792/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - composer-api
+    restart: always
+
+  api:
+    container_name: api
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - "${CURSOR_API_PORT:-8787}:8787"
+    environment:
+      CURSOR_SDK_BRIDGE_URL: http://bridge:8792/sdk
+      CURSOR_SDK_BRIDGE_TOKEN: ${CURSOR_SDK_BRIDGE_TOKEN:-}
+      CURSOR_API_BASE: ${CURSOR_API_BASE:-https://api.cursor.com}
+      CURSOR_CLIENT_VERSION: ${CURSOR_CLIENT_VERSION:-2.6.22}
+      CURSOR_SDK_CLIENT_VERSION: ${CURSOR_SDK_CLIENT_VERSION:-sdk-1.0.13}
+      CURSOR_SDK_BRIDGE_TIMEOUT_MS: ${CURSOR_SDK_BRIDGE_TIMEOUT_MS:-180000}
+    depends_on:
+      bridge:
+        condition: service_healthy
+    networks:
+      - composer-api
+    restart: always
+networks:
+  composer-api:
