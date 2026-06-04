@@ -2010,7 +2010,8 @@ function normalizeModel(model) {
 
 function sdkModelSelection(model) {
   const normalized = normalizeModel(typeof model === "string" ? model : "");
-  if (normalized === "composer-2.5" || normalized === "composer-2.5-fast") return { id: "default" };
+  if (normalized === "composer-2.5") return { id: "composer-2.5", params: [{ id: "fast", value: "false" }] };
+  if (normalized === "composer-2.5-fast") return { id: "composer-2.5", params: [{ id: "fast", value: "true" }] };
   return { id: normalized };
 }
 

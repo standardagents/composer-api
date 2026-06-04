@@ -1820,16 +1820,17 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(createOptions.local).toEqual({
       cwd: "/tmp/project"
     });
+    expect(createOptions.model).toEqual({ id: "composer-2.5", params: [{ id: "fast", value: "false" }] });
     expect(createOptions).not.toHaveProperty("mcpServers");
     expect(createOptions.local).not.toHaveProperty("sandboxOptions");
     expect(createOptions.local).not.toHaveProperty("settingSources");
-    expect(sendOptions.model).toEqual({ id: "default" });
+    expect(sendOptions.model).toEqual({ id: "composer-2.5", params: [{ id: "fast", value: "false" }] });
     expect(sendOptions).not.toHaveProperty("mcpServers");
     expect(sendOptions).not.toHaveProperty("local");
     expect(localAgentSendOptions(input, { force: true }).local).toEqual({ force: true });
   });
 
-  it("routes the public Composer fast model through the SDK default selector", () => {
+  it("routes the public Composer fast model through the SDK with the fast parameter", () => {
     const input = {
       apiKey: "test-key",
       model: "composer-2.5-fast",
@@ -1837,8 +1838,24 @@ describe("Cursor SDK local-agent bridge", () => {
       clientTools: []
     };
 
+    expect(localAgentCreateOptions(input).model).toEqual({ id: "composer-2.5", params: [{ id: "fast", value: "true" }] });
+    expect(localAgentSendOptions(input).model).toEqual({ id: "composer-2.5", params: [{ id: "fast", value: "true" }] });
+  });
+
+  it("routes auto/default model through the SDK as the default selector", () => {
+    const input = {
+      apiKey: "test-key",
+      model: "auto",
+      workingDirectory: "/tmp/project",
+      clientTools: []
+    };
+
     expect(localAgentCreateOptions(input).model).toEqual({ id: "default" });
     expect(localAgentSendOptions(input).model).toEqual({ id: "default" });
+
+    const defaultInput = { ...input, model: "default" };
+    expect(localAgentCreateOptions(defaultInput).model).toEqual({ id: "default" });
+    expect(localAgentSendOptions(defaultInput).model).toEqual({ id: "default" });
   });
 
   it("keeps SDK session affinity stable while sending client tools through MCP", () => {
