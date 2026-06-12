@@ -1888,23 +1888,12 @@ function contentToTextAndImages(
       typeof part.text === "string"
     ) {
       parts.push(part.text);
-    } else if (
-      type === "image_url" &&
-      isRecord(part.image_url) &&
-      typeof part.image_url.url === "string"
-    ) {
-      images.push(imageFromUrl(part.image_url.url, part.image_url));
-      parts.push("[image]");
-    } else if (type === "input_image" && typeof part.image_url === "string") {
-      images.push(imageFromUrl(part.image_url));
-      parts.push("[image]");
-    } else if (
-      type === "input_image" &&
-      isRecord(part.image_url) &&
-      typeof part.image_url.url === "string"
-    ) {
-      images.push(imageFromUrl(part.image_url.url, part.image_url));
-      parts.push("[image]");
+    } else if (type === "image_url" || type === "input_image") {
+      // Cursor's SDK path accepts vision/PDF inputs when they are embedded in the
+      // conversation transcript as OpenAI-style file parts. Routing extracted
+      // images through StreamChat requires private backend protobuf details that
+      // are not available in self-hosted Docker deployments.
+      parts.push(embedVisionPartAsFile(part));
     } else if (type === "tool_result" || type === "function_call_output") {
       parts.push(`${role} ${String(type)}: ${JSON.stringify(part)}`);
     } else {
@@ -2954,29 +2943,56 @@ function compactRecord(
   );
 }
 
-function imageFromUrl(
-  url: string,
-  metadata?: Record<string, unknown>,
-): CursorImage {
-  const dimension =
-    typeof metadata?.width === "number" &&
-    typeof metadata.height === "number" &&
-    Number.isFinite(metadata.width) &&
-    Number.isFinite(metadata.height)
-      ? {
-          width: Math.round(metadata.width),
-          height: Math.round(metadata.height),
-        }
-      : undefined;
-  const dataUrl = /^data:([^;,]+);base64,(.+)$/i.exec(url);
-  if (dataUrl) {
-    return {
-      mimeType: dataUrl[1],
-      data: dataUrl[2],
-      ...(dimension ? { dimension } : {}),
-    };
+function embedVisionPartAsFile(part: Record<string, unknown>): string {
+  const url = visionPartUrl(part);
+  if (!url) return JSON.stringify(part);
+  return JSON.stringify({
+    type: "file",
+    file: {
+      filename: visionPartFilename(url),
+      file_data: url,
+    },
+  });
+}
+
+function visionPartUrl(part: Record<string, unknown>): string | undefined {
+  const type = part.type;
+  if (
+    type === "image_url" &&
+    isRecord(part.image_url) &&
+    typeof part.image_url.url === "string"
+  ) {
+    return part.image_url.url;
   }
-  return { url, ...(dimension ? { dimension } : {}) };
+  if (type === "input_image") {
+    if (typeof part.image_url === "string") return part.image_url;
+    if (
+      isRecord(part.image_url) &&
+      typeof part.image_url.url === "string"
+    ) {
+      return part.image_url.url;
+    }
+  }
+  return undefined;
+}
+
+function visionPartFilename(url: string): string {
+  const dataMatch = /^data:([^;,]+);/i.exec(url);
+  if (dataMatch) {
+    const mime = dataMatch[1].toLowerCase();
+    if (mime.includes("jpeg") || mime.includes("jpg")) return "image.jpg";
+    if (mime.includes("webp")) return "image.webp";
+    if (mime.includes("gif")) return "image.gif";
+    return "image.png";
+  }
+  try {
+    const pathname = new URL(url).pathname;
+    const base = pathname.split("/").pop();
+    if (base && /\.(png|jpe?g|webp|gif)$/i.test(base)) return base;
+  } catch {
+    // Ignore invalid URLs and fall back to a generic filename.
+  }
+  return "image.png";
 }
 
 function usageFromChars(
