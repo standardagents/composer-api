@@ -617,7 +617,7 @@ async function handleOpenAiRoute(
     logId ? completeRequestLog(env, logId, input) : Promise.resolve();
 
   try {
-    if (shouldUseSdkForPreparedRoute(env, completionRoute)) {
+    if (shouldUseSdkForPreparedRoute(env, completionRoute, prepared)) {
       return await handleSdkPreparedOpenAiRoute({
         route: completionRoute,
         prepared,
@@ -907,6 +907,7 @@ async function handleSdkPreparedOpenAiRoute(input: {
 function shouldUseSdkForPreparedRoute(
   env: Env,
   route: CompletionRoute,
+  prepared?: { prompt?: { images?: unknown[] } },
 ): boolean {
   if (!hasConfiguredSdkBridge(env)) return false;
   if (route.surface === "opencode") return false;

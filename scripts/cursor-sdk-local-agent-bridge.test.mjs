@@ -3,6 +3,9 @@ import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import {
+  extractVisionFromPrompt,
+  sdkMessageFromPrompt,
+  sdkImageFromFilePart,
   bridgePrompt,
   clientForwardingMcpServerSource,
   clientMcpToolDefinitions,
@@ -30,6 +33,49 @@ const bridgeScriptPath = fileURLToPath(
 );
 
 describe("Cursor SDK local-agent bridge", () => {
+  it("extracts embedded vision file parts into SDK user messages", () => {
+    const filePart = JSON.stringify({
+      type: "file",
+      file: {
+        filename: "image.png",
+        file_data: "data:image/png;base64,QUJD",
+      },
+    });
+    const prompt = [
+      "SYSTEM: answer directly",
+      "",
+      "Conversation:",
+      `USER: What exact text appears?\n${filePart}`,
+    ].join("\n");
+    const extracted = extractVisionFromPrompt(prompt);
+    expect(extracted.images).toEqual([
+      { data: "QUJD", mimeType: "image/png" },
+    ]);
+    expect(extracted.text).toContain("USER: What exact text appears?");
+    expect(extracted.text).not.toContain('"type":"file"');
+    expect(sdkMessageFromPrompt(prompt)).toEqual({
+      text: extracted.text,
+      images: extracted.images,
+    });
+    expect(sdkImageFromFilePart(JSON.parse(filePart))).toEqual({
+      data: "QUJD",
+      mimeType: "image/png",
+    });
+  });
+
+  it("prefers explicit bridge images over embedded file parts", () => {
+    const filePart = JSON.stringify({
+      type: "file",
+      file: { filename: "image.png", file_data: "data:image/png;base64,QUJD" },
+    });
+    const prompt = `USER: What is this?\n${filePart}`;
+    const external = [{ data: "QUJD", mimeType: "image/png" }];
+    expect(sdkMessageFromPrompt(prompt, external)).toEqual({
+      text: "USER: What is this?",
+      images: external,
+    });
+  });
+
   it("classifies retryable Cursor SDK upstream capacity errors", () => {
     expect(isRetryableSDKRunError(new Error("Server at capacity"))).toBe(true);
     expect(isRetryableSDKRunError({ cause: { isRetryable: true } })).toBe(true);
@@ -2345,10 +2391,17 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(createOptions.local).toEqual({
       cwd: "/tmp/project",
     });
+    expect(createOptions.model).toEqual({
+      id: "composer-2.5",
+      params: [{ id: "fast", value: "false" }],
+    });
     expect(createOptions).not.toHaveProperty("mcpServers");
     expect(createOptions.local).not.toHaveProperty("sandboxOptions");
     expect(createOptions.local).not.toHaveProperty("settingSources");
-    expect(sendOptions.model).toEqual({ id: "default" });
+    expect(sendOptions.model).toEqual({
+      id: "composer-2.5",
+      params: [{ id: "fast", value: "false" }],
+    });
     expect(sendOptions).not.toHaveProperty("mcpServers");
     expect(sendOptions).not.toHaveProperty("local");
     expect(localAgentSendOptions(input, { force: true }).local).toEqual({
@@ -2356,7 +2409,7 @@ describe("Cursor SDK local-agent bridge", () => {
     });
   });
 
-  it("routes the public Composer fast model through the SDK default selector", () => {
+  it("routes the public Composer fast model through the SDK with the fast parameter", () => {
     const input = {
       apiKey: "test-key",
       model: "composer-2.5-fast",
@@ -2364,8 +2417,32 @@ describe("Cursor SDK local-agent bridge", () => {
       clientTools: [],
     };
 
+    expect(localAgentCreateOptions(input).model).toEqual({
+      id: "composer-2.5",
+      params: [{ id: "fast", value: "true" }],
+    });
+    expect(localAgentSendOptions(input).model).toEqual({
+      id: "composer-2.5",
+      params: [{ id: "fast", value: "true" }],
+    });
+  });
+
+  it("routes auto/default model through the SDK as the default selector", () => {
+    const input = {
+      apiKey: "test-key",
+      model: "auto",
+      workingDirectory: "/tmp/project",
+      clientTools: [],
+    };
+
     expect(localAgentCreateOptions(input).model).toEqual({ id: "default" });
     expect(localAgentSendOptions(input).model).toEqual({ id: "default" });
+
+    const defaultInput = { ...input, model: "default" };
+    expect(localAgentCreateOptions(defaultInput).model).toEqual({
+      id: "default",
+    });
+    expect(localAgentSendOptions(defaultInput).model).toEqual({ id: "default" });
   });
 
   it("keeps SDK session affinity stable while sending client tools through MCP", () => {

@@ -22,7 +22,7 @@ const port = parseInteger(process.env.CURSOR_SDK_BRIDGE_PORT, 8792);
 const bridgeToken = process.env.CURSOR_SDK_BRIDGE_TOKEN || "";
 const maxJsonBytes = parseInteger(
   process.env.CURSOR_SDK_BRIDGE_MAX_JSON_BYTES,
-  1024 * 1024,
+  16 * 1024 * 1024,
 );
 const maxAgents = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS, 128);
 const runTimeoutMs = parseInteger(
@@ -61,6 +61,9 @@ if (isMainModule()) {
 
 export {
   bridgePrompt,
+  sdkMessageFromPrompt,
+  sdkImageFromFilePart,
+  extractVisionFromPrompt,
   clientMcpToolDefinitions,
   clientForwardingMcpServerSource,
   localAgentCreateOptions,
@@ -150,6 +153,7 @@ async function handleRequest(request, response) {
       : crypto.randomUUID();
   const clientTools = parseClientTools(body.tools);
   const streamEvents = body.streamEvents === true;
+  const bridgeImages = parseBridgeImages(body.images);
 
   const input = {
     apiKey,
@@ -162,6 +166,7 @@ async function handleRequest(request, response) {
     workingDirectory,
     requestId,
     clientTools,
+    images: bridgeImages,
   };
 
   if (streamEvents) {
@@ -229,6 +234,58 @@ async function streamLocalAgent(input, response) {
   }
 }
 
+const streamDrainMs = parseInteger(
+  process.env.CURSOR_SDK_BRIDGE_STREAM_DRAIN_MS,
+  3000,
+);
+
+async function consumeRunStreamEvents(
+  run,
+  {
+    textRef,
+    toolMarkerFilter,
+    onEvent,
+    captureToolCall,
+    shouldContinue,
+  },
+) {
+  for await (const event of run.stream()) {
+    if (!shouldContinue()) break;
+    if (event.type === "assistant") {
+      for (const block of event.message?.content ?? []) {
+        if (block?.type === "text" && typeof block.text === "string") {
+          for (const emitted of toolMarkerFilter.push(block.text)) {
+            if (emitted.type === "text") {
+              textRef.value += emitted.text;
+              if (onEvent && emitted.text)
+                onEvent({ type: "text", text: emitted.text });
+            } else if (emitted.type === "tool_call") {
+              await captureToolCall(
+                {
+                  type: emitted.toolCall.name,
+                  args: emitted.toolCall.arguments,
+                },
+                { waitForCancel: false },
+              );
+              if (!shouldContinue()) return;
+            }
+          }
+          if (!shouldContinue()) return;
+        }
+      }
+      continue;
+    }
+    if (event.type === "tool_call") {
+      if (event.status && event.status !== "running") continue;
+      await captureToolCall(
+        { type: event.name, args: event.args },
+        { waitForCancel: false },
+      );
+      if (!shouldContinue()) return;
+    }
+  }
+}
+
 async function runLocalAgent(input, onEvent) {
   return runExclusiveForAgent(input, () =>
     runLocalAgentUnlocked(input, onEvent),
@@ -275,7 +332,11 @@ async function runLocalAgentUnlocked(input, onEvent) {
         attempt < maxRunRetries &&
         !emittedEvent &&
         isRetryableSDKRunError(error);
-      if (!shouldRetry) throw error;
+      if (!shouldRetry) {
+        if (activeRun) activeRun.cancel().catch(() => {});
+        if (error?.code === "cursor_sdk_timeout") evictCachedAgent(input);
+        throw error;
+      }
       if (activeRun) activeRun.cancel().catch(() => {});
       evictCachedAgent(input);
       console.warn(
@@ -317,6 +378,8 @@ async function runLocalAgentBody(input, onRun, onEvent) {
   let cancelRequested = false;
   let pendingCancellation = null;
   let text = "";
+  const textRef = { value: "" };
+  const shouldContinue = () => !capturedToolCall;
 
   const captureToolCall = async (toolCall, options = {}) => {
     if (capturedToolCall || !toolCall) return;
@@ -345,6 +408,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     },
   );
   const toolMarkerFilter = new ComposerToolCallFilter();
+  let streamTask = null;
   try {
     agentEntry = await getAgent(input);
     const agent = agentEntry.agent;
@@ -354,7 +418,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
         : input.prompt;
     const force = forceNextRunAgentKeys.delete(cacheKey);
 
-    run = await agent.send(prompt, {
+    run = await agent.send(sdkMessageFromPrompt(prompt, input.images), {
       ...localAgentSendOptions(input, { force }),
       idempotencyKey: input.requestId,
       onDelta: async ({ update }) => {
@@ -369,39 +433,17 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     }
 
     if (!capturedToolCall) {
-      for await (const event of run.stream()) {
-        if (event.type === "assistant") {
-          for (const block of event.message?.content ?? []) {
-            if (block?.type === "text" && typeof block.text === "string") {
-              for (const event of toolMarkerFilter.push(block.text)) {
-                if (event.type === "text") {
-                  text += event.text;
-                  if (onEvent && event.text)
-                    onEvent({ type: "text", text: event.text });
-                } else if (event.type === "tool_call") {
-                  await captureToolCall(
-                    {
-                      type: event.toolCall.name,
-                      args: event.toolCall.arguments,
-                    },
-                    { waitForCancel: false },
-                  );
-                  if (capturedToolCall) break;
-                }
-              }
-              if (capturedToolCall) break;
-            }
-          }
-          continue;
-        }
-        if (event.type === "tool_call") {
-          if (event.status && event.status !== "running") continue;
-          await captureToolCall(
-            { type: event.name, args: event.args },
-            { waitForCancel: false },
-          );
-          if (capturedToolCall) break;
-        }
+      streamTask = consumeRunStreamEvents(run, {
+        textRef,
+        toolMarkerFilter,
+        onEvent,
+        captureToolCall,
+        shouldContinue,
+      });
+      if (onEvent) {
+        await streamTask;
+        streamTask = null;
+        text = textRef.value;
       }
     }
   } catch (error) {
@@ -439,8 +481,11 @@ async function runLocalAgentBody(input, onRun, onEvent) {
       if (capturedToolCall) break;
     } else if (event.type === "text") {
       text += event.text;
+      textRef.value += event.text;
     }
   }
+
+  text = textRef.value || text;
 
   if (capturedToolCall) {
     if (agentEntry) forceNextRunAgentKeys.add(agentEntry.cacheKey);
@@ -454,6 +499,10 @@ async function runLocalAgentBody(input, onRun, onEvent) {
   }
 
   const result = await run.wait();
+  if (streamTask) {
+    await Promise.race([streamTask.catch(() => {}), sleep(streamDrainMs)]);
+  }
+  if (!text && textRef.value) text = textRef.value;
   if (result.status === "error") {
     if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
     throw sdkRunFailureError(result);
@@ -1955,6 +2004,104 @@ function clientMcpToolDefinitions(clientTools = []) {
   return tools;
 }
 
+function sdkImageFromFilePart(part) {
+  if (!part || typeof part !== "object" || part.type !== "file") return null;
+  const file = part.file;
+  if (!file || typeof file !== "object") return null;
+  const fileData =
+    typeof file.file_data === "string"
+      ? file.file_data
+      : typeof file.fileData === "string"
+        ? file.fileData
+        : "";
+  if (!fileData) return null;
+  if (/^data:/i.test(fileData)) {
+    const match = /^data:([^;,]+);base64,(.+)$/i.exec(fileData);
+    if (match) {
+      return { data: match[2], mimeType: match[1].toLowerCase() };
+    }
+    return { url: fileData };
+  }
+  if (/^https?:\/\//i.test(fileData)) {
+    return { url: fileData };
+  }
+  return null;
+}
+
+function tryParseEmbeddedFilePart(value) {
+  if (!value || typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.includes('"type"')) return null;
+  try {
+    return sdkImageFromFilePart(JSON.parse(trimmed));
+  } catch {
+    return null;
+  }
+}
+
+function extractVisionFromPrompt(prompt) {
+  if (typeof prompt !== "string" || !prompt.includes('"type":"file"')) {
+    return { text: prompt, images: [] };
+  }
+  const images = [];
+  const keptLines = [];
+  for (const line of prompt.split("\n")) {
+    const roleMatch = /^(USER|ASSISTANT|SYSTEM|TOOL RESULT(?: \([^)]*\))?): (.*)$/.exec(
+      line,
+    );
+    if (roleMatch) {
+      const prefix = `${roleMatch[1]}: `;
+      const bodyParts = roleMatch[2].split("\n");
+      const keptBody = [];
+      for (const part of bodyParts) {
+        const image = tryParseEmbeddedFilePart(part);
+        if (image) {
+          images.push(image);
+          continue;
+        }
+        keptBody.push(part);
+      }
+      keptLines.push(prefix + keptBody.join("\n"));
+      continue;
+    }
+    const image = tryParseEmbeddedFilePart(line);
+    if (image) {
+      images.push(image);
+      continue;
+    }
+    keptLines.push(line);
+  }
+  return { text: keptLines.join("\n"), images };
+}
+
+function sdkMessageFromPrompt(prompt, externalImages = []) {
+  const { text, images: embeddedImages } = extractVisionFromPrompt(prompt);
+  const images =
+    Array.isArray(externalImages) && externalImages.length
+      ? externalImages
+      : embeddedImages;
+  if (!images.length) return text;
+  return { text, images };
+}
+
+function parseBridgeImages(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    if (typeof entry.url === "string" && entry.url.trim()) {
+      return [{ url: entry.url.trim() }];
+    }
+    if (typeof entry.data === "string" && entry.data.trim()) {
+      const mimeType =
+        typeof entry.mimeType === "string" && entry.mimeType.trim()
+          ? entry.mimeType.trim().toLowerCase()
+          : "image/jpeg";
+      return [{ data: entry.data.trim(), mimeType }];
+    }
+    return [];
+  });
+}
+
 function bridgePrompt(prompt, clientTools = []) {
   const mcpClientTools = clientToolsNeedingMcp(clientTools);
   const exactTools = clientTools
@@ -2878,8 +3025,10 @@ function normalizeModel(model) {
 
 function sdkModelSelection(model) {
   const normalized = normalizeModel(typeof model === "string" ? model : "");
-  if (normalized === "composer-2.5" || normalized === "composer-2.5-fast")
-    return { id: "default" };
+  if (normalized === "composer-2.5")
+    return { id: "composer-2.5", params: [{ id: "fast", value: "false" }] };
+  if (normalized === "composer-2.5-fast")
+    return { id: "composer-2.5", params: [{ id: "fast", value: "true" }] };
   return { id: normalized };
 }
 
