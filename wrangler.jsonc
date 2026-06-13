@@ -9,29 +9,43 @@
   "routes": [
     { "pattern": "cursor-api.standardagents.ai", "custom_domain": true },
     { "pattern": "api-for-composer.standardagents.ai", "custom_domain": true },
-    { "pattern": "api-for-composer.standardagents.ai/*", "zone_name": "standardagents.ai" }
+    {
+      "pattern": "api-for-composer.standardagents.ai/*",
+      "zone_name": "standardagents.ai",
+    },
   ],
   "observability": {
     "enabled": true,
     "logs": {
       "enabled": true,
-      "persist": true
+      "persist": true,
     },
     "traces": {
       "enabled": true,
-      "persist": true
-    }
+      "persist": true,
+    },
   },
   "assets": {
     "directory": "./dist/client",
     "binding": "ASSETS",
-    "run_worker_first": ["/", "/chat", "/api/*", "/v1/*", "/u/*", "/opencode/*", "/opencodev2/*", "/download", "/appcast.xml", "/releases/*"]
+    "run_worker_first": [
+      "/",
+      "/chat",
+      "/api/*",
+      "/v1/*",
+      "/u/*",
+      "/opencode/*",
+      "/opencodev2/*",
+      "/download",
+      "/appcast.xml",
+      "/releases/*",
+    ],
   },
   "r2_buckets": [
     {
       "binding": "RELEASES",
-      "bucket_name": "api-for-composer-releases"
-    }
+      "bucket_name": "api-for-composer-releases",
+    },
   ],
   "containers": [
     {
@@ -40,37 +54,37 @@
       "image_build_context": ".",
       "instance_type": "lite",
       "max_instances": 1,
-      "rollout_step_percentage": 100
-    }
+      "rollout_step_percentage": 100,
+    },
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "CURSOR_SDK_BRIDGE_CONTAINER",
-        "class_name": "CursorSdkBridgeContainer"
-      }
-    ]
+        "class_name": "CursorSdkBridgeContainer",
+      },
+    ],
   },
   "migrations": [
     {
       "tag": "cursor_sdk_bridge_container_v1",
-      "new_sqlite_classes": ["CursorSdkBridgeContainer"]
-    }
+      "new_sqlite_classes": ["CursorSdkBridgeContainer"],
+    },
   ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "composer-api",
       "database_id": "b21d167a-5e5e-4aa6-aac3-43b65fc604c8",
-      "migrations_dir": "migrations"
-    }
+      "migrations_dir": "migrations",
+    },
   ],
   "vars": {
     "CURSOR_API_BASE": "https://api.cursor.com",
     "CURSOR_CLIENT_VERSION": "2.6.22",
     "CURSOR_SDK_CLIENT_VERSION": "sdk-1.0.13",
-    "WAITLIST_SOURCE": "cursor-api"
-  }
+    "WAITLIST_SOURCE": "cursor-api",
+  },
   // Required secret:
   // ENCRYPTION_KEY - 32+ random bytes as hex/base64/plain text, used to encrypt Cursor API keys at rest.
   // CURSOR_BACKEND_BASE_URL - configured as a secret for the legacy chat transport.

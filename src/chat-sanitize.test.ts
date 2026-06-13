@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { assistantDisplayContent, sanitizeAssistantContent } from "./chat-sanitize";
+import {
+  assistantDisplayContent,
+  sanitizeAssistantContent,
+} from "./chat-sanitize";
 
 describe("chat assistant sanitizer", () => {
   it("strips Composer final markers before rendering or persisting assistant content", () => {
     expect(sanitizeAssistantContent("<|final|>Hello")).toBe("Hello");
     expect(sanitizeAssistantContent("<｜final｜>Hello")).toBe("Hello");
-    expect(sanitizeAssistantContent("< | final | >\nVisible answer")).toBe("Visible answer");
-    expect(sanitizeAssistantContent("Hidden reasoning <｜final｜>\nVisible answer")).toBe("Visible answer");
+    expect(sanitizeAssistantContent("< | final | >\nVisible answer")).toBe(
+      "Visible answer",
+    );
+    expect(
+      sanitizeAssistantContent("Hidden reasoning <｜final｜>\nVisible answer"),
+    ).toBe("Visible answer");
   });
 
   it("hides partial marker prefixes while streaming", () => {

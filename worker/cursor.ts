@@ -1,9 +1,26 @@
 import { HttpError } from "./http";
 import { parseSse } from "./sse";
-import type { CursorCompletion, CursorImage, CursorMe, CursorPrompt, CursorToolCall, Deps, Env } from "./types";
+import type {
+  CursorCompletion,
+  CursorImage,
+  CursorMe,
+  CursorPrompt,
+  CursorToolCall,
+  Deps,
+  Env,
+} from "./types";
+
+interface CursorModelRecord {
+  id: string;
+  displayName?: string;
+  name?: string;
+  aliases?: string[];
+}
 
 interface CursorModelResponse {
-  items?: Array<{ id: string; displayName?: string; aliases?: string[] }>;
+  object?: string;
+  data?: CursorModelRecord[];
+  items?: CursorModelRecord[];
 }
 
 interface CursorAccessTokenResponse {
@@ -16,8 +33,12 @@ interface ProtobufField {
   value: number | Uint8Array;
 }
 
-const cursorIdentityCache = new Map<string, { identity: string; expiresAt: number }>();
-const COMPOSER_CONTROL_TOKEN_PATTERN = /<\/think>|<\s*[|｜]\s*final\s*[|｜]\s*>/g;
+const cursorIdentityCache = new Map<
+  string,
+  { identity: string; expiresAt: number }
+>();
+const COMPOSER_CONTROL_TOKEN_PATTERN =
+  /<\/think>|<\s*[|｜]\s*final\s*[|｜]\s*>/g;
 const MAX_CURSOR_IMAGE_BYTES = 1024 * 1024;
 
 interface EncodedCursorImage {
@@ -26,24 +47,57 @@ interface EncodedCursorImage {
   uuid: string;
 }
 
-export async function verifyCursorApiKey(env: Env, deps: Deps, apiKey: string): Promise<CursorMe> {
+export async function verifyCursorApiKey(
+  env: Env,
+  deps: Deps,
+  apiKey: string,
+): Promise<CursorMe> {
   return cursorPublicJson<CursorMe>(env, deps, apiKey, "/v1/me");
 }
 
-export async function listCursorModels(env: Env, deps: Deps, apiKey: string): Promise<CursorModelResponse> {
+export async function listCursorModels(
+  env: Env,
+  deps: Deps,
+  apiKey: string,
+): Promise<CursorModelResponse> {
   return cursorPublicJson<CursorModelResponse>(env, deps, apiKey, "/v1/models");
+}
+
+export function cursorModelRecordsFromResponse(
+  response: CursorModelResponse,
+): CursorModelRecord[] {
+  if (Array.isArray(response.data) && response.data.length) {
+    return response.data.filter(
+      (record) => typeof record?.id === "string" && record.id.trim(),
+    );
+  }
+  if (Array.isArray(response.items) && response.items.length) {
+    return response.items.filter(
+      (record) => typeof record?.id === "string" && record.id.trim(),
+    );
+  }
+  return [];
 }
 
 export function resolveCursorModel(model: unknown): { id: string } | undefined {
   if (typeof model !== "string" || !model.trim()) return { id: "composer-2.5" };
   const normalized = model.trim().toLowerCase();
-  if (normalized === "composer-2.5" || normalized === "composer-2-5" || normalized === "composer-2.5-sdk" || normalized === "composer-latest") {
+  if (
+    normalized === "composer-2.5" ||
+    normalized === "composer-2-5" ||
+    normalized === "composer-2.5-sdk" ||
+    normalized === "composer-latest"
+  ) {
     return { id: "composer-2.5" };
   }
-  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") {
+  if (
+    normalized === "composer-2.5-fast" ||
+    normalized === "composer-2-5-fast"
+  ) {
     return { id: "composer-2.5-fast" };
   }
-  if (normalized === "auto" || normalized === "default") return { id: "composer-2.5" };
+  if (normalized === "auto" || normalized === "default")
+    return { id: "composer-2.5" };
   return { id: model.trim() };
 }
 
@@ -51,14 +105,21 @@ export async function createCursorCompletion(
   env: Env,
   deps: Deps,
   apiKey: string,
-  input: { prompt: CursorPrompt; model?: { id: string }; conversationKey?: string }
+  input: {
+    prompt: CursorPrompt;
+    model?: { id: string };
+    conversationKey?: string;
+  },
 ): Promise<CursorCompletion> {
   const images = await resolveCursorImages(input.prompt.images ?? [], deps);
   const cursorIdentity = await getCursorAccountIdentity(env, deps, apiKey);
   const accessToken = await exchangeCursorApiKey(env, deps, apiKey);
   const requestId = deps.randomUUID();
   const conversationId = input.conversationKey
-    ? await stableUuid("composer-api-conversation", `${cursorIdentity}:${input.conversationKey}`)
+    ? await stableUuid(
+        "composer-api-conversation",
+        `${cursorIdentity}:${input.conversationKey}`,
+      )
     : deps.randomUUID();
   const requestBody = encodeConnectFrame(
     encodeCursorChatRequest({
@@ -67,20 +128,31 @@ export async function createCursorCompletion(
       model: input.model?.id || "composer-2.5",
       requestId,
       conversationId,
-      messageId: deps.randomUUID()
-    })
+      messageId: deps.randomUUID(),
+    }),
   );
-  const response = await cursorInternalRaw(env, deps, accessToken, cursorChatEndpoint(env), {
-    method: "POST",
-    headers: await cursorInternalHeaders(env, accessToken, cursorIdentity, requestId),
-    body: requestBody.buffer as ArrayBuffer
-  });
+  const response = await cursorInternalRaw(
+    env,
+    deps,
+    accessToken,
+    cursorChatEndpoint(env),
+    {
+      method: "POST",
+      headers: await cursorInternalHeaders(
+        env,
+        accessToken,
+        cursorIdentity,
+        requestId,
+      ),
+      body: requestBody.buffer as ArrayBuffer,
+    },
+  );
   return { requestId, conversationId, stream: response };
 }
 
 export const cursorTestExports = {
   encodeCursorChatRequest,
-  parseComposerToolCalls
+  parseComposerToolCalls,
 };
 
 export type CursorTextEvent =
@@ -89,7 +161,9 @@ export type CursorTextEvent =
   | { type: "rejected_tool_call"; toolCall: CursorToolCall; reason?: string }
   | { type: "done"; finalText: string; toolCalls: CursorToolCall[] };
 
-export async function* streamCursorText(response: Response): AsyncGenerator<CursorTextEvent> {
+export async function* streamCursorText(
+  response: Response,
+): AsyncGenerator<CursorTextEvent> {
   const contentType = response.headers.get("content-type") || "";
   if (!contentType.includes("application/connect+proto")) {
     yield* streamLegacyAgentText(response);
@@ -116,7 +190,8 @@ export async function* streamCursorText(response: Response): AsyncGenerator<Curs
   };
   for await (const frame of parseConnectProtoFrames(response.body)) {
     const event = decodeCursorChatFrame(frame);
-    if (event.type === "error") throw new HttpError(event.message, 502, "cursor_stream_error");
+    if (event.type === "error")
+      throw new HttpError(event.message, 502, "cursor_stream_error");
     if (event.type === "tool_call") {
       if (event.toolCall) {
         toolCalls.push(event.toolCall);
@@ -160,7 +235,9 @@ export async function* streamCursorText(response: Response): AsyncGenerator<Curs
   yield { type: "done", finalText: text, toolCalls };
 }
 
-async function* streamLegacyAgentText(response: Response): AsyncGenerator<CursorTextEvent> {
+async function* streamLegacyAgentText(
+  response: Response,
+): AsyncGenerator<CursorTextEvent> {
   let text = "";
   const toolCalls: CursorToolCall[] = [];
   let mode: "unknown" | "assistant" | "delta" = "unknown";
@@ -188,17 +265,31 @@ async function* streamLegacyAgentText(response: Response): AsyncGenerator<Cursor
 
     if (event.event === "interaction_update" && isRecord(payload)) {
       const type = payload.type;
-      if (type === "text-delta" && typeof payload.text === "string" && mode !== "assistant") {
+      if (
+        type === "text-delta" &&
+        typeof payload.text === "string" &&
+        mode !== "assistant"
+      ) {
         mode = "delta";
         const delta = stripComposerControlTokens(payload.text);
         if (delta) yield* emit(delta);
-      } else if (type === "summary" && typeof payload.summary === "string" && !text && mode === "unknown") {
+      } else if (
+        type === "summary" &&
+        typeof payload.summary === "string" &&
+        !text &&
+        mode === "unknown"
+      ) {
         text = stripComposerControlTokens(payload.summary);
       }
       continue;
     }
 
-    if (event.event === "assistant" && isRecord(payload) && typeof payload.text === "string" && mode !== "delta") {
+    if (
+      event.event === "assistant" &&
+      isRecord(payload) &&
+      typeof payload.text === "string" &&
+      mode !== "delta"
+    ) {
       mode = "assistant";
       const delta = stripComposerControlTokens(payload.text);
       if (delta) yield* emit(delta);
@@ -206,7 +297,12 @@ async function* streamLegacyAgentText(response: Response): AsyncGenerator<Cursor
     }
 
     if (event.event === "result" && isRecord(payload)) {
-      const rawResult = typeof payload.result === "string" ? payload.result : typeof payload.text === "string" ? payload.text : "";
+      const rawResult =
+        typeof payload.result === "string"
+          ? payload.result
+          : typeof payload.text === "string"
+            ? payload.text
+            : "";
       const result = stripComposerControlTokens(rawResult);
       if (!text && result) {
         for (const emitted of emit(result)) yield emitted;
@@ -225,7 +321,10 @@ async function* streamLegacyAgentText(response: Response): AsyncGenerator<Cursor
     }
 
     if (event.event === "error" && isRecord(payload)) {
-      const message = typeof payload.message === "string" ? payload.message : "Cursor stream failed";
+      const message =
+        typeof payload.message === "string"
+          ? payload.message
+          : "Cursor stream failed";
       throw new HttpError(message, 502, "cursor_stream_error");
     }
   }
@@ -246,7 +345,9 @@ export interface CursorCollectedOutput {
   toolCalls: CursorToolCall[];
 }
 
-export async function collectCursorOutput(response: Response): Promise<CursorCollectedOutput> {
+export async function collectCursorOutput(
+  response: Response,
+): Promise<CursorCollectedOutput> {
   let text = "";
   let toolCalls: CursorToolCall[] = [];
   for await (const event of streamCursorText(response)) {
@@ -264,18 +365,37 @@ export async function collectCursorText(response: Response): Promise<string> {
   return (await collectCursorOutput(response)).text;
 }
 
-export async function exchangeCursorApiKey(env: Env, deps: Deps, apiKey: string): Promise<string> {
-  const response = await cursorInternalRaw(env, deps, apiKey, "/auth/exchange_user_api_key", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: "{}"
-  });
+export async function exchangeCursorApiKey(
+  env: Env,
+  deps: Deps,
+  apiKey: string,
+): Promise<string> {
+  const response = await cursorInternalRaw(
+    env,
+    deps,
+    apiKey,
+    "/auth/exchange_user_api_key",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    },
+  );
   const payload = (await response.json()) as CursorAccessTokenResponse;
-  if (!payload.accessToken) throw new HttpError("Cursor did not return an internal access token", 502, "cursor_bad_response");
+  if (!payload.accessToken)
+    throw new HttpError(
+      "Cursor did not return an internal access token",
+      502,
+      "cursor_bad_response",
+    );
   return payload.accessToken;
 }
 
-async function getCursorAccountIdentity(env: Env, deps: Deps, apiKey: string): Promise<string> {
+async function getCursorAccountIdentity(
+  env: Env,
+  deps: Deps,
+  apiKey: string,
+): Promise<string> {
   const apiKeyHash = await sha256Hex(apiKey);
   const now = deps.now().getTime();
   const cached = cursorIdentityCache.get(apiKeyHash);
@@ -289,7 +409,10 @@ async function getCursorAccountIdentity(env: Env, deps: Deps, apiKey: string): P
         ? `cursor-email:${me.userEmail.trim().toLowerCase()}`
         : `cursor-key:${apiKeyHash}`;
 
-  cursorIdentityCache.set(apiKeyHash, { identity, expiresAt: now + 60 * 60 * 1000 });
+  cursorIdentityCache.set(apiKeyHash, {
+    identity,
+    expiresAt: now + 60 * 60 * 1000,
+  });
   return identity;
 }
 
@@ -298,16 +421,16 @@ async function cursorPublicJson<T>(
   deps: Deps,
   apiKey: string,
   path: string,
-  init: { method?: string; body?: unknown; idempotencyKey?: string } = {}
+  init: { method?: string; body?: unknown; idempotencyKey?: string } = {},
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...(init.idempotencyKey ? { "Idempotency-Key": init.idempotencyKey } : {})
+    ...(init.idempotencyKey ? { "Idempotency-Key": init.idempotencyKey } : {}),
   };
   const response = await cursorPublicRaw(env, deps, apiKey, path, {
     method: init.method || "GET",
     headers,
-    body: init.body === undefined ? undefined : JSON.stringify(init.body)
+    body: init.body === undefined ? undefined : JSON.stringify(init.body),
   });
   return response.json() as Promise<T>;
 }
@@ -317,7 +440,7 @@ async function cursorPublicRaw(
   deps: Deps,
   apiKey: string,
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
 ): Promise<Response> {
   const base = env.CURSOR_API_BASE || "https://api.cursor.com";
   const url = `${base.replace(/\/$/, "")}${path}`;
@@ -332,9 +455,21 @@ async function cursorPublicRaw(
     const message =
       response.status === 401
         ? "Invalid Cursor API key"
-        : parseCursorError(text) || `Cursor API request failed with status ${response.status}`;
-    const status = response.status === 401 ? 401 : response.status === 429 ? 429 : response.status >= 500 ? 502 : 400;
-    throw new HttpError(message, status, response.status === 401 ? "cursor_unauthorized" : "cursor_api_error");
+        : parseCursorError(text) ||
+          `Cursor API request failed with status ${response.status}`;
+    const status =
+      response.status === 401
+        ? 401
+        : response.status === 429
+          ? 429
+          : response.status >= 500
+            ? 502
+            : 400;
+    throw new HttpError(
+      message,
+      status,
+      response.status === 401 ? "cursor_unauthorized" : "cursor_api_error",
+    );
   }
   return response;
 }
@@ -344,11 +479,18 @@ async function cursorInternalRaw(
   deps: Deps,
   token: string,
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
 ): Promise<Response> {
   const base = env.CURSOR_BACKEND_BASE_URL?.trim();
-  if (!base) throw new HttpError("Cursor backend URL is not configured", 500, "cursor_missing_backend_url");
-  const url = /^https?:\/\//.test(path) ? path : `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
+  if (!base)
+    throw new HttpError(
+      "Cursor backend URL is not configured",
+      500,
+      "cursor_missing_backend_url",
+    );
+  const url = /^https?:\/\//.test(path)
+    ? path
+    : `${base.replace(/\/$/, "")}${path.startsWith("/") ? path : `/${path}`}`;
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${token}`);
   const response = await deps.fetch(url, { ...init, headers });
@@ -363,15 +505,30 @@ async function cursorInternalRaw(
             ? "Cursor rejected the proxied chat request. The proxy request is valid, but Cursor refused this account/session."
             : `Cursor internal API request failed with status ${response.status}`);
     const status =
-      response.status === 401 ? 401 : response.status === 429 ? 429 : response.status >= 500 || response.status === 464 ? 502 : 400;
-    throw new HttpError(message, status, response.status === 401 ? "cursor_unauthorized" : "cursor_api_error");
+      response.status === 401
+        ? 401
+        : response.status === 429
+          ? 429
+          : response.status >= 500 || response.status === 464
+            ? 502
+            : 400;
+    throw new HttpError(
+      message,
+      status,
+      response.status === 401 ? "cursor_unauthorized" : "cursor_api_error",
+    );
   }
   return response;
 }
 
 function cursorChatEndpoint(env: Env): string {
   const endpoint = env.CURSOR_CHAT_ENDPOINT?.trim();
-  if (!endpoint) throw new HttpError("Cursor chat endpoint is not configured", 500, "cursor_missing_endpoint");
+  if (!endpoint)
+    throw new HttpError(
+      "Cursor chat endpoint is not configured",
+      500,
+      "cursor_missing_endpoint",
+    );
   return endpoint;
 }
 
@@ -388,7 +545,12 @@ function parseCursorError(text: string): string | undefined {
   return text || undefined;
 }
 
-async function cursorInternalHeaders(env: Env, accessToken: string, cursorIdentity: string, requestId: string): Promise<Record<string, string>> {
+async function cursorInternalHeaders(
+  env: Env,
+  accessToken: string,
+  cursorIdentity: string,
+  requestId: string,
+): Promise<Record<string, string>> {
   return {
     "Content-Type": "application/connect+proto",
     "Connect-Protocol-Version": "1",
@@ -402,12 +564,15 @@ async function cursorInternalHeaders(env: Env, accessToken: string, cursorIdenti
     "x-cursor-client-arch": "x64",
     "x-cursor-client-os-version": "unknown",
     "x-cursor-client-device-type": "desktop",
-    "x-cursor-config-version": await stableUuid("cursor-config", cursorIdentity),
+    "x-cursor-config-version": await stableUuid(
+      "cursor-config",
+      cursorIdentity,
+    ),
     "x-cursor-timezone": "UTC",
     "x-ghost-mode": "false",
     "x-new-onboarding-completed": "false",
     "x-request-id": requestId,
-    "x-session-id": await sessionId(accessToken)
+    "x-session-id": await sessionId(accessToken),
   };
 }
 
@@ -421,30 +586,45 @@ function encodeCursorChatRequest(input: {
 }): Uint8Array {
   const messageId = input.messageId;
   const composerMode = input.prompt.mode === "agent" ? "Agent" : "Ask";
-  const imageFields = (input.images ?? []).map((image) => protoField(10, 2, encodeImageProto(image)));
+  const imageFields = (input.images ?? []).map((image) =>
+    protoField(10, 2, encodeImageProto(image)),
+  );
   const userMessage = protoMessage([
     protoField(1, 2, input.prompt.text),
     protoField(2, 0, 1),
     ...imageFields,
     protoField(13, 2, messageId),
-    protoField(47, 0, 1)
+    protoField(47, 0, 1),
   ]);
-  const model = protoMessage([protoField(1, 2, input.model), protoField(4, 2, new Uint8Array(0))]);
+  const model = protoMessage([
+    protoField(1, 2, input.model),
+    protoField(4, 2, new Uint8Array(0)),
+  ]);
   const cursorSetting = protoMessage([
     protoField(1, 2, "cursor\\aisettings"),
     protoField(3, 2, new Uint8Array(0)),
-    protoField(6, 2, protoMessage([protoField(1, 2, new Uint8Array(0)), protoField(2, 2, new Uint8Array(0))])),
+    protoField(
+      6,
+      2,
+      protoMessage([
+        protoField(1, 2, new Uint8Array(0)),
+        protoField(2, 2, new Uint8Array(0)),
+      ]),
+    ),
     protoField(8, 0, 1),
-    protoField(9, 0, 1)
+    protoField(9, 0, 1),
   ]);
   const metadata = protoMessage([
     protoField(1, 2, "linux"),
     protoField(2, 2, "x64"),
     protoField(3, 2, "unknown"),
     protoField(4, 2, "composer-api"),
-    protoField(5, 2, new Date().toISOString())
+    protoField(5, 2, new Date().toISOString()),
   ]);
-  const messageIdRecord = protoMessage([protoField(1, 2, messageId), protoField(3, 0, 1)]);
+  const messageIdRecord = protoMessage([
+    protoField(1, 2, messageId),
+    protoField(3, 0, 1),
+  ]);
   const request = protoMessage([
     protoField(1, 2, userMessage),
     protoField(2, 0, 1),
@@ -467,28 +647,42 @@ function encodeCursorChatRequest(input: {
     protoField(49, 0, 0),
     protoField(51, 0, 0),
     protoField(53, 0, 1),
-    protoField(54, 2, composerMode)
+    protoField(54, 2, composerMode),
   ]);
   return protoMessage([protoField(1, 2, request)]);
 }
 
-async function resolveCursorImages(images: CursorImage[], deps: Deps): Promise<EncodedCursorImage[]> {
+async function resolveCursorImages(
+  images: CursorImage[],
+  deps: Deps,
+): Promise<EncodedCursorImage[]> {
   const encoded: EncodedCursorImage[] = [];
   for (const [index, image] of images.entries()) {
-    const data = "data" in image ? decodeBase64(image.data) : await fetchImageBytes(image.url, deps);
-    if (!data.length) throw new HttpError("Image input is empty.", 400, "invalid_request_error", "image");
+    const data =
+      "data" in image
+        ? decodeBase64(image.data)
+        : await fetchImageBytes(image.url, deps);
+    if (!data.length)
+      throw new HttpError(
+        "Image input is empty.",
+        400,
+        "invalid_request_error",
+        "image",
+      );
     if (data.length > MAX_CURSOR_IMAGE_BYTES) {
       throw new HttpError(
         "Image input is too large. Resize images to 1024px or less and keep each image under 1MB.",
         400,
         "invalid_request_error",
-        "image"
+        "image",
       );
     }
     encoded.push({
       data,
       uuid: image.uuid || stableImageId(index),
-      ...("dimension" in image && image.dimension ? { dimension: image.dimension } : {})
+      ...("dimension" in image && image.dimension
+        ? { dimension: image.dimension }
+        : {}),
     });
   }
   return encoded;
@@ -499,18 +693,38 @@ async function fetchImageBytes(url: string, deps: Deps): Promise<Uint8Array> {
   try {
     parsed = new URL(url);
   } catch {
-    throw new HttpError("Image URL is invalid.", 400, "invalid_request_error", "image_url");
+    throw new HttpError(
+      "Image URL is invalid.",
+      400,
+      "invalid_request_error",
+      "image_url",
+    );
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new HttpError("Image URL must use http or https.", 400, "invalid_request_error", "image_url");
+    throw new HttpError(
+      "Image URL must use http or https.",
+      400,
+      "invalid_request_error",
+      "image_url",
+    );
   }
   const response = await deps.fetch(parsed.toString(), { method: "GET" });
   if (!response.ok) {
-    throw new HttpError(`Could not fetch image URL (${response.status}).`, 400, "invalid_request_error", "image_url");
+    throw new HttpError(
+      `Could not fetch image URL (${response.status}).`,
+      400,
+      "invalid_request_error",
+      "image_url",
+    );
   }
   const contentType = response.headers.get("content-type") || "";
   if (contentType && !contentType.toLowerCase().startsWith("image/")) {
-    throw new HttpError("Image URL did not return an image content type.", 400, "invalid_request_error", "image_url");
+    throw new HttpError(
+      "Image URL did not return an image content type.",
+      400,
+      "invalid_request_error",
+      "image_url",
+    );
   }
   return new Uint8Array(await response.arrayBuffer());
 }
@@ -522,8 +736,11 @@ function encodeImageProto(image: EncodedCursorImage): Uint8Array {
       protoField(
         2,
         2,
-        protoMessage([protoField(1, 0, image.dimension.width), protoField(2, 0, image.dimension.height)])
-      )
+        protoMessage([
+          protoField(1, 0, image.dimension.width),
+          protoField(2, 0, image.dimension.height),
+        ]),
+      ),
     );
   }
   fields.push(protoField(3, 2, image.uuid));
@@ -538,12 +755,19 @@ function decodeBase64(value: string): Uint8Array {
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     return bytes;
   } catch {
-    throw new HttpError("Image data URL contains invalid base64 data.", 400, "invalid_request_error", "image_url");
+    throw new HttpError(
+      "Image data URL contains invalid base64 data.",
+      400,
+      "invalid_request_error",
+      "image_url",
+    );
   }
 }
 
 function stableImageId(index: number): string {
-  return typeof crypto.randomUUID === "function" ? crypto.randomUUID() : `image-${Date.now()}-${index}`;
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `image-${Date.now()}-${index}`;
 }
 
 function encodeConnectFrame(payload: Uint8Array): Uint8Array {
@@ -554,7 +778,9 @@ function encodeConnectFrame(payload: Uint8Array): Uint8Array {
   return frame;
 }
 
-async function* parseConnectProtoFrames(stream: ReadableStream<Uint8Array> | null): AsyncGenerator<Uint8Array> {
+async function* parseConnectProtoFrames(
+  stream: ReadableStream<Uint8Array> | null,
+): AsyncGenerator<Uint8Array> {
   if (!stream) return;
   const reader = stream.getReader();
   let buffer = new Uint8Array(0);
@@ -566,12 +792,20 @@ async function* parseConnectProtoFrames(stream: ReadableStream<Uint8Array> | nul
       for (;;) {
         if (buffer.length < 5) break;
         const flags = buffer[0];
-        const length = new DataView(buffer.buffer, buffer.byteOffset + 1, 4).getUint32(0, false);
+        const length = new DataView(
+          buffer.buffer,
+          buffer.byteOffset + 1,
+          4,
+        ).getUint32(0, false);
         if (buffer.length < 5 + length) break;
         const payload = buffer.slice(5, 5 + length);
         buffer = buffer.slice(5 + length);
         if ((flags & 1) === 1) {
-          throw new HttpError("Cursor returned a compressed Connect frame that this Worker cannot decode.", 502, "cursor_stream_error");
+          throw new HttpError(
+            "Cursor returned a compressed Connect frame that this Worker cannot decode.",
+            502,
+            "cursor_stream_error",
+          );
         }
         if ((flags & 2) === 2) {
           handleEndStreamFrame(payload);
@@ -592,7 +826,8 @@ function handleEndStreamFrame(payload: Uint8Array) {
   try {
     const parsed = JSON.parse(text) as unknown;
     if (isRecord(parsed) && isRecord(parsed.error)) {
-      const message = cursorStreamErrorMessage(parsed.error) || "Cursor stream failed";
+      const message =
+        cursorStreamErrorMessage(parsed.error) || "Cursor stream failed";
       throw new HttpError(message, 502, "cursor_stream_error");
     }
   } catch (error) {
@@ -600,7 +835,9 @@ function handleEndStreamFrame(payload: Uint8Array) {
   }
 }
 
-function decodeCursorChatFrame(payload: Uint8Array):
+function decodeCursorChatFrame(
+  payload: Uint8Array,
+):
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "tool_call"; toolCall?: CursorToolCall }
@@ -609,16 +846,39 @@ function decodeCursorChatFrame(payload: Uint8Array):
   try {
     for (const field of decodeProtobufFields(payload)) {
       if (field.no === 1) {
-        return { type: "tool_call", ...(field.value instanceof Uint8Array ? decodeBinaryToolCall(field.value) : {}) };
+        return {
+          type: "tool_call",
+          ...(field.value instanceof Uint8Array
+            ? decodeBinaryToolCall(field.value)
+            : {}),
+        };
       }
-      if (field.no !== 2 || field.wt !== 2 || !(field.value instanceof Uint8Array)) continue;
+      if (
+        field.no !== 2 ||
+        field.wt !== 2 ||
+        !(field.value instanceof Uint8Array)
+      )
+        continue;
       let text = "";
       let thinking = "";
       for (const inner of decodeProtobufFields(field.value)) {
-        if (inner.no === 1 && inner.wt === 2 && inner.value instanceof Uint8Array) text += decodeUtf8(inner.value);
-        if (inner.no === 25 && inner.wt === 2 && inner.value instanceof Uint8Array) {
+        if (
+          inner.no === 1 &&
+          inner.wt === 2 &&
+          inner.value instanceof Uint8Array
+        )
+          text += decodeUtf8(inner.value);
+        if (
+          inner.no === 25 &&
+          inner.wt === 2 &&
+          inner.value instanceof Uint8Array
+        ) {
           for (const thinkingField of decodeProtobufFields(inner.value)) {
-            if (thinkingField.no === 1 && thinkingField.wt === 2 && thinkingField.value instanceof Uint8Array) {
+            if (
+              thinkingField.no === 1 &&
+              thinkingField.wt === 2 &&
+              thinkingField.value instanceof Uint8Array
+            ) {
               thinking += decodeUtf8(thinkingField.value);
             }
           }
@@ -629,11 +889,19 @@ function decodeCursorChatFrame(payload: Uint8Array):
     }
     return { type: "ignore" };
   } catch (error) {
-    return { type: "error", message: error instanceof Error ? error.message : "Failed to decode Cursor stream" };
+    return {
+      type: "error",
+      message:
+        error instanceof Error
+          ? error.message
+          : "Failed to decode Cursor stream",
+    };
   }
 }
 
-function findComposerControlToken(value: string): { index: number; length: number } | null {
+function findComposerControlToken(
+  value: string,
+): { index: number; length: number } | null {
   let found: { index: number; length: number } | null = null;
   const pattern = new RegExp(COMPOSER_CONTROL_TOKEN_PATTERN);
   let match: RegExpExecArray | null;
@@ -652,16 +920,24 @@ function stripComposerControlTokens(value: string): string {
     .replace(/^\s+/, "");
 }
 
-type ComposerToolMarkerEvent = { type: "text"; text: string } | { type: "tool_call"; toolCall: CursorToolCall };
+type ComposerToolMarkerEvent =
+  | { type: "text"; text: string }
+  | { type: "tool_call"; toolCall: CursorToolCall };
 
 const TOOL_CALLS_BEGIN = "<|tool_calls_begin|>";
 const TOOL_CALLS_END = "<|tool_calls_end|>";
 const TOOL_CALL_BEGIN = "<|tool_call_begin|>";
 const TOOL_CALL_END = "<|tool_call_end|>";
 const TOOL_SEP = "<|tool_sep|>";
-const TOOL_MARKER_CANDIDATES = [TOOL_CALLS_BEGIN, TOOL_CALLS_END, TOOL_CALL_BEGIN, TOOL_CALL_END, TOOL_SEP].flatMap((marker) => [
+const TOOL_MARKER_CANDIDATES = [
+  TOOL_CALLS_BEGIN,
+  TOOL_CALLS_END,
+  TOOL_CALL_BEGIN,
+  TOOL_CALL_END,
+  TOOL_SEP,
+].flatMap((marker) => [
   marker,
-  marker.replaceAll("|", "｜").replaceAll("_", "▁")
+  marker.replaceAll("|", "｜").replaceAll("_", "▁"),
 ]);
 
 class ComposerToolCallFilter {
@@ -705,7 +981,10 @@ class ComposerToolCallFilter {
         continue;
       }
 
-      const end = findComposerToolMarker(this.buffer.slice(begin.length), "tool_calls_end");
+      const end = findComposerToolMarker(
+        this.buffer.slice(begin.length),
+        "tool_calls_end",
+      );
       if (!end) {
         if (force) {
           events.push({ type: "text", text: this.buffer });
@@ -782,7 +1061,13 @@ function parseJsonToolCallBody(value: string): CursorToolCall | null {
     const parsed = JSON.parse(value) as unknown;
     if (!isRecord(parsed)) return null;
     const fn = isRecord(parsed.function) ? parsed.function : undefined;
-    const name = firstString(parsed.name, parsed.tool, parsed.tool_name, parsed.toolName, fn?.name);
+    const name = firstString(
+      parsed.name,
+      parsed.tool,
+      parsed.tool_name,
+      parsed.toolName,
+      fn?.name,
+    );
     if (!name) return null;
     const rawArguments =
       parsed.arguments ??
@@ -804,7 +1089,9 @@ function firstString(...values: unknown[]): string | null {
   return null;
 }
 
-function recordFromToolArguments(value: unknown): Record<string, unknown> | null {
+function recordFromToolArguments(
+  value: unknown,
+): Record<string, unknown> | null {
   if (isRecord(value)) return value;
   if (typeof value !== "string" || !value.trim()) return null;
   try {
@@ -816,7 +1103,9 @@ function recordFromToolArguments(value: unknown): Record<string, unknown> | null
 }
 
 function parseInlineToolCall(value: string): CursorToolCall | null {
-  const match = /^([A-Za-z0-9_.-]+)\s*(?:\(([\s\S]*)\)|\[([\s\S]*)\])?$/.exec(value.trim());
+  const match = /^([A-Za-z0-9_.-]+)\s*(?:\(([\s\S]*)\)|\[([\s\S]*)\])?$/.exec(
+    value.trim(),
+  );
   if (!match) return null;
   const name = match[1].trim();
   const rawArgs = (match[2] ?? match[3] ?? "").trim();
@@ -866,7 +1155,10 @@ function parseComposerToolArgument(value: string): unknown {
   if (value === "false") return false;
   if (value === "null") return null;
   if (/^-?\d+(?:\.\d+)?$/.test(value)) return Number(value);
-  if ((value.startsWith("{") && value.endsWith("}")) || (value.startsWith("[") && value.endsWith("]"))) {
+  if (
+    (value.startsWith("{") && value.endsWith("}")) ||
+    (value.startsWith("[") && value.endsWith("]"))
+  ) {
     try {
       return JSON.parse(value) as unknown;
     } catch {
@@ -879,11 +1171,14 @@ function parseComposerToolArgument(value: string): unknown {
 function canonicalizeComposerToolMarkers(value: string): string {
   return value.replace(
     /<\s*[|｜]\s*(tool[_▁]calls[_▁]begin|tool[_▁]calls[_▁]end|tool[_▁]call[_▁]begin|tool[_▁]call[_▁]end|tool[_▁]sep)\s*[|｜]\s*>/g,
-    (_match, marker: string) => `<|${marker.replaceAll("▁", "_")}|>`
+    (_match, marker: string) => `<|${marker.replaceAll("▁", "_")}|>`,
   );
 }
 
-function findComposerToolMarker(value: string, marker: string): { index: number; length: number } | null {
+function findComposerToolMarker(
+  value: string,
+  marker: string,
+): { index: number; length: number } | null {
   const markerPattern = marker.replaceAll("_", "[_▁]");
   const pattern = new RegExp(`<\\s*[|｜]\\s*${markerPattern}\\s*[|｜]\\s*>`);
   const match = pattern.exec(value);
@@ -891,16 +1186,24 @@ function findComposerToolMarker(value: string, marker: string): { index: number;
 }
 
 function toolMarkerPrefixIndex(value: string): number {
-  const max = Math.min(value.length, Math.max(...TOOL_MARKER_CANDIDATES.map((candidate) => candidate.length)));
+  const max = Math.min(
+    value.length,
+    Math.max(...TOOL_MARKER_CANDIDATES.map((candidate) => candidate.length)),
+  );
   for (let length = max; length >= 1; length -= 1) {
     const index = value.length - length;
     const suffix = value.slice(index);
-    if (TOOL_MARKER_CANDIDATES.some((candidate) => candidate.startsWith(suffix))) return index;
+    if (
+      TOOL_MARKER_CANDIDATES.some((candidate) => candidate.startsWith(suffix))
+    )
+      return index;
   }
   return -1;
 }
 
-function decodeBinaryToolCall(_payload: Uint8Array): { toolCall: CursorToolCall } | Record<string, never> {
+function decodeBinaryToolCall(
+  _payload: Uint8Array,
+): { toolCall: CursorToolCall } | Record<string, never> {
   return {};
 }
 
@@ -914,7 +1217,9 @@ class ThinkingTextExtractor {
     const marker = this.findFinalMarker();
     if (!marker) return [];
     this.open = false;
-    const after = this.buffer.slice(marker.index + marker.length).replace(/^\s+/, "");
+    const after = this.buffer
+      .slice(marker.index + marker.length)
+      .replace(/^\s+/, "");
     this.buffer = "";
     return after ? [after] : [];
   }
@@ -923,7 +1228,9 @@ class ThinkingTextExtractor {
     if (!this.open) return "";
     const marker = this.findFinalMarker();
     if (marker) {
-      const after = this.buffer.slice(marker.index + marker.length).replace(/^\s+/, "");
+      const after = this.buffer
+        .slice(marker.index + marker.length)
+        .replace(/^\s+/, "");
       this.buffer = "";
       return after;
     }
@@ -943,7 +1250,9 @@ class ComposerOutputFilter {
     this.buffer += delta;
     const marker = findComposerControlToken(this.buffer);
     if (marker) {
-      const after = this.buffer.slice(marker.index + marker.length).replace(/^\s+/, "");
+      const after = this.buffer
+        .slice(marker.index + marker.length)
+        .replace(/^\s+/, "");
       this.buffer = "";
       return after ? [after] : [];
     }
@@ -968,10 +1277,14 @@ class ComposerOutputFilter {
 function controlTokenPrefixLength(value: string): number {
   const candidates = ["</think>", "<|final|>", "<｜final｜>", "< | final | >"];
   let keep = 0;
-  const max = Math.min(value.length, Math.max(...candidates.map((candidate) => candidate.length)));
+  const max = Math.min(
+    value.length,
+    Math.max(...candidates.map((candidate) => candidate.length)),
+  );
   for (let length = 1; length <= max; length += 1) {
     const suffix = value.slice(value.length - length);
-    if (candidates.some((candidate) => candidate.startsWith(suffix))) keep = length;
+    if (candidates.some((candidate) => candidate.startsWith(suffix)))
+      keep = length;
   }
   return keep;
 }
@@ -980,10 +1293,19 @@ function protoMessage(parts: Uint8Array[]): Uint8Array {
   return concatBytes(...parts);
 }
 
-function protoField(fieldNumber: number, wireType: 0 | 2, value: string | number | Uint8Array): Uint8Array {
+function protoField(
+  fieldNumber: number,
+  wireType: 0 | 2,
+  value: string | number | Uint8Array,
+): Uint8Array {
   const tag = encodeVarint((fieldNumber << 3) | wireType);
   if (wireType === 0) return concatBytes(tag, encodeVarint(value as number));
-  const bytes = typeof value === "string" ? new TextEncoder().encode(value) : value instanceof Uint8Array ? value : encodeVarint(value);
+  const bytes =
+    typeof value === "string"
+      ? new TextEncoder().encode(value)
+      : value instanceof Uint8Array
+        ? value
+        : encodeVarint(value);
   return concatBytes(tag, encodeVarint(bytes.length), bytes);
 }
 
@@ -1013,7 +1335,11 @@ function decodeProtobufFields(bytes: Uint8Array): ProtobufField[] {
     } else if (wt === 2) {
       const length = readVarint(bytes, offset);
       offset = length.offset;
-      fields.push({ no, wt, value: bytes.slice(offset, offset + length.value) });
+      fields.push({
+        no,
+        wt,
+        value: bytes.slice(offset, offset + length.value),
+      });
       offset += length.value;
     } else if (wt === 1) {
       offset += 8;
@@ -1026,7 +1352,10 @@ function decodeProtobufFields(bytes: Uint8Array): ProtobufField[] {
   return fields;
 }
 
-function readVarint(bytes: Uint8Array, offset: number): { value: number; offset: number } {
+function readVarint(
+  bytes: Uint8Array,
+  offset: number,
+): { value: number; offset: number } {
   let value = 0;
   let shift = 0;
   while (offset < bytes.length) {
@@ -1038,7 +1367,9 @@ function readVarint(bytes: Uint8Array, offset: number): { value: number; offset:
   throw new Error("Unexpected end of protobuf varint");
 }
 
-function concatBytes(...parts: Uint8Array<ArrayBufferLike>[]): Uint8Array<ArrayBuffer> {
+function concatBytes(
+  ...parts: Uint8Array<ArrayBufferLike>[]
+): Uint8Array<ArrayBuffer> {
   const total = parts.reduce((sum, part) => sum + part.length, 0);
   const output = new Uint8Array(total);
   let offset = 0;
@@ -1050,12 +1381,22 @@ function concatBytes(...parts: Uint8Array<ArrayBufferLike>[]): Uint8Array<ArrayB
 }
 
 async function sha256Hex(value: string): Promise<string> {
-  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(value),
+  );
+  return [...new Uint8Array(bytes)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
 }
 
-async function cursorChecksum(env: Env, cursorIdentity: string): Promise<string> {
-  const machineId = await sha256Hex(`${env.ENCRYPTION_KEY || "composer-api"}:cursor-machine:${cursorIdentity}`);
+async function cursorChecksum(
+  env: Env,
+  cursorIdentity: string,
+): Promise<string> {
+  const machineId = await sha256Hex(
+    `${env.ENCRYPTION_KEY || "composer-api"}:cursor-machine:${cursorIdentity}`,
+  );
   const timestamp = BigInt(Math.floor(Date.now() / 1_000_000));
   const bytes = new Uint8Array([
     Number((timestamp >> 40n) & 255n),
@@ -1063,7 +1404,7 @@ async function cursorChecksum(env: Env, cursorIdentity: string): Promise<string>
     Number((timestamp >> 24n) & 255n),
     Number((timestamp >> 16n) & 255n),
     Number((timestamp >> 8n) & 255n),
-    Number(timestamp & 255n)
+    Number(timestamp & 255n),
   ]);
   let t = 165;
   for (let i = 0; i < bytes.length; i += 1) {
@@ -1086,7 +1427,10 @@ async function sessionId(token: string): Promise<string> {
 function base64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
 }
 
 function decodeUtf8(bytes: Uint8Array): string {
@@ -1100,13 +1444,19 @@ function cursorStreamErrorMessage(error: unknown): string | undefined {
   return typeof error.message === "string" ? error.message : undefined;
 }
 
-function detailFromCursorError(error: Record<string, unknown>): string | undefined {
+function detailFromCursorError(
+  error: Record<string, unknown>,
+): string | undefined {
   const details = Array.isArray(error.details) ? error.details : [];
   for (const detail of details) {
     if (!isRecord(detail) || !isRecord(detail.debug)) continue;
-    const debugDetails = isRecord(detail.debug.details) ? detail.debug.details : undefined;
-    const title = typeof debugDetails?.title === "string" ? debugDetails.title : "";
-    const body = typeof debugDetails?.detail === "string" ? debugDetails.detail : "";
+    const debugDetails = isRecord(detail.debug.details)
+      ? detail.debug.details
+      : undefined;
+    const title =
+      typeof debugDetails?.title === "string" ? debugDetails.title : "";
+    const body =
+      typeof debugDetails?.detail === "string" ? debugDetails.detail : "";
     const message = [title, body].filter(Boolean).join(" ");
     if (message) return message;
   }

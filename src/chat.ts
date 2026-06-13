@@ -1,5 +1,8 @@
 import { escapeAttr, escapeHtml, highlightJson, icon } from "./ui";
-import { assistantDisplayContent, sanitizeAssistantContent } from "./chat-sanitize";
+import {
+  assistantDisplayContent,
+  sanitizeAssistantContent,
+} from "./chat-sanitize";
 import { renderMarkdown } from "./markdown";
 
 /* ============================================================ types */
@@ -40,25 +43,26 @@ interface PersistedState {
 }
 
 const MODELS = [
-  { id: "default", label: "Auto" },
-  { id: "composer-2.5", label: "composer-2.5" },
+  { id: "auto", label: "Auto" },
   { id: "composer-2.5-fast", label: "composer-2.5-fast" },
+  { id: "composer-2.5", label: "composer-2.5" },
   { id: "composer-2", label: "composer-2" },
   { id: "composer-latest", label: "composer-latest" },
-  { id: "gpt-5.3-codex", label: "gpt-5.3-codex" },
-  { id: "gpt-5.2-codex", label: "gpt-5.2-codex" },
-  { id: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
-  { id: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini" },
-  { id: "gpt-5.2", label: "gpt-5.2" },
-  { id: "gpt-5.1", label: "gpt-5.1" },
-  { id: "gpt-5-mini", label: "gpt-5-mini" },
+  { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
+  { id: "gemini-3-flash", label: "gemini-3-flash" },
   { id: "gemini-3.1-pro", label: "gemini-3.1-pro" },
   { id: "gemini-3.5-flash", label: "gemini-3.5-flash" },
-  { id: "gemini-3-flash", label: "gemini-3-flash" },
-  { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
-  { id: "grok-build-0.1", label: "grok-build-0.1" },
+  { id: "gpt-5-mini", label: "gpt-5-mini" },
+  { id: "gpt-5.1-codex-max", label: "gpt-5.1-codex-max" },
+  { id: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini" },
+  { id: "gpt-5.1", label: "gpt-5.1" },
+  { id: "gpt-5.2-codex", label: "gpt-5.2-codex" },
+  { id: "gpt-5.2", label: "gpt-5.2" },
+  { id: "gpt-5.3-codex", label: "gpt-5.3-codex" },
+  { id: "gpt-5.5", label: "gpt-5.5" },
   { id: "grok-4.3", label: "grok-4.3" },
-  { id: "kimi-k2.5", label: "kimi-k2.5" }
+  { id: "grok-build-0.1", label: "grok-build-0.1" },
+  { id: "kimi-k2.5", label: "kimi-k2.5" },
 ];
 
 const STATE_KEY = "cursor-chat.state.v1";
@@ -87,18 +91,20 @@ function loadState(): PersistedState {
     activeId: null,
     model: "composer-2.5",
     mode: "chat",
-    inspectorOpen: defaultInspectorOpen()
+    inspectorOpen: defaultInspectorOpen(),
   };
   try {
     const raw = localStorage.getItem(STATE_KEY);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<PersistedState>;
     return {
-      sessions: Array.isArray(parsed.sessions) ? (parsed.sessions as Session[]) : [],
+      sessions: Array.isArray(parsed.sessions)
+        ? (parsed.sessions as Session[])
+        : [],
       activeId: typeof parsed.activeId === "string" ? parsed.activeId : null,
       model: typeof parsed.model === "string" ? parsed.model : "composer-2.5",
       mode: parsed.mode === "responses" ? "responses" : "chat",
-      inspectorOpen: defaultInspectorOpen() && parsed.inspectorOpen !== false
+      inspectorOpen: defaultInspectorOpen() && parsed.inspectorOpen !== false,
     };
   } catch {
     return fallback;
@@ -122,7 +128,9 @@ function uid(prefix: string): string {
 }
 
 function activeSession(): Session | null {
-  return state.sessions.find((session) => session.id === state.activeId) ?? null;
+  return (
+    state.sessions.find((session) => session.id === state.activeId) ?? null
+  );
 }
 
 /* ============================================================ mount */
@@ -317,7 +325,8 @@ interface Refs {
 const refs = {} as Refs;
 
 function cacheRefs(root: HTMLElement): void {
-  const get = <T = HTMLElement>(id: string): T => root.querySelector(`#${id}`)! as unknown as T;
+  const get = <T = HTMLElement>(id: string): T =>
+    root.querySelector(`#${id}`)! as unknown as T;
   refs.app = root.querySelector<HTMLElement>(".chat-app")!;
   refs.sessionList = get("session-list");
   refs.transcript = get("transcript");
@@ -358,7 +367,9 @@ function bindEvents(): void {
     renderInspector();
   });
   refs.composer.addEventListener("paste", (event) => {
-    const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    const files = [...(event.clipboardData?.files ?? [])].filter((file) =>
+      file.type.startsWith("image/"),
+    );
     if (!files.length) return;
     event.preventDefault();
     void addImageFiles(files);
@@ -370,14 +381,22 @@ function bindEvents(): void {
     }
   });
   refs.form.addEventListener("dragover", (event) => {
-    if ([...(event.dataTransfer?.items ?? [])].some((item) => item.type.startsWith("image/"))) {
+    if (
+      [...(event.dataTransfer?.items ?? [])].some((item) =>
+        item.type.startsWith("image/"),
+      )
+    ) {
       event.preventDefault();
       refs.form.classList.add("is-dragging");
     }
   });
-  refs.form.addEventListener("dragleave", () => refs.form.classList.remove("is-dragging"));
+  refs.form.addEventListener("dragleave", () =>
+    refs.form.classList.remove("is-dragging"),
+  );
   refs.form.addEventListener("drop", (event) => {
-    const files = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+    const files = [...(event.dataTransfer?.files ?? [])].filter((file) =>
+      file.type.startsWith("image/"),
+    );
     if (!files.length) return;
     event.preventDefault();
     refs.form.classList.remove("is-dragging");
@@ -408,7 +427,9 @@ function bindEvents(): void {
   });
 
   refs.modeSwitch.addEventListener("click", (event) => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-mode]");
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>(
+      "[data-mode]",
+    );
     if (!button) return;
     state.mode = button.dataset.mode === "responses" ? "responses" : "chat";
     saveState();
@@ -427,7 +448,9 @@ function bindEvents(): void {
     refs.app.classList.toggle("sidebar-open");
   });
 
-  document.getElementById("chat-error-close")?.addEventListener("click", () => clearError());
+  document
+    .getElementById("chat-error-close")
+    ?.addEventListener("click", () => clearError());
 
   refs.keyButton.addEventListener("click", () => openKeyModal());
   refs.keyForm.addEventListener("submit", (event) => {
@@ -439,11 +462,18 @@ function bindEvents(): void {
 function bindResponsiveInspector(): void {
   if (responsiveInspectorBound) return;
   responsiveInspectorBound = true;
-  window.matchMedia(MOBILE_INSPECTOR_QUERY).addEventListener("change", () => syncResponsiveInspector());
+  window
+    .matchMedia(MOBILE_INSPECTOR_QUERY)
+    .addEventListener("change", () => syncResponsiveInspector());
 }
 
 function syncResponsiveInspector(): void {
-  if (inspectorTouched || !window.matchMedia(MOBILE_INSPECTOR_QUERY).matches || !state.inspectorOpen) return;
+  if (
+    inspectorTouched ||
+    !window.matchMedia(MOBILE_INSPECTOR_QUERY).matches ||
+    !state.inspectorOpen
+  )
+    return;
   state.inspectorOpen = false;
   refs.app.dataset.inspector = "closed";
   saveState();
@@ -453,13 +483,17 @@ function syncResponsiveInspector(): void {
 
 function syncControls(): void {
   refs.modelSelect.value = state.model;
-  for (const button of refs.modeSwitch.querySelectorAll<HTMLButtonElement>("[data-mode]")) {
+  for (const button of refs.modeSwitch.querySelectorAll<HTMLButtonElement>(
+    "[data-mode]",
+  )) {
     const active = button.dataset.mode === state.mode;
     button.classList.toggle("is-active", active);
     button.setAttribute("aria-selected", active ? "true" : "false");
   }
   refs.app.dataset.inspector = state.inspectorOpen ? "open" : "closed";
-  refs.keyStatusLabel.textContent = apiKey ? "Cursor key set" : "Set Cursor key";
+  refs.keyStatusLabel.textContent = apiKey
+    ? "Cursor key set"
+    : "Set Cursor key";
   refs.keyButton.classList.toggle("is-set", Boolean(apiKey));
 }
 
@@ -491,7 +525,9 @@ function renderSessions(): void {
     })
     .join("");
 
-  for (const button of refs.sessionList.querySelectorAll<HTMLButtonElement>("[data-action]")) {
+  for (const button of refs.sessionList.querySelectorAll<HTMLButtonElement>(
+    "[data-action]",
+  )) {
     button.addEventListener("click", () => {
       const id = button.dataset.id || "";
       const action = button.dataset.action;
@@ -555,13 +591,19 @@ function renderTranscript(streaming?: HTMLElement): void {
   }
   refs.transcript.innerHTML = "";
   for (const message of messages) {
-    refs.transcript.appendChild(messageNode(message.role, message.content, message.images));
+    refs.transcript.appendChild(
+      messageNode(message.role, message.content, message.images),
+    );
   }
   if (streaming) refs.transcript.appendChild(streaming);
   refs.transcript.scrollTop = refs.transcript.scrollHeight;
 }
 
-function messageNode(role: Role, content: string, images: ChatImage[] = []): HTMLElement {
+function messageNode(
+  role: Role,
+  content: string,
+  images: ChatImage[] = [],
+): HTMLElement {
   const node = document.createElement("article");
   node.className = `chat-msg chat-msg-${role}`;
   node.innerHTML = `
@@ -586,7 +628,11 @@ function renderUserContent(content: string, images: ChatImage[]): string {
 
 function userImageHtml(image: ChatImage): string {
   const src = image.dataUrl.startsWith("data:image/") ? image.dataUrl : "";
-  const style = imagePreviewStyle(image, CHAT_IMAGE_MAX_WIDTH, CHAT_IMAGE_MAX_HEIGHT);
+  const style = imagePreviewStyle(
+    image,
+    CHAT_IMAGE_MAX_WIDTH,
+    CHAT_IMAGE_MAX_HEIGHT,
+  );
   return `
     <figure class="chat-image" style="${style}">
       <span class="chat-image-frame">
@@ -604,22 +650,30 @@ function renderAssistantContent(content: string): string {
 
 /* ============================================================ request preview */
 
-function buildRequestBody(draft?: string, images: ChatImage[] = []): Record<string, unknown> {
+function buildRequestBody(
+  draft?: string,
+  images: ChatImage[] = [],
+): Record<string, unknown> {
   const session = activeSession();
   const history = sanitizeHistory(session?.messages ?? []);
-  if (draft || images.length) history.push({ role: "user", content: draft || "", ...(images.length ? { images } : {}) });
+  if (draft || images.length)
+    history.push({
+      role: "user",
+      content: draft || "",
+      ...(images.length ? { images } : {}),
+    });
 
   if (state.mode === "responses") {
     return {
       model: state.model,
       input: history.map(responseMessageForApi),
-      stream: true
+      stream: true,
     };
   }
   return {
     model: state.model,
     messages: history.map(chatMessageForApi),
-    stream: true
+    stream: true,
   };
 }
 
@@ -635,8 +689,8 @@ function chatMessageForApi(message: ChatMessage): Record<string, unknown> {
         url: image.dataUrl,
         detail: "auto",
         width: image.width,
-        height: image.height
-      }
+        height: image.height,
+      },
     });
   }
   return { role: message.role, content };
@@ -646,7 +700,8 @@ function responseMessageForApi(message: ChatMessage): Record<string, unknown> {
   const images = message.images ?? [];
   if (!images.length) return { role: message.role, content: message.content };
   const content: Array<Record<string, unknown>> = [];
-  if (message.content) content.push({ type: "input_text", text: message.content });
+  if (message.content)
+    content.push({ type: "input_text", text: message.content });
   for (const image of images) {
     content.push({
       type: "input_image",
@@ -654,22 +709,28 @@ function responseMessageForApi(message: ChatMessage): Record<string, unknown> {
         url: image.dataUrl,
         detail: "auto",
         width: image.width,
-        height: image.height
-      }
+        height: image.height,
+      },
     });
   }
   return { role: message.role, content };
 }
 
 function endpointFor(mode: ApiMode): string {
-  const origin = LOCAL_DEV_HOSTS.has(window.location.hostname) ? LOCAL_DEV_API_ORIGIN : "";
-  return mode === "responses" ? `${origin}/v1/responses` : `${origin}/v1/chat/completions`;
+  const origin = LOCAL_DEV_HOSTS.has(window.location.hostname)
+    ? LOCAL_DEV_API_ORIGIN
+    : "";
+  return mode === "responses"
+    ? `${origin}/v1/responses`
+    : `${origin}/v1/chat/completions`;
 }
 
 function renderInspector(): void {
   const draft = refs.composer.value.trim();
   const body = buildRequestBody(draft || undefined, pendingImages);
-  refs.requestJson.innerHTML = highlightJson(JSON.stringify(redactPreviewImages(body), null, 2));
+  refs.requestJson.innerHTML = highlightJson(
+    JSON.stringify(redactPreviewImages(body), null, 2),
+  );
   refs.inspectorRoute.textContent = `POST ${endpointFor(state.mode)}`;
   refs.inspectorNote.textContent =
     state.mode === "responses"
@@ -684,7 +745,12 @@ function redactPreviewImages(value: unknown): unknown {
   }
   if (Array.isArray(value)) return value.map(redactPreviewImages);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactPreviewImages(item)]));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        redactPreviewImages(item),
+      ]),
+    );
   }
   return value;
 }
@@ -696,7 +762,11 @@ function sanitizeHistory(history: ChatMessage[]): ChatMessage[] {
   for (const message of history) {
     if (message.role !== "assistant") {
       const images = sanitizeImages(message.images);
-      cleaned.push({ role: message.role, content: message.content, ...(images.length ? { images } : {}) });
+      cleaned.push({
+        role: message.role,
+        content: message.content,
+        ...(images.length ? { images } : {}),
+      });
       continue;
     }
     const content = sanitizeAssistantContent(message.content);
@@ -734,7 +804,8 @@ function cleanStoredSessions(): void {
       cleaned.some(
         (message, index) =>
           message.content !== session.messages[index]?.content ||
-          (message.images?.length ?? 0) !== (session.messages[index]?.images?.length ?? 0)
+          (message.images?.length ?? 0) !==
+            (session.messages[index]?.images?.length ?? 0),
       )
     ) {
       session.messages = cleaned;
@@ -752,7 +823,7 @@ function ensureSession(firstPrompt: string): Session {
       title: firstPrompt.slice(0, 48).trim() || "New chat",
       messages: [],
       createdAt: Date.now(),
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
     };
     state.sessions.push(session);
     state.activeId = session.id;
@@ -772,9 +843,15 @@ async function send(): Promise<void> {
 
   clearError();
   const session = ensureSession(prompt || images[0]?.name || "Image");
-  session.messages.push({ role: "user", content: prompt, ...(images.length ? { images } : {}) });
+  session.messages.push({
+    role: "user",
+    content: prompt,
+    ...(images.length ? { images } : {}),
+  });
   session.updatedAt = Date.now();
-  if (session.messages.length === 1) session.title = (prompt || images[0]?.name || "Image").slice(0, 48).trim() || "New chat";
+  if (session.messages.length === 1)
+    session.title =
+      (prompt || images[0]?.name || "Image").slice(0, 48).trim() || "New chat";
   saveState();
 
   refs.composer.value = "";
@@ -798,8 +875,12 @@ async function send(): Promise<void> {
   try {
     try {
       const response = await sendRequest(mode, requestBody);
-      if (!response.body) throw new Error("Request failed before the stream started.");
-      const stream = mode === "responses" ? readResponseDeltas(response.body) : readChatDeltas(response.body);
+      if (!response.body)
+        throw new Error("Request failed before the stream started.");
+      const stream =
+        mode === "responses"
+          ? readResponseDeltas(response.body)
+          : readChatDeltas(response.body);
       for await (const delta of stream) {
         received += delta;
         bubble.innerHTML = renderAssistantContent(received);
@@ -831,41 +912,58 @@ async function send(): Promise<void> {
   }
 }
 
-async function sendRequest(mode: ApiMode, body: Record<string, unknown>): Promise<Response> {
+async function sendRequest(
+  mode: ApiMode,
+  body: Record<string, unknown>,
+): Promise<Response> {
   const response = await fetch(endpointFor(mode), {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
   if (!response.ok) throw await responseError(response);
   return response;
 }
 
-async function sendBufferedRetry(mode: ApiMode, body: Record<string, unknown>): Promise<string> {
+async function sendBufferedRetry(
+  mode: ApiMode,
+  body: Record<string, unknown>,
+): Promise<string> {
   const response = await sendRequest(mode, { ...body, stream: false });
   const payload = (await response.json()) as Record<string, unknown>;
-  const text = mode === "responses" ? bufferedResponseText(payload) : bufferedChatText(payload);
+  const text =
+    mode === "responses"
+      ? bufferedResponseText(payload)
+      : bufferedChatText(payload);
   if (!text) throw new Error("The retry completed without text.");
   return text;
 }
 
 async function responseError(response: Response): Promise<Error> {
-  const payload = (await response.json().catch(() => ({}))) as { error?: { message?: string } };
-  return new Error(payload.error?.message || `Request failed (${response.status}).`);
+  const payload = (await response.json().catch(() => ({}))) as {
+    error?: { message?: string };
+  };
+  return new Error(
+    payload.error?.message || `Request failed (${response.status}).`,
+  );
 }
 
 function isStreamLoadFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /load failed|networkerror|failed to fetch|network request failed/i.test(error.message);
+  return /load failed|networkerror|failed to fetch|network request failed/i.test(
+    error.message,
+  );
 }
 
 function bufferedChatText(payload: Record<string, unknown>): string {
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
   const first = choices[0] as { message?: { content?: unknown } } | undefined;
-  return typeof first?.message?.content === "string" ? first.message.content : "";
+  return typeof first?.message?.content === "string"
+    ? first.message.content
+    : "";
 }
 
 function bufferedResponseText(payload: Record<string, unknown>): string {
@@ -923,7 +1021,9 @@ async function addImageFiles(files: File[]): Promise<void> {
     renderPendingImages();
     renderInspector();
   } catch (error) {
-    showError(error instanceof Error ? error.message : "Could not process that image.");
+    showError(
+      error instanceof Error ? error.message : "Could not process that image.",
+    );
   }
   if (imageFiles.length > selected.length) {
     showError(`Only ${MAX_ATTACHMENTS} images can be attached at once.`);
@@ -943,12 +1043,16 @@ function renderPendingImages(): void {
         <button type="button" aria-label="Remove ${escapeAttr(image.name)}" data-remove-image="${escapeAttr(image.id)}">
           ${icon("X", { width: 13, height: 13 })}
         </button>
-      </figure>`
+      </figure>`,
     )
     .join("");
-  for (const button of refs.attachmentTray.querySelectorAll<HTMLButtonElement>("[data-remove-image]")) {
+  for (const button of refs.attachmentTray.querySelectorAll<HTMLButtonElement>(
+    "[data-remove-image]",
+  )) {
     button.addEventListener("click", () => {
-      pendingImages = pendingImages.filter((image) => image.id !== button.dataset.removeImage);
+      pendingImages = pendingImages.filter(
+        (image) => image.id !== button.dataset.removeImage,
+      );
       renderPendingImages();
       renderInspector();
       refs.composer.focus();
@@ -956,7 +1060,11 @@ function renderPendingImages(): void {
   }
 }
 
-function imagePreviewStyle(image: ChatImage, maxWidth: number, maxHeight: number): string {
+function imagePreviewStyle(
+  image: ChatImage,
+  maxWidth: number,
+  maxHeight: number,
+): string {
   const width = Math.max(1, image.width);
   const height = Math.max(1, image.height);
   const scale = Math.min(1, maxWidth / width, maxHeight / height);
@@ -968,7 +1076,10 @@ function imagePreviewStyle(image: ChatImage, maxWidth: number, maxHeight: number
 async function resizeImageFile(file: File): Promise<ChatImage> {
   const { image, dispose } = await loadImage(file);
   try {
-    let scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight));
+    let scale = Math.min(
+      1,
+      IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight),
+    );
     let width = Math.max(1, Math.round(image.naturalWidth * scale));
     let height = Math.max(1, Math.round(image.naturalHeight * scale));
     let quality = 0.86;
@@ -985,7 +1096,9 @@ async function resizeImageFile(file: File): Promise<ChatImage> {
       blob = await drawImageToBlob(image, width, height, quality);
     }
     if (blob.size > 1024 * 1024) {
-      throw new Error("That image is still over 1MB after resizing. Try a smaller image.");
+      throw new Error(
+        "That image is still over 1MB after resizing. Try a smaller image.",
+      );
     }
 
     return {
@@ -995,18 +1108,21 @@ async function resizeImageFile(file: File): Promise<ChatImage> {
       mimeType: blob.type || IMAGE_OUTPUT_TYPE,
       width,
       height,
-      size: blob.size
+      size: blob.size,
     };
   } finally {
     dispose();
   }
 }
 
-async function loadImage(file: File): Promise<{ image: HTMLImageElement; dispose: () => void }> {
+async function loadImage(
+  file: File,
+): Promise<{ image: HTMLImageElement; dispose: () => void }> {
   const url = URL.createObjectURL(file);
   const image = new Image();
   image.src = url;
-  const decode = (image as HTMLImageElement & { decode?: () => Promise<void> }).decode;
+  const decode = (image as HTMLImageElement & { decode?: () => Promise<void> })
+    .decode;
   if (typeof decode === "function") await decode.call(image);
   else {
     await new Promise<void>((resolve, reject) => {
@@ -1017,7 +1133,12 @@ async function loadImage(file: File): Promise<{ image: HTMLImageElement; dispose
   return { image, dispose: () => URL.revokeObjectURL(url) };
 }
 
-async function drawImageToBlob(image: HTMLImageElement, width: number, height: number, quality: number): Promise<Blob> {
+async function drawImageToBlob(
+  image: HTMLImageElement,
+  width: number,
+  height: number,
+  quality: number,
+): Promise<Blob> {
   const canvas = document.createElement("canvas");
   canvas.width = width;
   canvas.height = height;
@@ -1027,7 +1148,14 @@ async function drawImageToBlob(image: HTMLImageElement, width: number, height: n
   context.fillRect(0, 0, width, height);
   context.drawImage(image, 0, 0, width, height);
   return new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("Could not encode that image."))), IMAGE_OUTPUT_TYPE, quality);
+    canvas.toBlob(
+      (blob) =>
+        blob
+          ? resolve(blob)
+          : reject(new Error("Could not encode that image.")),
+      IMAGE_OUTPUT_TYPE,
+      quality,
+    );
   });
 }
 
@@ -1035,7 +1163,8 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(new Error("Could not read the resized image."));
+    reader.onerror = () =>
+      reject(new Error("Could not read the resized image."));
     reader.readAsDataURL(blob);
   });
 }
@@ -1053,7 +1182,9 @@ interface SseFrame {
   data: string;
 }
 
-async function* readSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<SseFrame> {
+async function* readSseFrames(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<SseFrame> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -1064,7 +1195,8 @@ async function* readSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<
     for (const line of raw.split(/\r?\n/)) {
       if (line.startsWith(":")) continue;
       if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+      else if (line.startsWith("data:"))
+        data.push(line.slice(5).replace(/^ /, ""));
     }
     if (!event && !data.length) return null;
     return { event, data: data.join("\n") };
@@ -1074,7 +1206,8 @@ async function* readSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<
     const lf = text.indexOf("\n\n");
     const crlf = text.indexOf("\r\n\r\n");
     if (lf === -1 && crlf === -1) return { index: -1, length: 0 };
-    if (crlf === -1 || (lf !== -1 && lf < crlf)) return { index: lf, length: 2 };
+    if (crlf === -1 || (lf !== -1 && lf < crlf))
+      return { index: lf, length: 2 };
     return { index: crlf, length: 4 };
   };
 
@@ -1102,7 +1235,10 @@ async function* readSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<
 function errorFromData(data: string, fallback: string): Error {
   if (!data) return new Error(fallback);
   try {
-    const parsed = JSON.parse(data) as { error?: { message?: string }; message?: string };
+    const parsed = JSON.parse(data) as {
+      error?: { message?: string };
+      message?: string;
+    };
     return new Error(parsed.error?.message || parsed.message || data);
   } catch {
     return new Error(data);
@@ -1110,30 +1246,42 @@ function errorFromData(data: string, fallback: string): Error {
 }
 
 /** Chat Completions SSE: `chat.completion.chunk` data frames. */
-async function* readChatDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* readChatDeltas(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
   for await (const frame of readSseFrames(body)) {
-    if (frame.event === "error") throw errorFromData(frame.data, "Cursor stream reported an error.");
+    if (frame.event === "error")
+      throw errorFromData(frame.data, "Cursor stream reported an error.");
     const data = frame.data.trim();
     if (!data || data === "[DONE]") {
       if (data === "[DONE]") return;
       continue;
     }
-    let chunk: { choices?: Array<{ delta?: { content?: string } }>; error?: { message?: string } };
+    let chunk: {
+      choices?: Array<{ delta?: { content?: string } }>;
+      error?: { message?: string };
+    };
     try {
       chunk = JSON.parse(data);
     } catch {
       continue;
     }
-    if (chunk.error) throw new Error(chunk.error.message || "Cursor stream reported an error.");
+    if (chunk.error)
+      throw new Error(
+        chunk.error.message || "Cursor stream reported an error.",
+      );
     const content = chunk.choices?.[0]?.delta?.content;
     if (content) yield content;
   }
 }
 
 /** Responses API SSE: `response.output_text.delta` / `response.completed` / `error`. */
-async function* readResponseDeltas(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* readResponseDeltas(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string> {
   for await (const frame of readSseFrames(body)) {
-    if (frame.event === "error") throw errorFromData(frame.data, "Cursor stream reported an error.");
+    if (frame.event === "error")
+      throw errorFromData(frame.data, "Cursor stream reported an error.");
     const data = frame.data.trim();
     if (!data) continue;
     let payload: {
@@ -1149,17 +1297,25 @@ async function* readResponseDeltas(body: ReadableStream<Uint8Array>): AsyncGener
     }
     const type = payload.type || frame.event;
     if (type === "error" || payload.error) {
-      throw new Error(payload.error?.message || "Cursor stream reported an error.");
+      throw new Error(
+        payload.error?.message || "Cursor stream reported an error.",
+      );
     }
-    if (type === "response.output_text.delta" && typeof payload.delta === "string") {
+    if (
+      type === "response.output_text.delta" &&
+      typeof payload.delta === "string"
+    ) {
       yield payload.delta;
     }
     if (type === "response.completed") {
-      if (payload.response?.error) throw new Error(payload.response.error.message || "Response failed.");
+      if (payload.response?.error)
+        throw new Error(payload.response.error.message || "Response failed.");
       return;
     }
     if (type === "response.failed" || type === "response.incomplete") {
-      throw new Error(payload.response?.error?.message || "Response did not complete.");
+      throw new Error(
+        payload.response?.error?.message || "Response did not complete.",
+      );
     }
   }
 }

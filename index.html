@@ -5,8 +5,16 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/src/styles.css" />
-    <meta name="theme-color" content="#f5f3ef" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0b0b0f" media="(prefers-color-scheme: dark)" />
+    <meta
+      name="theme-color"
+      content="#f5f3ef"
+      media="(prefers-color-scheme: light)"
+    />
+    <meta
+      name="theme-color"
+      content="#0b0b0f"
+      media="(prefers-color-scheme: dark)"
+    />
 
     <title>API for Cursor</title>
     <meta
@@ -20,7 +28,10 @@
       property="og:description"
       content="Download the local macOS app for Cursor Composer models, OpenCode, Codex, and OpenAI-compatible clients."
     />
-    <meta property="og:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
+    <meta
+      property="og:image"
+      content="https://api-for-composer.standardagents.ai/og-image.png"
+    />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
 
@@ -30,7 +41,10 @@
       name="twitter:description"
       content="A local macOS app that gives OpenCode, Codex, and OpenAI-compatible clients a local API for Cursor Composer."
     />
-    <meta name="twitter:image" content="https://api-for-composer.standardagents.ai/og-image.png" />
+    <meta
+      name="twitter:image"
+      content="https://api-for-composer.standardagents.ai/og-image.png"
+    />
     <meta name="twitter:image:alt" content="API for Cursor" />
   </head>
   <body>
@@ -45,7 +59,13 @@
       <header class="site-header">
         <div class="header-bar glass">
           <a class="brand" href="/" aria-label="API for Cursor">
-            <img class="brand-icon" src="/api-for-cursor-icon.png" alt="" width="36" height="36" />
+            <img
+              class="brand-icon"
+              src="/api-for-cursor-icon.png"
+              alt=""
+              width="36"
+              height="36"
+            />
             <span class="brand-text">API for Cursor</span>
           </a>
           <nav class="header-nav" aria-label="Primary navigation">
@@ -61,14 +81,24 @@
       </header>
 
       <section class="hero" aria-labelledby="hero-title">
-        <button type="button" class="notice-chip glass" data-endpoint-modal-open>
+        <button
+          type="button"
+          class="notice-chip glass"
+          data-endpoint-modal-open
+        >
           <span class="notice-dot" aria-hidden="true"></span>
           <span>Where did the hosted API endpoints go?</span>
           <i data-lucide="arrow-right" data-size="14"></i>
         </button>
 
         <div class="hero-icon-wrap" aria-hidden="true">
-          <img class="hero-icon" src="/api-for-cursor-icon.png" alt="" width="120" height="120" />
+          <img
+            class="hero-icon"
+            src="/api-for-cursor-icon.png"
+            alt=""
+            width="120"
+            height="120"
+          />
         </div>
 
         <h1 id="hero-title">
@@ -77,8 +107,9 @@
         </h1>
 
         <p class="hero-copy">
-          Run a small local server that makes Cursor Composer models available to OpenCode,
-          Codex, VS&nbsp;Code extensions, and any OpenAI-compatible client.
+          Run a small local server that makes Cursor Composer models available
+          to OpenCode, Codex, VS&nbsp;Code extensions, and any OpenAI-compatible
+          client.
         </p>
 
         <div class="hero-actions">
@@ -89,7 +120,11 @@
               <small>DMG installer, macOS 14+</small>
             </span>
           </a>
-          <button class="btn btn-glass btn-lg" type="button" data-copy="http://127.0.0.1:8787/v1">
+          <button
+            class="btn btn-glass btn-lg"
+            type="button"
+            data-copy="http://127.0.0.1:8787/v1"
+          >
             <span class="btn-stack">
               <strong class="copy-label">Copy local base URL</strong>
               <small><code>http://127.0.0.1:8787/v1</code></small>
@@ -109,7 +144,12 @@
             </div>
             <div class="app-body">
               <div class="app-head">
-                <img src="/api-for-cursor-icon.png" alt="" width="56" height="56" />
+                <img
+                  src="/api-for-cursor-icon.png"
+                  alt=""
+                  width="56"
+                  height="56"
+                />
                 <div class="app-head-text">
                   <h3>Local server</h3>
                   <p><code>http://127.0.0.1:8787/v1</code></p>
@@ -137,12 +177,21 @@
 
               <div class="agent-list">
                 <div class="agent-chip">
-                  <span class="agent-id"><img src="/standard-agents-mark-white.svg" alt="" /> OpenCode</span>
-                  <span class="agent-state"><i data-lucide="check" data-size="14"></i> Configured</span>
+                  <span class="agent-id"
+                    ><img src="/standard-agents-mark-white.svg" alt="" />
+                    OpenCode</span
+                  >
+                  <span class="agent-state"
+                    ><i data-lucide="check" data-size="14"></i> Configured</span
+                  >
                 </div>
                 <div class="agent-chip">
-                  <span class="agent-id"><img src="/openai-logo.svg" alt="" /> Codex</span>
-                  <span class="agent-state"><i data-lucide="check" data-size="14"></i> Configured</span>
+                  <span class="agent-id"
+                    ><img src="/openai-logo.svg" alt="" /> Codex</span
+                  >
+                  <span class="agent-state"
+                    ><i data-lucide="check" data-size="14"></i> Configured</span
+                  >
                 </div>
               </div>
             </div>
@@ -152,19 +201,34 @@
 
       <section id="features" class="features" aria-label="Why a local API">
         <article class="feature-card glass" data-reveal>
-          <span class="feature-icon feature-icon--blue"><i data-lucide="monitor-dot" data-size="22"></i></span>
+          <span class="feature-icon feature-icon--blue"
+            ><i data-lucide="monitor-dot" data-size="22"></i
+          ></span>
           <h2>Local first</h2>
-          <p>The server runs on your Mac, so agent tools keep working against your real project files instead of a hosted sandbox.</p>
+          <p>
+            The server runs on your Mac, so agent tools keep working against
+            your real project files instead of a hosted sandbox.
+          </p>
         </article>
         <article class="feature-card glass" data-reveal>
-          <span class="feature-icon feature-icon--green"><i data-lucide="server" data-size="22"></i></span>
+          <span class="feature-icon feature-icon--green"
+            ><i data-lucide="server" data-size="22"></i
+          ></span>
           <h2>OpenAI-compatible</h2>
-          <p>Chat Completions, Responses, and Models endpoints are exposed at a standard local <code>/v1</code> base URL.</p>
+          <p>
+            Chat Completions, Responses, and Models endpoints are exposed at a
+            standard local <code>/v1</code> base URL.
+          </p>
         </article>
         <article class="feature-card glass" data-reveal>
-          <span class="feature-icon feature-icon--purple"><i data-lucide="refresh-cw" data-size="22"></i></span>
+          <span class="feature-icon feature-icon--purple"
+            ><i data-lucide="refresh-cw" data-size="22"></i
+          ></span>
           <h2>Auto-updating</h2>
-          <p>Sparkle update feeds let signed releases roll forward without asking you to reinstall manually.</p>
+          <p>
+            Sparkle update feeds let signed releases roll forward without asking
+            you to reinstall manually.
+          </p>
         </article>
       </section>
 
@@ -173,19 +237,27 @@
           <p class="kicker">Works where agents already run</p>
           <h2 id="setup-title">One local app. First-class agent setup.</h2>
           <p class="section-sub">
-            Paste your Cursor key, start the local API, then point any OpenAI-compatible
-            client at <code>127.0.0.1</code>. No proxy hops, no hosted sandbox.
+            Paste your Cursor key, start the local API, then point any
+            OpenAI-compatible client at <code>127.0.0.1</code>. No proxy hops,
+            no hosted sandbox.
           </p>
         </div>
 
         <div class="setup-grid">
           <article class="showcase-card glass showcase-card--wide" data-reveal>
             <div class="showcase-media">
-              <img src="/opencode-composer-2-5.webp" alt="OpenCode selecting Composer 2.5 through API for Cursor" loading="lazy" />
+              <img
+                src="/opencode-composer-2-5.webp"
+                alt="OpenCode selecting Composer 2.5 through API for Cursor"
+                loading="lazy"
+              />
             </div>
             <div class="showcase-text">
               <h3>OpenCode sees Composer models</h3>
-              <p>OpenCode keeps its local filesystem and shell loop while the model route runs through the local API with one-click setup.</p>
+              <p>
+                OpenCode keeps its local filesystem and shell loop while the
+                model route runs through the local API with one-click setup.
+              </p>
             </div>
           </article>
 
@@ -198,36 +270,57 @@
               </div>
               <div class="codex-option codex-option--selected">
                 <span>composer-2.5</span>
-                <strong><i data-lucide="check" data-size="13"></i> Ready</strong>
+                <strong
+                  ><i data-lucide="check" data-size="13"></i> Ready</strong
+                >
               </div>
               <div class="codex-option">
                 <span>composer-2.5-fast</span>
-                <strong class="codex-tag"><i data-lucide="zap" data-size="13"></i> Fast</strong>
+                <strong class="codex-tag"
+                  ><i data-lucide="zap" data-size="13"></i> Fast</strong
+                >
               </div>
               <pre><code><span class="c-sec">[model_providers.cursor-composer]</span>
 <span class="c-key">base_url</span> = <span class="c-str">"http://127.0.0.1:8787/v1"</span></code></pre>
             </div>
             <div class="showcase-text">
               <h3>Codex-compatible provider</h3>
-              <p>Use the same OpenAI-compatible base URL in Codex and any tool that supports custom providers.</p>
+              <p>
+                Use the same OpenAI-compatible base URL in Codex and any tool
+                that supports custom providers.
+              </p>
             </div>
           </article>
         </div>
       </section>
 
-      <section id="release" class="release-section" aria-labelledby="release-title">
+      <section
+        id="release"
+        class="release-section"
+        aria-labelledby="release-title"
+      >
         <div class="release-card glass" data-reveal>
           <div class="release-text">
             <p class="kicker">Production release path</p>
-            <h2 id="release-title">Signed installs, notarized, auto-updating.</h2>
+            <h2 id="release-title">
+              Signed installs, notarized, auto-updating.
+            </h2>
             <p>
-              Releases are built by GitHub Actions, packaged as a DMG, notarized by Apple,
-              published to Cloudflare R2, and announced to the app through a Sparkle appcast.
+              Releases are built by GitHub Actions, packaged as a DMG, notarized
+              by Apple, published to Cloudflare R2, and announced to the app
+              through a Sparkle appcast.
             </p>
             <ul class="release-points">
-              <li><i data-lucide="lock" data-size="15"></i> Notarized &amp; signed</li>
-              <li><i data-lucide="refresh-cw" data-size="15"></i> Background updates</li>
-              <li><i data-lucide="terminal" data-size="15"></i> macOS 14 Sonoma+</li>
+              <li>
+                <i data-lucide="lock" data-size="15"></i> Notarized &amp; signed
+              </li>
+              <li>
+                <i data-lucide="refresh-cw" data-size="15"></i> Background
+                updates
+              </li>
+              <li>
+                <i data-lucide="terminal" data-size="15"></i> macOS 14 Sonoma+
+              </li>
             </ul>
           </div>
           <a class="btn btn-primary btn-lg release-cta" href="/download">
@@ -243,10 +336,18 @@
       <footer class="site-footer">
         <div class="footer-inner glass">
           <a class="brand" href="/" aria-label="API for Cursor">
-            <img class="brand-icon" src="/api-for-cursor-icon.png" alt="" width="30" height="30" />
+            <img
+              class="brand-icon"
+              src="/api-for-cursor-icon.png"
+              alt=""
+              width="30"
+              height="30"
+            />
             <span class="brand-text">API for Cursor</span>
           </a>
-          <p class="footer-copy">A local macOS bridge for Cursor Composer models.</p>
+          <p class="footer-copy">
+            A local macOS bridge for Cursor Composer models.
+          </p>
           <div class="footer-links">
             <a href="#features">Features</a>
             <a href="#setup">Setup</a>
@@ -259,21 +360,34 @@
     <div id="chat-root" hidden></div>
 
     <div class="modal-backdrop" data-endpoint-modal hidden>
-      <section class="modal glass" role="dialog" aria-modal="true" aria-labelledby="endpoint-modal-title">
-        <button class="modal-close" type="button" data-endpoint-modal-close aria-label="Close">
+      <section
+        class="modal glass"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="endpoint-modal-title"
+      >
+        <button
+          class="modal-close"
+          type="button"
+          data-endpoint-modal-close
+          aria-label="Close"
+        >
           <i data-lucide="x" data-size="18"></i>
         </button>
         <p class="kicker">Endpoint update</p>
-        <h2 id="endpoint-modal-title">The hosted API is moving out of the request path.</h2>
+        <h2 id="endpoint-modal-title">
+          The hosted API is moving out of the request path.
+        </h2>
         <p>
-          Cursor asked us to take down the hosted API endpoint. We are keeping the current routes
-          online temporarily while this local app is verified, but the production path is now the
-          local macOS app.
+          Cursor asked us to take down the hosted API endpoint. We are keeping
+          the current routes online temporarily while this local app is
+          verified, but the production path is now the local macOS app.
         </p>
         <p>
-          The local app is the better long-term experience: your API key stays on your machine,
-          agent tools run against your real project folders, and OpenCode or Codex can connect to
-          a normal OpenAI-compatible localhost URL.
+          The local app is the better long-term experience: your API key stays
+          on your machine, agent tools run against your real project folders,
+          and OpenCode or Codex can connect to a normal OpenAI-compatible
+          localhost URL.
         </p>
         <a class="btn btn-primary btn-lg" href="/download">
           <i data-lucide="download" data-size="20"></i>

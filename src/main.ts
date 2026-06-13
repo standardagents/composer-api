@@ -1,6 +1,7 @@
 import { hydrateIcons, wireCopyButtons } from "./ui";
 
-const isChatRoute = (): boolean => window.location.pathname.replace(/\/+$/, "") === "/chat";
+const isChatRoute = (): boolean =>
+  window.location.pathname.replace(/\/+$/, "") === "/chat";
 
 async function route(): Promise<void> {
   const landing = document.getElementById("landing");
@@ -23,7 +24,14 @@ async function route(): Promise<void> {
 }
 
 document.addEventListener("click", (event) => {
-  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey
+  )
+    return;
   const anchor = (event.target as HTMLElement | null)?.closest("a");
   if (!anchor) return;
   const href = anchor.getAttribute("href") || "";
@@ -66,7 +74,9 @@ function bindScrollReveal(): void {
   const targets = document.querySelectorAll<HTMLElement>("[data-reveal]");
   if (!targets.length) return;
 
-  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const reduceMotion = window.matchMedia(
+    "(prefers-reduced-motion: reduce)",
+  ).matches;
   if (reduceMotion || typeof IntersectionObserver === "undefined") {
     for (const el of targets) el.classList.add("is-visible");
     return;
@@ -81,7 +91,7 @@ function bindScrollReveal(): void {
         }
       }
     },
-    { rootMargin: "0px 0px -10% 0px", threshold: 0.1 }
+    { rootMargin: "0px 0px -10% 0px", threshold: 0.1 },
   );
 
   for (const el of targets) observer.observe(el);
@@ -89,8 +99,12 @@ function bindScrollReveal(): void {
 
 function bindEndpointModal(): void {
   const modal = document.querySelector<HTMLElement>("[data-endpoint-modal]");
-  const openButtons = document.querySelectorAll<HTMLButtonElement>("[data-endpoint-modal-open]");
-  const closeButtons = document.querySelectorAll<HTMLButtonElement>("[data-endpoint-modal-close]");
+  const openButtons = document.querySelectorAll<HTMLButtonElement>(
+    "[data-endpoint-modal-open]",
+  );
+  const closeButtons = document.querySelectorAll<HTMLButtonElement>(
+    "[data-endpoint-modal-close]",
+  );
   if (!modal) return;
 
   const setOpen = (open: boolean): void => {

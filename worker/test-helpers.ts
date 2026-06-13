@@ -14,7 +14,10 @@ export class FakeD1 {
 class FakeStatement {
   private values: unknown[] = [];
 
-  constructor(private readonly db: FakeD1, private readonly sql: string) {}
+  constructor(
+    private readonly db: FakeD1,
+    private readonly sql: string,
+  ) {}
 
   bind(...values: unknown[]) {
     this.values = values;
@@ -24,7 +27,18 @@ class FakeStatement {
   async run() {
     const normalized = this.sql.replace(/\s+/g, " ").trim();
     if (normalized.startsWith("INSERT INTO accounts")) {
-      const [id, cursorUserId, cursorEmail, cursorName, ciphertext, iv, hint, waitlist, createdAt, updatedAt] = this.values;
+      const [
+        id,
+        cursorUserId,
+        cursorEmail,
+        cursorName,
+        ciphertext,
+        iv,
+        hint,
+        waitlist,
+        createdAt,
+        updatedAt,
+      ] = this.values;
       const existing = this.db.accounts.get(String(id));
       this.db.accounts.set(String(id), {
         id: String(id),
@@ -36,7 +50,7 @@ class FakeStatement {
         cursor_api_key_hint: nullable(hint),
         waitlist_opt_in: Number(waitlist),
         created_at: existing?.created_at || String(createdAt),
-        updated_at: String(updatedAt)
+        updated_at: String(updatedAt),
       });
     } else if (normalized.startsWith("INSERT INTO api_keys")) {
       const [id, accountId, prefix, keyHash, name, createdAt] = this.values;
@@ -48,15 +62,27 @@ class FakeStatement {
         name: String(name),
         created_at: String(createdAt),
         last_used_at: null,
-        revoked_at: null
+        revoked_at: null,
       });
     } else if (normalized.startsWith("UPDATE api_keys SET last_used_at")) {
       const [lastUsedAt, id] = this.values;
       const row = this.db.apiKeys.get(String(id));
       if (row) row.last_used_at = String(lastUsedAt);
     } else if (normalized.startsWith("INSERT INTO request_logs")) {
-      const [id, accountId, endpoint, model, cursorAgentId, cursorRunId, status, promptChars, completionChars, error, createdAt, completedAt] =
-        this.values;
+      const [
+        id,
+        accountId,
+        endpoint,
+        model,
+        cursorAgentId,
+        cursorRunId,
+        status,
+        promptChars,
+        completionChars,
+        error,
+        createdAt,
+        completedAt,
+      ] = this.values;
       this.db.requestLogs.set(String(id), {
         id,
         account_id: accountId,
@@ -69,10 +95,18 @@ class FakeStatement {
         completion_chars: completionChars,
         error,
         created_at: createdAt,
-        completed_at: completedAt
+        completed_at: completedAt,
       });
     } else if (normalized.startsWith("UPDATE request_logs")) {
-      const [status, completionChars, cursorAgentId, cursorRunId, error, completedAt, id] = this.values;
+      const [
+        status,
+        completionChars,
+        cursorAgentId,
+        cursorRunId,
+        error,
+        completedAt,
+        id,
+      ] = this.values;
       const row = this.db.requestLogs.get(String(id));
       if (row) {
         row.status = status;
@@ -83,7 +117,8 @@ class FakeStatement {
         row.completed_at = completedAt;
       }
     } else if (normalized.startsWith("INSERT INTO sdk_sessions")) {
-      const [id, ownerHash, sessionHash, agentId, createdAt, updatedAt] = this.values;
+      const [id, ownerHash, sessionHash, agentId, createdAt, updatedAt] =
+        this.values;
       const existing = this.db.sdkSessions.get(String(id));
       this.db.sdkSessions.set(String(id), {
         id,
@@ -91,7 +126,7 @@ class FakeStatement {
         session_hash: sessionHash,
         agent_id: agentId,
         created_at: existing?.created_at || createdAt,
-        updated_at: updatedAt
+        updated_at: updatedAt,
       });
     } else if (normalized.startsWith("DELETE FROM sdk_sessions")) {
       const [id] = this.values;
@@ -104,13 +139,17 @@ class FakeStatement {
     const normalized = this.sql.replace(/\s+/g, " ").trim();
     if (normalized.startsWith("SELECT * FROM api_keys WHERE key_hash")) {
       const [keyHash] = this.values;
-      return ([...this.db.apiKeys.values()].find((row) => row.key_hash === keyHash && !row.revoked_at) || null) as T | null;
+      return ([...this.db.apiKeys.values()].find(
+        (row) => row.key_hash === keyHash && !row.revoked_at,
+      ) || null) as T | null;
     }
     if (normalized.startsWith("SELECT * FROM accounts WHERE id")) {
       const [id] = this.values;
       return (this.db.accounts.get(String(id)) || null) as T | null;
     }
-    if (normalized.startsWith("SELECT agent_id, updated_at FROM sdk_sessions")) {
+    if (
+      normalized.startsWith("SELECT agent_id, updated_at FROM sdk_sessions")
+    ) {
       const [id] = this.values;
       return (this.db.sdkSessions.get(String(id)) || null) as T | null;
     }
@@ -130,6 +169,6 @@ export function fakeCtx(): ExecutionContext {
     passThroughOnException() {
       return undefined;
     },
-    props: {}
+    props: {},
   } as ExecutionContext;
 }

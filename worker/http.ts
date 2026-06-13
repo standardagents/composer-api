@@ -1,12 +1,13 @@
 const JSON_HEADERS = {
-  "content-type": "application/json; charset=utf-8"
+  "content-type": "application/json; charset=utf-8",
 };
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
-  "access-control-allow-headers": "authorization,content-type,x-api-key,idempotency-key,x-session-affinity,x-opencode-session-id,x-opencode-session",
-  "access-control-max-age": "86400"
+  "access-control-allow-headers":
+    "authorization,content-type,x-api-key,idempotency-key,x-session-affinity,x-opencode-session-id,x-opencode-session",
+  "access-control-max-age": "86400",
 };
 
 export function withCors(response: Response): Response {
@@ -17,14 +18,14 @@ export function withCors(response: Response): Response {
   return new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
-    headers
+    headers,
   });
 }
 
 export function optionsResponse(): Response {
   return new Response(null, {
     status: 204,
-    headers: CORS_HEADERS
+    headers: CORS_HEADERS,
   });
 }
 
@@ -34,23 +35,28 @@ export function json(data: unknown, init: ResponseInit = {}): Response {
       ...init,
       headers: {
         ...JSON_HEADERS,
-        ...init.headers
-      }
-    })
+        ...init.headers,
+      },
+    }),
   );
 }
 
-export function openAiError(message: string, status = 400, code = "invalid_request_error", param?: string): Response {
+export function openAiError(
+  message: string,
+  status = 400,
+  code = "invalid_request_error",
+  param?: string,
+): Response {
   return json(
     {
       error: {
         message,
         type: code,
         param: param ?? null,
-        code
-      }
+        code,
+      },
     },
-    { status }
+    { status },
   );
 }
 
@@ -83,7 +89,12 @@ export class HttpError extends Error {
   readonly code: string;
   readonly param?: string;
 
-  constructor(message: string, status = 400, code = "invalid_request_error", param?: string) {
+  constructor(
+    message: string,
+    status = 400,
+    code = "invalid_request_error",
+    param?: string,
+  ) {
     super(message);
     this.name = "HttpError";
     this.status = status;
@@ -107,8 +118,8 @@ export function sseResponse(readable: ReadableStream<Uint8Array>): Response {
         "content-type": "text/event-stream; charset=utf-8",
         "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
-        "x-accel-buffering": "no"
-      }
-    })
+        "x-accel-buffering": "no",
+      },
+    }),
   );
 }

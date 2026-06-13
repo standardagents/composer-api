@@ -6,7 +6,7 @@ export class CursorSdkBridgeContainer extends Container {
   pingEndpoint = "localhost/health";
   envVars = {
     CURSOR_SDK_BRIDGE_HOST: "0.0.0.0",
-    CURSOR_SDK_BRIDGE_PORT: "8792"
+    CURSOR_SDK_BRIDGE_PORT: "8792",
   };
   enableInternet = true;
 }

@@ -1,18 +1,43 @@
-import { accountIdForCursor, apiKeyPrefix, decryptText, encryptText, randomToken, sha256Hex } from "./crypto";
-import type { AccountRow, ApiKeyRow, AuthenticatedAccount, CursorMe, Env } from "./types";
+import {
+  accountIdForCursor,
+  apiKeyPrefix,
+  decryptText,
+  encryptText,
+  randomToken,
+  sha256Hex,
+} from "./crypto";
+import type {
+  AccountRow,
+  ApiKeyRow,
+  AuthenticatedAccount,
+  CursorMe,
+  Env,
+} from "./types";
 
 export interface SignupRecord {
   account: AccountRow;
   proxyApiKey: string;
 }
 
-export async function saveSignup(env: Env, cursorApiKey: string, me: CursorMe, input: { joinWaitlist: boolean }): Promise<SignupRecord> {
+export async function saveSignup(
+  env: Env,
+  cursorApiKey: string,
+  me: CursorMe,
+  input: { joinWaitlist: boolean },
+): Promise<SignupRecord> {
   const secret = requireEncryptionSecret(env);
   const now = new Date().toISOString();
   const cursorUserId = me.userId === undefined ? null : String(me.userId);
   const cursorEmail = me.userEmail || null;
-  const cursorName = [me.userFirstName, me.userLastName].filter(Boolean).join(" ").trim() || me.apiKeyName || null;
-  const accountId = await accountIdForCursor(cursorUserId, cursorEmail, await sha256Hex(cursorApiKey));
+  const cursorName =
+    [me.userFirstName, me.userLastName].filter(Boolean).join(" ").trim() ||
+    me.apiKeyName ||
+    null;
+  const accountId = await accountIdForCursor(
+    cursorUserId,
+    cursorEmail,
+    await sha256Hex(cursorApiKey),
+  );
   const encrypted = await encryptText(cursorApiKey, secret);
   const hint = cursorApiKey.slice(-4);
   const account: AccountRow = {
@@ -25,7 +50,7 @@ export async function saveSignup(env: Env, cursorApiKey: string, me: CursorMe, i
     cursor_api_key_hint: hint,
     waitlist_opt_in: input.joinWaitlist ? 1 : 0,
     created_at: now,
-    updated_at: now
+    updated_at: now,
   };
 
   await env.DB.prepare(
@@ -41,7 +66,7 @@ export async function saveSignup(env: Env, cursorApiKey: string, me: CursorMe, i
       cursor_api_key_iv = excluded.cursor_api_key_iv,
       cursor_api_key_hint = excluded.cursor_api_key_hint,
       waitlist_opt_in = excluded.waitlist_opt_in,
-      updated_at = excluded.updated_at`
+      updated_at = excluded.updated_at`,
   )
     .bind(
       account.id,
@@ -53,7 +78,7 @@ export async function saveSignup(env: Env, cursorApiKey: string, me: CursorMe, i
       account.cursor_api_key_hint,
       account.waitlist_opt_in,
       account.created_at,
-      account.updated_at
+      account.updated_at,
     )
     .run();
 
@@ -61,24 +86,36 @@ export async function saveSignup(env: Env, cursorApiKey: string, me: CursorMe, i
   const keyHash = await sha256Hex(proxyApiKey);
   await env.DB.prepare(
     `INSERT INTO api_keys (id, account_id, prefix, key_hash, name, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?)`,
   )
-    .bind(`key_${crypto.randomUUID()}`, account.id, apiKeyPrefix(proxyApiKey), keyHash, "default", now)
+    .bind(
+      `key_${crypto.randomUUID()}`,
+      account.id,
+      apiKeyPrefix(proxyApiKey),
+      keyHash,
+      "default",
+      now,
+    )
     .run();
 
   return { account, proxyApiKey };
 }
 
-export async function authenticateProxyKey(env: Env, proxyApiKey: string): Promise<AuthenticatedAccount | null> {
+export async function authenticateProxyKey(
+  env: Env,
+  proxyApiKey: string,
+): Promise<AuthenticatedAccount | null> {
   const keyHash = await sha256Hex(proxyApiKey);
   const apiKey = await env.DB.prepare(
-    `SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1`
+    `SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1`,
   )
     .bind(keyHash)
     .first<ApiKeyRow>();
   if (!apiKey) return null;
 
-  const account = await env.DB.prepare(`SELECT * FROM accounts WHERE id = ? LIMIT 1`)
+  const account = await env.DB.prepare(
+    `SELECT * FROM accounts WHERE id = ? LIMIT 1`,
+  )
     .bind(apiKey.account_id)
     .first<AccountRow>();
   if (!account) return null;
@@ -86,7 +123,7 @@ export async function authenticateProxyKey(env: Env, proxyApiKey: string): Promi
   const cursorApiKey = await decryptText(
     account.cursor_api_key_ciphertext,
     account.cursor_api_key_iv,
-    requireEncryptionSecret(env)
+    requireEncryptionSecret(env),
   );
   await env.DB.prepare(`UPDATE api_keys SET last_used_at = ? WHERE id = ?`)
     .bind(new Date().toISOString(), apiKey.id)
@@ -108,14 +145,14 @@ export async function createRequestLog(
     cursorRunId?: string;
     error?: string;
     completedAt?: string;
-  }
+  },
 ): Promise<string> {
   const id = `req_${crypto.randomUUID()}`;
   await env.DB.prepare(
     `INSERT INTO request_logs (
       id, account_id, endpoint, model, cursor_agent_id, cursor_run_id, status,
       prompt_chars, completion_chars, error, created_at, completed_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -129,7 +166,7 @@ export async function createRequestLog(
       input.completionChars ?? 0,
       input.error ?? null,
       new Date().toISOString(),
-      input.completedAt ?? null
+      input.completedAt ?? null,
     )
     .run();
   return id;
@@ -138,13 +175,19 @@ export async function createRequestLog(
 export async function completeRequestLog(
   env: Env,
   id: string,
-  input: { status: string; completionChars?: number; cursorAgentId?: string; cursorRunId?: string; error?: string }
+  input: {
+    status: string;
+    completionChars?: number;
+    cursorAgentId?: string;
+    cursorRunId?: string;
+    error?: string;
+  },
 ): Promise<void> {
   await env.DB.prepare(
     `UPDATE request_logs
      SET status = ?, completion_chars = ?, cursor_agent_id = COALESCE(?, cursor_agent_id),
          cursor_run_id = COALESCE(?, cursor_run_id), error = ?, completed_at = ?
-     WHERE id = ?`
+     WHERE id = ?`,
   )
     .bind(
       input.status,
@@ -153,14 +196,16 @@ export async function completeRequestLog(
       input.cursorRunId ?? null,
       input.error ?? null,
       new Date().toISOString(),
-      id
+      id,
     )
     .run();
 }
 
 function requireEncryptionSecret(env: Env): string {
   if (!env.ENCRYPTION_KEY || env.ENCRYPTION_KEY.trim().length < 16) {
-    throw new Error("ENCRYPTION_KEY must be configured before storing Cursor API keys");
+    throw new Error(
+      "ENCRYPTION_KEY must be configured before storing Cursor API keys",
+    );
   }
   return env.ENCRYPTION_KEY;
 }

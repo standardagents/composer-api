@@ -1,6 +1,13 @@
+import { cursorModelRecordsFromResponse, listCursorModels } from "./cursor";
 import { HttpError } from "./http";
 import { encodeSse } from "./sse";
-import type { CursorImage, CursorPrompt, CursorToolCall } from "./types";
+import type {
+  CursorImage,
+  CursorPrompt,
+  CursorToolCall,
+  Deps,
+  Env,
+} from "./types";
 
 export type ApiKind = "chat" | "responses";
 
@@ -60,23 +67,52 @@ interface SdkToolCallMemory {
 const sdkToolCallMemory = new Map<string, SdkToolCallMemory>();
 const SDK_TOOL_CALL_MEMORY_LIMIT = 2048;
 
-const CURSOR_COMPOSER_2_5_PRICING_SOURCE = "https://cursor.com/changelog/composer-2-5";
+const CURSOR_COMPOSER_2_5_PRICING_SOURCE =
+  "https://cursor.com/changelog/composer-2-5";
 const CURSOR_MODEL_PRICING: Record<string, CursorModelPricing> = {
-  default: { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
+  default: {
+    input: 0.5,
+    output: 2.5,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
   auto: { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-latest": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2.5": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2.5-sdk": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2-5": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2.5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2-5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE }
+  "composer-latest": {
+    input: 0.5,
+    output: 2.5,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
+  "composer-2.5": {
+    input: 0.5,
+    output: 2.5,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
+  "composer-2.5-sdk": {
+    input: 0.5,
+    output: 2.5,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
+  "composer-2-5": {
+    input: 0.5,
+    output: 2.5,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
+  "composer-2.5-fast": {
+    input: 3,
+    output: 15,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
+  "composer-2-5-fast": {
+    input: 3,
+    output: 15,
+    source: CURSOR_COMPOSER_2_5_PRICING_SOURCE,
+  },
 };
 
 const SYSTEM_DIRECTIVE = [
   "You are serving an OpenAI-compatible API request through Cursor Composer.",
   "Answer the user directly in chat style.",
   "Do not modify files, run terminal commands, open pull requests, or use coding-agent workflow unless the user explicitly asks for code as text.",
-  "Return only the final answer content."
+  "Return only the final answer content.",
 ].join("\n");
 
 const TOOL_SYSTEM_DIRECTIVE = [
@@ -86,14 +122,14 @@ const TOOL_SYSTEM_DIRECTIVE = [
   "Answer directly only when no tool is needed.",
   "When a provided tool is needed, call it using Cursor Composer's tool-call marker protocol and do not describe the marker as prose.",
   "Do not emit duplicate tool calls. Call each required operation once, then continue after the client returns the tool result.",
-  "Never claim that tools are unavailable. Never tell the user to switch modes."
+  "Never claim that tools are unavailable. Never tell the user to switch modes.",
 ].join("\n");
 
 const AGENT_SYSTEM_DIRECTIVE = [
   "You are serving an OpenAI-compatible API request through Cursor Composer.",
   "This request is already in Agent mode.",
   "Answer directly when no tool is needed.",
-  "Never tell the user to switch modes."
+  "Never tell the user to switch modes.",
 ].join("\n");
 
 const RESPONSES_TOOL_SYSTEM_DIRECTIVE = [
@@ -104,52 +140,99 @@ const RESPONSES_TOOL_SYSTEM_DIRECTIVE = [
   "For general file creation when no specific client tool is requested, prefer SDK shell when a shell client tool is available; otherwise request write calls with both path and fileText.",
   "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a function_call and received a function_call_output confirming it.",
   "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
-  "Do not say that agent mode or tools are unavailable."
+  "Do not say that agent mode or tools are unavailable.",
 ].join("\n");
 
 const AGENT_MODE_PRIMER = [
   "USER: Please switch to agent mode.",
   'ASSISTANT TOOL_CALLS: [{"id":"call_proxy_switch_mode","type":"function","function":{"name":"switch_mode","arguments":"{\\"mode\\":\\"agent\\"}"}}]',
   "TOOL RESULT (name=switch_mode tool_call_id=call_proxy_switch_mode): Switched to agent mode successfully.",
-  "ASSISTANT: Great, I've switched to agent mode."
+  "ASSISTANT: Great, I've switched to agent mode.",
 ];
 
-export function prepareChatRequest(body: unknown, cursorModel: { id: string } | undefined, options: { forceAgentMode?: boolean } = {}): PreparedRequest {
+export function prepareChatRequest(
+  body: unknown,
+  cursorModel: { id: string } | undefined,
+  options: { forceAgentMode?: boolean } = {},
+): PreparedRequest {
   const record = expectRecord(body, "body");
   const messages = expectArray(record.messages, "messages");
   validateCommonUnsupported(record);
   if (record.functions !== undefined) {
-    throw new HttpError("Legacy function calling is not supported by this adapter.", 400, "unsupported_parameter", "functions");
+    throw new HttpError(
+      "Legacy function calling is not supported by this adapter.",
+      400,
+      "unsupported_parameter",
+      "functions",
+    );
   }
 
-  const tools = record.tool_choice === "none" ? [] : parseChatTools(record.tools);
+  const tools =
+    record.tool_choice === "none" ? [] : parseChatTools(record.tools);
   const toolContext = toolCallContextFromMessages(messages);
   const agentMode = options.forceAgentMode === true || tools.length > 0;
-  const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
+  const model =
+    typeof record.model === "string" && record.model.trim()
+      ? record.model.trim()
+      : "composer-2.5";
   const latestUserText = latestUserTextFromMessages(messages);
-  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasRequiredLocalToolCall(messages, tools, latestUserText);
-  const transcript: string[] = [tools.length ? TOOL_SYSTEM_DIRECTIVE : agentMode ? AGENT_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
-  appendChatTools(transcript, tools, record.tool_choice);
-  appendWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone);
+  const workspaceMutationRequired = shouldRequireLocalTool(
+    latestUserText,
+    tools,
+  );
+  const workspaceMutationDone =
+    workspaceMutationRequired &&
+    hasRequiredLocalToolCall(messages, tools, latestUserText);
+  const transcript: string[] = [
+    tools.length
+      ? TOOL_SYSTEM_DIRECTIVE
+      : agentMode
+        ? AGENT_SYSTEM_DIRECTIVE
+        : SYSTEM_DIRECTIVE,
+  ];
+  if (shouldPreferSdkToolInventory(model)) {
+    appendSdkToolInventory(transcript, tools, record.tool_choice, toolContext);
+  } else {
+    appendChatTools(transcript, tools, record.tool_choice);
+  }
+  appendWorkspaceMutationRequirement(
+    transcript,
+    workspaceMutationRequired,
+    workspaceMutationDone,
+  );
   transcript.push("", "Conversation:");
   if (agentMode) transcript.push(...AGENT_MODE_PRIMER);
   const images: CursorImage[] = [];
   for (const message of messages) {
     const item = expectRecord(message, "messages[]");
     const role = typeof item.role === "string" ? item.role : "user";
-    const { text, images: messageImages } = contentToTextAndImages(item.content, role);
+    const { text, images: messageImages } = contentToTextAndImages(
+      item.content,
+      role,
+    );
     images.push(...messageImages);
     if (role === "tool") {
-      const toolCallId = typeof item.tool_call_id === "string" ? item.tool_call_id : "";
+      const toolCallId =
+        typeof item.tool_call_id === "string" ? item.tool_call_id : "";
       const toolName = typeof item.name === "string" ? item.name : "";
-      const label = [toolName ? `name=${toolName}` : "", toolCallId ? `tool_call_id=${toolCallId}` : ""].filter(Boolean).join(" ");
-      transcript.push(`TOOL RESULT${label ? ` (${label})` : ""}: ${text || "[empty]"}`);
+      const label = [
+        toolName ? `name=${toolName}` : "",
+        toolCallId ? `tool_call_id=${toolCallId}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      transcript.push(
+        `TOOL RESULT${label ? ` (${label})` : ""}: ${text || "[empty]"}`,
+      );
     } else {
-      transcript.push(`${role.toUpperCase()}: ${workspaceMutationRequired && role === "user" ? addWorkspaceActionToUserText(text) : text || "[empty]"}`);
+      transcript.push(
+        `${role.toUpperCase()}: ${workspaceMutationRequired && role === "user" ? addWorkspaceActionToUserText(text) : text || "[empty]"}`,
+      );
     }
     if (Array.isArray(item.tool_calls)) {
-      transcript.push(`${role.toUpperCase()} TOOL_CALLS: ${JSON.stringify(item.tool_calls)}`);
+      transcript.push(
+        `${role.toUpperCase()} TOOL_CALLS: ${JSON.stringify(item.tool_calls)}`,
+      );
     }
   }
   appendChatOptions(transcript, record);
@@ -157,35 +240,56 @@ export function prepareChatRequest(body: unknown, cursorModel: { id: string } | 
   return {
     model,
     cursorModel,
-    prompt: { text, mode: agentMode ? "agent" : "ask", ...(images.length ? { images } : {}) },
+    prompt: {
+      text,
+      mode: agentMode ? "agent" : "ask",
+      ...(images.length ? { images } : {}),
+    },
     stream: record.stream === true,
     includeUsage: includeStreamUsage(record),
     promptChars: text.length,
     responseMetadata: {
       temperature: numberOrNull(record.temperature),
-      top_p: numberOrNull(record.top_p)
+      top_p: numberOrNull(record.top_p),
     },
     tools,
     requiresLocalTool: false,
     storeResponse: false,
-    toolContext
+    toolContext,
   };
 }
 
-export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: string } | undefined): PreparedRequest {
+export function prepareOpencodeSdkChatRequest(
+  body: unknown,
+  cursorModel: { id: string } | undefined,
+): PreparedRequest {
   const record = expectRecord(body, "body");
   const messages = expectArray(record.messages, "messages");
   validateCommonUnsupported(record);
   if (record.functions !== undefined) {
-    throw new HttpError("Legacy function calling is not supported by this adapter.", 400, "unsupported_parameter", "functions");
+    throw new HttpError(
+      "Legacy function calling is not supported by this adapter.",
+      400,
+      "unsupported_parameter",
+      "functions",
+    );
   }
 
-  const tools = record.tool_choice === "none" ? [] : parseChatTools(record.tools);
+  const tools =
+    record.tool_choice === "none" ? [] : parseChatTools(record.tools);
   const toolContext = toolCallContextFromMessages(messages);
-  const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
+  const model =
+    typeof record.model === "string" && record.model.trim()
+      ? record.model.trim()
+      : "composer-2.5";
   const latestUserText = latestUserTextFromMessages(messages);
-  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasRequiredLocalToolCall(messages, tools, latestUserText);
+  const workspaceMutationRequired = shouldRequireLocalTool(
+    latestUserText,
+    tools,
+  );
+  const workspaceMutationDone =
+    workspaceMutationRequired &&
+    hasRequiredLocalToolCall(messages, tools, latestUserText);
   const transcript: string[] = [
     "You are running through an SDK-compatible OpenCode harness.",
     "OpenCode owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
@@ -194,30 +298,54 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
     "For creating new files when no specific client tool is requested, request write calls with both path and fileText. Do not use edit for new files or emit edit calls without complete replacement details.",
     "For project scaffolding when no specific client tool is requested, prefer shell with a complete command that creates files using heredocs, installs dependencies, and runs tests; shell requires the command argument.",
     "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately; do not request a foreground server command.",
-    "Do not say that agent mode or tools are unavailable. Do not ask the user to switch modes."
+    "Do not say that agent mode or tools are unavailable. Do not ask the user to switch modes.",
   ];
   appendSdkToolInventory(transcript, tools, record.tool_choice, toolContext);
-  appendSdkWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
+  appendSdkWorkspaceMutationRequirement(
+    transcript,
+    workspaceMutationRequired,
+    workspaceMutationDone,
+    tools,
+    latestUserText,
+  );
   transcript.push("", "Conversation:");
 
   const images: CursorImage[] = [];
-  const toolCallById = new Map<string, { name: string; args: Record<string, unknown> }>();
+  const toolCallById = new Map<
+    string,
+    { name: string; args: Record<string, unknown> }
+  >();
   for (const message of messages) {
     const item = expectRecord(message, "messages[]");
     const role = typeof item.role === "string" ? item.role : "user";
-    const { text, images: messageImages } = contentToTextAndImages(item.content, role);
+    const { text, images: messageImages } = contentToTextAndImages(
+      item.content,
+      role,
+    );
     images.push(...messageImages);
     if (role === "tool") {
-      const toolCallId = typeof item.tool_call_id === "string" ? item.tool_call_id : "";
+      const toolCallId =
+        typeof item.tool_call_id === "string" ? item.tool_call_id : "";
       const toolName = typeof item.name === "string" ? item.name : "";
-      const label = [toolName ? `name=${toolName}` : "", toolCallId ? `tool_call_id=${toolCallId}` : ""].filter(Boolean).join(" ");
-      transcript.push(`TOOL RESULT${label ? ` (${label})` : ""}: ${text || "[empty]"}`);
-      transcript.push(`LOCAL OPENCODE TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(toolCallId, toolName, text, toolCallById, tools))}`);
+      const label = [
+        toolName ? `name=${toolName}` : "",
+        toolCallId ? `tool_call_id=${toolCallId}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      transcript.push(
+        `TOOL RESULT${label ? ` (${label})` : ""}: ${text || "[empty]"}`,
+      );
+      transcript.push(
+        `LOCAL OPENCODE TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(toolCallId, toolName, text, toolCallById, tools))}`,
+      );
     } else {
       transcript.push(`${role.toUpperCase()}: ${text || "[empty]"}`);
     }
     if (Array.isArray(item.tool_calls)) {
-      transcript.push(`${role.toUpperCase()} TOOL_CALLS: ${JSON.stringify(item.tool_calls)}`);
+      transcript.push(
+        `${role.toUpperCase()} TOOL_CALLS: ${JSON.stringify(item.tool_calls)}`,
+      );
       rememberOpenCodeToolCalls(item.tool_calls, toolCallById);
     }
   }
@@ -232,36 +360,67 @@ export function prepareOpencodeSdkChatRequest(body: unknown, cursorModel: { id: 
     promptChars: text.length,
     responseMetadata: {
       temperature: numberOrNull(record.temperature),
-      top_p: numberOrNull(record.top_p)
+      top_p: numberOrNull(record.top_p),
     },
     tools,
     requiresLocalTool: workspaceMutationRequired && !workspaceMutationDone,
     storeResponse: false,
-    toolContext
+    toolContext,
   };
 }
 
 export function prepareResponsesRequest(
   body: unknown,
   cursorModel: { id: string } | undefined,
-  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] } = {}
+  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] } = {},
 ): PreparedRequest {
   const record = expectRecord(body, "body");
   validateCommonUnsupported(record);
   if (record.background === true) {
-    throw new HttpError("background responses are not supported.", 400, "unsupported_parameter", "background");
+    throw new HttpError(
+      "background responses are not supported.",
+      400,
+      "unsupported_parameter",
+      "background",
+    );
   }
 
-  const tools = record.tool_choice === "none" ? [] : parseChatTools(record.tools);
-  const toolContext = toolCallContextFromResponseInput(record.input, record.instructions);
-  const model = typeof record.model === "string" && record.model.trim() ? record.model.trim() : "composer-2.5";
+  const tools =
+    record.tool_choice === "none" ? [] : parseChatTools(record.tools);
+  const toolContext = toolCallContextFromResponseInput(
+    record.input,
+    record.instructions,
+  );
+  const model =
+    typeof record.model === "string" && record.model.trim()
+      ? record.model.trim()
+      : "composer-2.5";
   const latestUserText = latestUserTextFromResponseInput(record.input);
-  const workspaceMutationRequired = shouldRequireLocalTool(latestUserText, tools);
-  const workspaceMutationDone = workspaceMutationRequired && hasRequiredResponseLocalToolCall(record.input, tools, latestUserText);
-  const transcript: string[] = [tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE];
-  appendResponsesToolInventory(transcript, tools, record.tool_choice, toolContext);
-  appendResponsesWorkspaceMutationRequirement(transcript, workspaceMutationRequired, workspaceMutationDone, tools, latestUserText);
-  const instructions = typeof record.instructions === "string" ? record.instructions.trim() : "";
+  const workspaceMutationRequired = shouldRequireLocalTool(
+    latestUserText,
+    tools,
+  );
+  const workspaceMutationDone =
+    workspaceMutationRequired &&
+    hasRequiredResponseLocalToolCall(record.input, tools, latestUserText);
+  const transcript: string[] = [
+    tools.length ? RESPONSES_TOOL_SYSTEM_DIRECTIVE : SYSTEM_DIRECTIVE,
+  ];
+  appendResponsesToolInventory(
+    transcript,
+    tools,
+    record.tool_choice,
+    toolContext,
+  );
+  appendResponsesWorkspaceMutationRequirement(
+    transcript,
+    workspaceMutationRequired,
+    workspaceMutationDone,
+    tools,
+    latestUserText,
+  );
+  const instructions =
+    typeof record.instructions === "string" ? record.instructions.trim() : "";
   if (instructions) transcript.push("", `INSTRUCTIONS:\n${instructions}`);
   transcript.push("", "INPUT:");
   const effectiveInput = responseInputWithPrevious(record.input, options);
@@ -269,14 +428,20 @@ export function prepareResponsesRequest(
   transcript.push(text || "[empty]");
   appendResponseOptions(transcript, record);
   const prompt = transcript.join("\n");
-  const previousResponseId = typeof record.previous_response_id === "string" && record.previous_response_id.trim()
-    ? record.previous_response_id.trim()
-    : undefined;
+  const previousResponseId =
+    typeof record.previous_response_id === "string" &&
+    record.previous_response_id.trim()
+      ? record.previous_response_id.trim()
+      : undefined;
   const storeResponse = record.store !== false;
   return {
     model,
     cursorModel,
-    prompt: { text: prompt, mode: tools.length ? "agent" : "ask", ...(images.length ? { images } : {}) },
+    prompt: {
+      text: prompt,
+      mode: tools.length ? "agent" : "ask",
+      ...(images.length ? { images } : {}),
+    },
     stream: record.stream === true,
     includeUsage: includeStreamUsage(record),
     promptChars: prompt.length,
@@ -288,14 +453,19 @@ export function prepareResponsesRequest(
       text: isRecord(record.text) ? record.text : { format: { type: "text" } },
       previous_response_id: previousResponseId || null,
       store: storeResponse,
-      ...(tools.length ? { tools: responseToolMetadata(tools), tool_choice: responseToolChoiceMetadata(record.tool_choice) } : {})
+      ...(tools.length
+        ? {
+            tools: responseToolMetadata(tools),
+            tool_choice: responseToolChoiceMetadata(record.tool_choice),
+          }
+        : {}),
     },
     tools,
     requiresLocalTool: workspaceMutationRequired && !workspaceMutationDone,
     previousResponseId,
     storeResponse,
     responseInputItems: normalizedResponseInputItems(record.input),
-    toolContext
+    toolContext,
   };
 }
 
@@ -323,16 +493,16 @@ export function chatCompletionResponse(input: {
           content: toolCalls.length && !input.text ? null : input.text,
           ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
           refusal: null,
-          annotations: []
+          annotations: [],
         },
         logprobs: null,
-        finish_reason: toolCalls.length ? "tool_calls" : "stop"
-      }
+        finish_reason: toolCalls.length ? "tool_calls" : "stop",
+      },
     ],
     usage: usageFromChars(input.model, input.promptChars, completionChars),
     service_tier: "default",
     system_fingerprint: null,
-    ...input.metadata
+    ...input.metadata,
   };
 }
 
@@ -357,9 +527,9 @@ export function responseObject(input: {
         {
           type: "output_text",
           text: input.text,
-          annotations: []
-        }
-      ]
+          annotations: [],
+        },
+      ],
     });
   }
   for (const [index, toolCall] of (input.toolCalls ?? []).entries()) {
@@ -369,10 +539,13 @@ export function responseObject(input: {
       status: "completed",
       call_id: toolCall.id,
       name: toolCall.function.name,
-      arguments: toolCall.function.arguments
+      arguments: toolCall.function.arguments,
     });
   }
-  const outputChars = completionCharsFromOutput(input.text, input.toolCalls ?? []);
+  const outputChars = completionCharsFromOutput(
+    input.text,
+    input.toolCalls ?? [],
+  );
   return {
     id: input.id,
     object: "response",
@@ -393,27 +566,33 @@ export function responseObject(input: {
     usage: responseUsageFromChars(input.model, input.promptChars, outputChars),
     user: null,
     metadata: {},
-    ...input.metadata
+    ...input.metadata,
   };
 }
 
-export function responseInputItemsObject(inputItems: unknown[] = []): Record<string, unknown> {
-  const data = inputItems.map((item, index) => normalizeResponseInputItem(item, index));
+export function responseInputItemsObject(
+  inputItems: unknown[] = [],
+): Record<string, unknown> {
+  const data = inputItems.map((item, index) =>
+    normalizeResponseInputItem(item, index),
+  );
   return {
     object: "list",
     data,
     first_id: responseInputItemId(data[0]) ?? null,
     last_id: responseInputItemId(data[data.length - 1]) ?? null,
-    has_more: false
+    has_more: false,
   };
 }
 
-function responseToolMetadata(tools: OpenAiToolSpec[]): Record<string, unknown>[] {
+function responseToolMetadata(
+  tools: OpenAiToolSpec[],
+): Record<string, unknown>[] {
   return tools.map((tool) => ({
     type: "function",
     name: tool.name,
     ...(tool.description ? { description: tool.description } : {}),
-    ...(tool.parameters !== undefined ? { parameters: tool.parameters } : {})
+    ...(tool.parameters !== undefined ? { parameters: tool.parameters } : {}),
   }));
 }
 
@@ -443,11 +622,11 @@ export function chatChunk(input: {
                   index: input.toolCall.index,
                   id: input.toolCall.value.id,
                   type: input.toolCall.value.type,
-                  function: input.toolCall.value.function
-                }
-              ]
+                  function: input.toolCall.value.function,
+                },
+              ],
             }
-          : {})
+          : {}),
       };
   const chunk = {
     id: input.id,
@@ -460,9 +639,9 @@ export function chatChunk(input: {
         index: 0,
         delta,
         logprobs: null,
-        finish_reason: input.finish ? input.finishReason || "stop" : null
-      }
-    ]
+        finish_reason: input.finish ? input.finishReason || "stop" : null,
+      },
+    ],
   };
   return encodeSse(chunk);
 }
@@ -485,11 +664,20 @@ export function chatUsageChunk(input: {
     model: input.model,
     system_fingerprint: null,
     choices: [],
-    usage: usageFromChars(input.model, input.promptChars, input.completionChars)
+    usage: usageFromChars(
+      input.model,
+      input.promptChars,
+      input.completionChars,
+    ),
   });
 }
 
-export function responseCreatedEvents(input: { id: string; created: number; model: string; metadata?: Record<string, unknown> }): Uint8Array[] {
+export function responseCreatedEvents(input: {
+  id: string;
+  created: number;
+  model: string;
+  metadata?: Record<string, unknown>;
+}): Uint8Array[] {
   const base = {
     id: input.id,
     object: "response",
@@ -509,81 +697,120 @@ export function responseCreatedEvents(input: { id: string; created: number; mode
     usage: null,
     user: null,
     metadata: {},
-    ...input.metadata
+    ...input.metadata,
   };
   return [
     encodeSse({ type: "response.created", response: base }, "response.created"),
-    encodeSse({ type: "response.in_progress", response: base }, "response.in_progress")
+    encodeSse(
+      { type: "response.in_progress", response: base },
+      "response.in_progress",
+    ),
   ];
 }
 
-export function responseTextStartEvents(input: { id: string; outputIndex: number }): Uint8Array[] {
+export function responseTextStartEvents(input: {
+  id: string;
+  outputIndex: number;
+}): Uint8Array[] {
   const item = {
     id: `msg_${input.id.slice(5)}`,
     type: "message",
     status: "in_progress",
     role: "assistant",
-    content: []
+    content: [],
   };
   return [
-    encodeSse({ type: "response.output_item.added", output_index: input.outputIndex, item }, "response.output_item.added"),
+    encodeSse(
+      {
+        type: "response.output_item.added",
+        output_index: input.outputIndex,
+        item,
+      },
+      "response.output_item.added",
+    ),
     encodeSse(
       {
         type: "response.content_part.added",
         item_id: item.id,
         output_index: input.outputIndex,
         content_index: 0,
-        part: { type: "output_text", text: "", annotations: [] }
+        part: { type: "output_text", text: "", annotations: [] },
       },
-      "response.content_part.added"
-    )
+      "response.content_part.added",
+    ),
   ];
 }
 
-export function responseDeltaEvent(input: { id: string; delta: string; outputIndex?: number }): Uint8Array {
+export function responseDeltaEvent(input: {
+  id: string;
+  delta: string;
+  outputIndex?: number;
+}): Uint8Array {
   return encodeSse(
     {
       type: "response.output_text.delta",
       item_id: `msg_${input.id.slice(5)}`,
       output_index: input.outputIndex ?? 0,
       content_index: 0,
-      delta: input.delta
+      delta: input.delta,
     },
-    "response.output_text.delta"
+    "response.output_text.delta",
   );
 }
 
-export function responseToolCallEvents(input: { id: string; toolCall: OpenAiToolCall; outputIndex: number }): Uint8Array[] {
+export function responseToolCallEvents(input: {
+  id: string;
+  toolCall: OpenAiToolCall;
+  outputIndex: number;
+}): Uint8Array[] {
   const item = {
     id: `fc_${input.id.slice(5)}_${input.outputIndex}`,
     type: "function_call",
     status: "in_progress",
     call_id: input.toolCall.id,
     name: input.toolCall.function.name,
-    arguments: ""
+    arguments: "",
   };
-  const doneItem = { ...item, status: "completed", arguments: input.toolCall.function.arguments };
+  const doneItem = {
+    ...item,
+    status: "completed",
+    arguments: input.toolCall.function.arguments,
+  };
   return [
-    encodeSse({ type: "response.output_item.added", output_index: input.outputIndex, item }, "response.output_item.added"),
+    encodeSse(
+      {
+        type: "response.output_item.added",
+        output_index: input.outputIndex,
+        item,
+      },
+      "response.output_item.added",
+    ),
     encodeSse(
       {
         type: "response.function_call_arguments.delta",
         item_id: item.id,
         output_index: input.outputIndex,
-        delta: input.toolCall.function.arguments
+        delta: input.toolCall.function.arguments,
       },
-      "response.function_call_arguments.delta"
+      "response.function_call_arguments.delta",
     ),
     encodeSse(
       {
         type: "response.function_call_arguments.done",
         item_id: item.id,
         output_index: input.outputIndex,
-        arguments: input.toolCall.function.arguments
+        arguments: input.toolCall.function.arguments,
       },
-      "response.function_call_arguments.done"
+      "response.function_call_arguments.done",
     ),
-    encodeSse({ type: "response.output_item.done", output_index: input.outputIndex, item: doneItem }, "response.output_item.done")
+    encodeSse(
+      {
+        type: "response.output_item.done",
+        output_index: input.outputIndex,
+        item: doneItem,
+      },
+      "response.output_item.done",
+    ),
   ];
 }
 
@@ -600,53 +827,121 @@ export function responseDoneEvents(input: {
 }): Uint8Array[] {
   const itemId = `msg_${input.id.slice(5)}`;
   const part = { type: "output_text", text: input.text, annotations: [] };
-  const item = { id: itemId, type: "message", status: "completed", role: "assistant", content: [part] };
-  const textEvents = input.textStarted || !(input.toolCalls ?? []).length ? [
-    encodeSse(
-      { type: "response.output_text.done", item_id: itemId, output_index: input.textOutputIndex ?? 0, content_index: 0, text: input.text },
-      "response.output_text.done"
-    ),
-    encodeSse(
-      { type: "response.content_part.done", item_id: itemId, output_index: input.textOutputIndex ?? 0, content_index: 0, part },
-      "response.content_part.done"
-    ),
-    encodeSse({ type: "response.output_item.done", output_index: input.textOutputIndex ?? 0, item }, "response.output_item.done")
-  ] : [];
+  const item = {
+    id: itemId,
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [part],
+  };
+  const textEvents =
+    input.textStarted || !(input.toolCalls ?? []).length
+      ? [
+          encodeSse(
+            {
+              type: "response.output_text.done",
+              item_id: itemId,
+              output_index: input.textOutputIndex ?? 0,
+              content_index: 0,
+              text: input.text,
+            },
+            "response.output_text.done",
+          ),
+          encodeSse(
+            {
+              type: "response.content_part.done",
+              item_id: itemId,
+              output_index: input.textOutputIndex ?? 0,
+              content_index: 0,
+              part,
+            },
+            "response.content_part.done",
+          ),
+          encodeSse(
+            {
+              type: "response.output_item.done",
+              output_index: input.textOutputIndex ?? 0,
+              item,
+            },
+            "response.output_item.done",
+          ),
+        ]
+      : [];
   return [
     ...textEvents,
     encodeSse(
       { type: "response.completed", response: responseObject(input) },
-      "response.completed"
-    )
+      "response.completed",
+    ),
   ];
 }
 
-export function modelList(options: { opencode?: boolean; sdk?: boolean } = {}): Record<string, unknown> {
-  return {
-    object: "list",
-    data: [
-      modelItem("default", "Auto"),
-      modelItem("composer-2.5", options.opencode ? "Composer 2.5" : "Cursor Composer 2.5"),
-      ...(options.sdk ? [modelItem("composer-2.5-sdk", "Composer 2.5 SDK Harness")] : []),
-      modelItem("composer-2.5-fast", "Cursor Composer 2.5 Fast"),
-      modelItem("composer-2", "Cursor Composer 2"),
-      modelItem("composer-latest", "Cursor Composer latest alias"),
-      modelItem("gpt-5.3-codex", "Codex 5.3"),
-      modelItem("gpt-5.2-codex", "Codex 5.2"),
-      modelItem("gpt-5.1-codex-max", "Codex 5.1 Max"),
-      modelItem("gpt-5.1-codex-mini", "Codex 5.1 Mini"),
-      modelItem("gpt-5.2", "GPT-5.2"),
-      modelItem("gpt-5.1", "GPT-5.1"),
-      modelItem("gpt-5-mini", "GPT-5 Mini"),
-      modelItem("gemini-3.1-pro", "Gemini 3.1 Pro"),
-      modelItem("gemini-3.5-flash", "Gemini 3.5 Flash"),
-      modelItem("gemini-3-flash", "Gemini 3 Flash"),
-      modelItem("gemini-2.5-flash", "Gemini 2.5 Flash"),
-      modelItem("grok-build-0.1", "Grok Build 0.1"),
-      modelItem("grok-4.3", "Grok 4.3"),
-      modelItem("kimi-k2.5", "Kimi K2.5")
-    ]
-  };
+export function modelList(
+  options: { opencode?: boolean; sdk?: boolean } = {},
+): Record<string, unknown> {
+  const data = [
+    modelItem("auto", "Auto"),
+    modelItem(
+      "composer-2.5",
+      options.opencode ? "Composer 2.5" : "Cursor Composer 2.5",
+    ),
+    ...(options.sdk
+      ? [modelItem("composer-2.5-sdk", "Composer 2.5 SDK Harness")]
+      : []),
+    modelItem("composer-2.5-fast", "Cursor Composer 2.5 Fast"),
+    modelItem("composer-2", "Cursor Composer 2"),
+    modelItem("composer-latest", "Cursor Composer latest alias"),
+    modelItem("gemini-2.5-flash", "Gemini 2.5 Flash"),
+    modelItem("gemini-3-flash", "Gemini 3 Flash"),
+    modelItem("gemini-3.1-pro", "Gemini 3.1 Pro"),
+    modelItem("gemini-3.5-flash", "Gemini 3.5 Flash"),
+    modelItem("gpt-5-mini", "GPT-5 Mini"),
+    modelItem("gpt-5.1-codex-max", "Codex 5.1 Max"),
+    modelItem("gpt-5.1-codex-mini", "Codex 5.1 Mini"),
+    modelItem("gpt-5.1", "GPT-5.1"),
+    modelItem("gpt-5.2-codex", "Codex 5.2"),
+    modelItem("gpt-5.2", "GPT-5.2"),
+    modelItem("gpt-5.3-codex", "Codex 5.3"),
+    modelItem("gpt-5.5", "GPT-5.5"),
+    modelItem("grok-4.3", "Grok 4.3"),
+    modelItem("grok-build-0.1", "Grok Build 0.1"),
+    modelItem("kimi-k2.5", "Kimi K2.5"),
+  ];
+  return finalizeModelList(data);
+}
+
+export async function modelListForAuth(
+  env: Env,
+  deps: Deps,
+  apiKey: string,
+  options: { opencode?: boolean; sdk?: boolean } = {},
+): Promise<Record<string, unknown>> {
+  const fallback = modelList(options);
+  try {
+    const remote = await listCursorModels(env, deps, apiKey);
+    const records = cursorModelRecordsFromResponse(remote);
+    if (!records.length) return fallback;
+
+    const merged = new Map<string, Record<string, unknown>>();
+    for (const record of records) {
+      const id = normalizeModelListId(record.id);
+      const name =
+        (typeof record.displayName === "string" && record.displayName.trim()) ||
+        (typeof record.name === "string" && record.name.trim()) ||
+        id;
+      merged.set(id, modelItem(id, name));
+    }
+
+    for (const entry of fallback.data as Array<Record<string, unknown>>) {
+      const id =
+        typeof entry.id === "string" ? normalizeModelListId(entry.id) : "";
+      if (id && !merged.has(id)) merged.set(id, { ...entry, id });
+    }
+
+    return finalizeModelList([...merged.values()]);
+  } catch {
+    return fallback;
+  }
 }
 
 export function toOpenAiToolCalls(input: {
@@ -660,22 +955,38 @@ export function toOpenAiToolCalls(input: {
   return input.toolCalls.flatMap((toolCall, offset) => {
     const index = (input.startIndex ?? 0) + offset;
     const normalizedToolCall = normalizeSdkToolCall(toolCall);
-    const tool = resolveToolSpec(normalizedToolCall.name, normalizedToolCall.arguments ?? {}, tools);
+    const tool = resolveToolSpec(
+      normalizedToolCall.name,
+      normalizedToolCall.arguments ?? {},
+      tools,
+    );
     if (!tool && tools.length > 0) return [];
     const name = tool?.name ?? normalizedToolCall.name;
     const sdkCanonical = canonicalToolName(normalizedToolCall.name);
-    const toolArguments = normalizeToolArguments(normalizedToolCall.arguments ?? {}, tool, normalizedToolCall.name, 0, input.context);
+    const toolArguments = normalizeToolArguments(
+      normalizedToolCall.arguments ?? {},
+      tool,
+      normalizedToolCall.name,
+      0,
+      input.context,
+    );
     if (tool && !toolArgumentsSatisfySchema(toolArguments, tool)) return [];
     const id = `call_${input.responseId.replace(/[^A-Za-z0-9]/g, "").slice(-18)}_${sdkCanonical}_${index}`;
-    rememberSdkToolCall(id, normalizedToolCall.name, normalizedToolCall.arguments ?? {});
-    return [{
+    rememberSdkToolCall(
       id,
-      type: "function",
-      function: {
-        name,
-        arguments: JSON.stringify(toolArguments)
-      }
-    }];
+      normalizedToolCall.name,
+      normalizedToolCall.arguments ?? {},
+    );
+    return [
+      {
+        id,
+        type: "function",
+        function: {
+          name,
+          arguments: JSON.stringify(toolArguments),
+        },
+      },
+    ];
   });
 }
 
@@ -689,10 +1000,17 @@ export function toolCallRetryHint(input: {
   const args = normalizedToolCall.arguments ?? {};
   const tool = resolveToolSpec(normalizedToolCall.name, args, tools);
   if (!tool) {
-    if (!tools.length) return `No client tool inventory was available for SDK ${normalizedToolCall.name}.`;
+    if (!tools.length)
+      return `No client tool inventory was available for SDK ${normalizedToolCall.name}.`;
     return `SDK ${normalizedToolCall.name} did not match any client tool. Available client tools: ${tools.map((item) => item.name).join(", ")}.`;
   }
-  const toolArguments = normalizeToolArguments(args, tool, normalizedToolCall.name, 0, input.context);
+  const toolArguments = normalizeToolArguments(
+    args,
+    tool,
+    normalizedToolCall.name,
+    0,
+    input.context,
+  );
   if (toolArgumentsSatisfySchema(toolArguments, tool)) {
     return `SDK ${normalizedToolCall.name} maps to client ${tool.name}; retry with complete arguments for that route.`;
   }
@@ -700,12 +1018,19 @@ export function toolCallRetryHint(input: {
     `SDK ${normalizedToolCall.name} mapped to client ${tool.name}, but normalized arguments do not satisfy the client JSON schema.`,
     `Normalized arguments: ${safeJsonForPrompt(toolArguments)}.`,
     `Required client arguments: ${toolRequiredArgumentSummary(tool)}.`,
-    `Client schema properties: ${toolSchemaPropertySummary(tool)}.`
+    `Client schema properties: ${toolSchemaPropertySummary(tool)}.`,
   ].join(" ");
 }
 
-function rememberSdkToolCall(id: string, name: string, args: Record<string, unknown>) {
-  sdkToolCallMemory.set(id, { name: canonicalToolName(name), args: { ...args } });
+function rememberSdkToolCall(
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+) {
+  sdkToolCallMemory.set(id, {
+    name: canonicalToolName(name),
+    args: { ...args },
+  });
   if (sdkToolCallMemory.size <= SDK_TOOL_CALL_MEMORY_LIMIT) return;
   const overflow = sdkToolCallMemory.size - SDK_TOOL_CALL_MEMORY_LIMIT;
   for (const key of Array.from(sdkToolCallMemory.keys()).slice(0, overflow)) {
@@ -716,10 +1041,22 @@ function rememberSdkToolCall(id: string, name: string, args: Record<string, unkn
 function normalizeSdkToolCall(toolCall: CursorToolCall): CursorToolCall {
   const args = toolCall.arguments ?? {};
   if (canonicalToolName(toolCall.name) === "edit") {
-    const streamContent = firstStringArgAllowEmpty(args, "streamContent", "stream_content");
-    const path = firstArg(args, [...pathCandidates(), "target_file", "targetFile"]);
+    const streamContent = firstStringArgAllowEmpty(
+      args,
+      "streamContent",
+      "stream_content",
+    );
+    const path = firstArg(args, [
+      ...pathCandidates(),
+      "target_file",
+      "targetFile",
+    ]);
     if (streamContent !== undefined && shouldIncludeOptionalPath(path)) {
-      const nextArgs: Record<string, unknown> = { ...args, path, fileText: streamContent };
+      const nextArgs: Record<string, unknown> = {
+        ...args,
+        path,
+        fileText: streamContent,
+      };
       delete nextArgs.streamContent;
       delete nextArgs.stream_content;
       return { name: "write", arguments: nextArgs };
@@ -736,54 +1073,124 @@ function modelItem(id: string, name: string) {
     created: 1779148800,
     owned_by: "cursor",
     name,
-    ...(pricing ? { cost: { input: pricing.input, output: pricing.output } } : {})
+    ...(pricing
+      ? { cost: { input: pricing.input, output: pricing.output } }
+      : {}),
   };
 }
 
-export function completionCharsFromOutput(text: string, toolCalls: OpenAiToolCall[] = []): number {
+function normalizeModelListId(id: string): string {
+  const trimmed = id.trim();
+  return trimmed.toLowerCase() === "default" ? "auto" : trimmed;
+}
+
+function modelListSortKey(entry: Record<string, unknown>): string {
+  const id = typeof entry.id === "string" ? entry.id.trim().toLowerCase() : "";
+  return id;
+}
+
+function sortModelListData(
+  data: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  return [...data].sort((left, right) => {
+    const leftId = modelListSortKey(left);
+    const rightId = modelListSortKey(right);
+    if (leftId === "auto") return -1;
+    if (rightId === "auto") return 1;
+    return leftId.localeCompare(rightId, "en", {
+      sensitivity: "base",
+      numeric: true,
+    });
+  });
+}
+
+function finalizeModelList(
+  data: Array<Record<string, unknown>>,
+): Record<string, unknown> {
+  return { object: "list", data: sortModelListData(data) };
+}
+
+export function completionCharsFromOutput(
+  text: string,
+  toolCalls: OpenAiToolCall[] = [],
+): number {
   return text.length + serializedToolCallLength(toolCalls);
 }
 
 function parseChatTools(value: unknown): OpenAiToolSpec[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value)) throw new HttpError("tools must be an array.", 400, "invalid_request_error", "tools");
+  if (!Array.isArray(value))
+    throw new HttpError(
+      "tools must be an array.",
+      400,
+      "invalid_request_error",
+      "tools",
+    );
   return value.flatMap((tool, index) => {
     const record = expectRecord(tool, `tools[${index}]`);
     const type = typeof record.type === "string" ? record.type.trim() : "";
     const fn = isRecord(record.function) ? record.function : record;
-    const name = typeof fn.name === "string" && fn.name.trim()
-      ? fn.name.trim()
-      : typeof record.name === "string" && record.name.trim()
-        ? record.name.trim()
-        : "";
+    const name =
+      typeof fn.name === "string" && fn.name.trim()
+        ? fn.name.trim()
+        : typeof record.name === "string" && record.name.trim()
+          ? record.name.trim()
+          : "";
     if (!name) {
       if (type && type !== "function") return [];
-      throw new HttpError("Tool function name is required.", 400, "invalid_request_error", `tools[${index}].function.name`);
+      throw new HttpError(
+        "Tool function name is required.",
+        400,
+        "invalid_request_error",
+        `tools[${index}].function.name`,
+      );
     }
-    const description = typeof fn.description === "string"
-      ? fn.description
-      : typeof record.description === "string"
-        ? record.description
-        : undefined;
+    const description =
+      typeof fn.description === "string"
+        ? fn.description
+        : typeof record.description === "string"
+          ? record.description
+          : undefined;
     const parameters = toolParametersFrom(fn, record);
-    return [{
-      name,
-      ...(description ? { description } : {}),
-      ...(parameters !== undefined ? { parameters } : {})
-    }];
+    return [
+      {
+        name,
+        ...(description ? { description } : {}),
+        ...(parameters !== undefined ? { parameters } : {}),
+      },
+    ];
   });
 }
 
 function toolParametersFrom(...records: Record<string, unknown>[]): unknown {
   for (const record of records) {
-    for (const key of ["parameters", "input_schema", "inputSchema", "schema", "json_schema"]) {
+    for (const key of [
+      "parameters",
+      "input_schema",
+      "inputSchema",
+      "schema",
+      "json_schema",
+    ]) {
       if (record[key] !== undefined) return record[key];
     }
   }
   return undefined;
 }
 
-function appendChatTools(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown) {
+function shouldPreferSdkToolInventory(model: string): boolean {
+  const normalized =
+    model.trim().toLowerCase().split("/").filter(Boolean).at(-1) || "";
+  if (!normalized || normalized === "default" || normalized === "auto")
+    return false;
+  if (normalized.includes("composer")) return false;
+  return true;
+}
+
+function appendChatTools(
+  transcript: string[],
+  tools: OpenAiToolSpec[],
+  toolChoice: unknown,
+) {
   if (!tools.length) return;
   transcript.push(
     "",
@@ -797,19 +1204,31 @@ function appendChatTools(transcript: string[], tools: OpenAiToolSpec[], toolChoi
     "<|tool_sep|>argument_name",
     "argument value",
     "<|tool_call_end|><|tool_calls_end|>",
-    "Do not call switch_mode; that setup already completed."
+    "Do not call switch_mode; that setup already completed.",
   );
   for (const tool of tools) {
-    transcript.push(JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: false })));
+    transcript.push(
+      JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: false })),
+    );
   }
-  if (isRecord(toolChoice) && toolChoice.type === "function" && isRecord(toolChoice.function) && typeof toolChoice.function.name === "string") {
+  if (
+    isRecord(toolChoice) &&
+    toolChoice.type === "function" &&
+    isRecord(toolChoice.function) &&
+    typeof toolChoice.function.name === "string"
+  ) {
     transcript.push(directToolChoiceHint(toolChoice.function.name));
   } else if (toolChoice === "required") {
     transcript.push("You must call at least one tool.");
   }
 }
 
-function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown, context?: ToolCallContext) {
+function appendResponsesToolInventory(
+  transcript: string[],
+  tools: OpenAiToolSpec[],
+  toolChoice: unknown,
+  context?: ToolCallContext,
+) {
   if (!tools.length) return;
   transcript.push(
     "",
@@ -819,13 +1238,17 @@ function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpe
     "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching client tool names and schemas.",
     "Prefer built-in SDK routes for shell/read/write/edit/glob/grep/ls-style client tools. Use SDK mcp for unique client tools and MCP/server tools.",
     "When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route and do not substitute a different tool.",
-    "If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool."
+    'If you need a local tool, emit the tool call before prose. Do not write progress text such as "creating the file" instead of calling a tool.',
   );
   if (hasCompatibleTool("shell", tools)) {
-    transcript.push("A shell client tool is available. For general file creation or overwrite requests, prefer an SDK shell call using mkdir -p and a quoted heredoc.");
+    transcript.push(
+      "A shell client tool is available. For general file creation or overwrite requests, prefer an SDK shell call using mkdir -p and a quoted heredoc.",
+    );
   }
   for (const tool of tools) {
-    transcript.push(JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })));
+    transcript.push(
+      JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })),
+    );
   }
   appendSdkRoutingMap(transcript, tools, context);
   const selected = toolChoiceFunctionName(toolChoice);
@@ -836,7 +1259,12 @@ function appendResponsesToolInventory(transcript: string[], tools: OpenAiToolSpe
   }
 }
 
-function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], toolChoice: unknown, context?: ToolCallContext) {
+function appendSdkToolInventory(
+  transcript: string[],
+  tools: OpenAiToolSpec[],
+  toolChoice: unknown,
+  context?: ToolCallContext,
+) {
   if (!tools.length) return;
   transcript.push(
     "",
@@ -846,46 +1274,68 @@ function appendSdkToolInventory(transcript: string[], tools: OpenAiToolSpec[], t
     "For local work, emit only SDK tool names from the SDK TOOL ROUTING MAP. The adapter forwards those SDK calls to the matching OpenCode tool names and schemas.",
     "Prefer built-in SDK routes for shell/read/write/edit/glob/grep/ls-style OpenCode tools. Use SDK mcp for unique OpenCode tools and MCP/server tools.",
     "When the user names a specific allowed client tool, use the matching SDK TOOL ROUTING MAP route and do not substitute a different tool.",
-    "For general local work, prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present."
+    "For general local work, prefer shell/read/write/edit/glob/grep/ls style tool requests when those capabilities are present.",
   );
   for (const tool of tools) {
-    transcript.push(JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })));
+    transcript.push(
+      JSON.stringify(toolInventoryRecord(tool, { includeSdkMcp: true })),
+    );
   }
   appendSdkRoutingMap(transcript, tools, context);
-  if (isRecord(toolChoice) && toolChoice.type === "function" && isRecord(toolChoice.function) && typeof toolChoice.function.name === "string") {
+  if (
+    isRecord(toolChoice) &&
+    toolChoice.type === "function" &&
+    isRecord(toolChoice.function) &&
+    typeof toolChoice.function.name === "string"
+  ) {
     transcript.push(requestedToolHint(toolChoice.function.name));
   } else if (toolChoice === "required") {
     transcript.push("You must call at least one tool.");
   }
 }
 
-function appendSdkRoutingMap(transcript: string[], tools: OpenAiToolSpec[], context?: ToolCallContext) {
+function appendSdkRoutingMap(
+  transcript: string[],
+  tools: OpenAiToolSpec[],
+  context?: ToolCallContext,
+) {
   const routes = sdkRoutingRecords(tools, context);
   if (!routes.length) return;
   transcript.push(
     "SDK TOOL ROUTING MAP:",
-    "Use these SDK tool names; the adapter forwards them to the listed client tool and argument shape."
+    "Use these SDK tool names; the adapter forwards them to the listed client tool and argument shape.",
   );
   for (const route of routes) {
     transcript.push(JSON.stringify(route));
   }
 }
 
-function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): Record<string, unknown>[] {
+function sdkRoutingRecords(
+  tools: OpenAiToolSpec[],
+  context?: ToolCallContext,
+): Record<string, unknown>[] {
   const routes: Record<string, unknown>[] = [];
   for (const sample of sdkRoutingSamples()) {
     const tool = resolveToolSpec(sample.name, sample.arguments, tools);
     if (!tool) continue;
-    const clientArgs = normalizeToolArguments(sample.arguments, tool, sample.name, 0, context);
+    const clientArgs = normalizeToolArguments(
+      sample.arguments,
+      tool,
+      sample.name,
+      0,
+      context,
+    );
     if (!toolArgumentsSatisfySchema(clientArgs, tool)) continue;
     routes.push({
       sdk: sample.name,
       client: tool.name,
-      clientArgs
+      clientArgs,
     });
   }
   for (const tool of tools) {
-    const target = mcpTargetForClientToolName(tool.name, { includeMapped: false });
+    const target = mcpTargetForClientToolName(tool.name, {
+      includeMapped: false,
+    });
     if (!target) continue;
     routes.push({
       sdk: "mcp",
@@ -893,8 +1343,8 @@ function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): 
       sdkArgs: {
         providerIdentifier: target.provider,
         toolName: target.toolName,
-        args: "match client schema"
-      }
+        args: "match client schema",
+      },
     });
   }
   return routes.slice(0, 24);
@@ -902,22 +1352,54 @@ function sdkRoutingRecords(tools: OpenAiToolSpec[], context?: ToolCallContext): 
 
 function sdkRoutingSamples(): CursorToolCall[] {
   return [
-    { name: "shell", arguments: { command: "<command>", workingDirectory: "/workspace", timeout: 120_000 } },
+    {
+      name: "shell",
+      arguments: {
+        command: "<command>",
+        workingDirectory: "/workspace",
+        timeout: 120_000,
+      },
+    },
     { name: "read", arguments: { path: "src/App.tsx", offset: 1, limit: 80 } },
-    { name: "write", arguments: { path: "src/App.tsx", fileText: "<file content>" } },
-    { name: "edit", arguments: { path: "src/App.tsx", oldString: "<old text>", newString: "<new text>" } },
+    {
+      name: "write",
+      arguments: { path: "src/App.tsx", fileText: "<file content>" },
+    },
+    {
+      name: "edit",
+      arguments: {
+        path: "src/App.tsx",
+        oldString: "<old text>",
+        newString: "<new text>",
+      },
+    },
     { name: "delete", arguments: { path: "src/old.tsx" } },
     { name: "glob", arguments: { targetDirectory: ".", globPattern: "**/*" } },
     { name: "grep", arguments: { pattern: "<pattern>", path: ".", glob: "*" } },
     { name: "ls", arguments: { path: "." } },
     { name: "readLints", arguments: { paths: ["src/App.tsx"] } },
-    { name: "semSearch", arguments: { query: "<query>", targetDirectories: ["."] } },
-    { name: "todowrite", arguments: { todos: [{ content: "<task>", status: "in_progress", priority: "medium" }] } }
+    {
+      name: "semSearch",
+      arguments: { query: "<query>", targetDirectories: ["."] },
+    },
+    {
+      name: "todowrite",
+      arguments: {
+        todos: [
+          { content: "<task>", status: "in_progress", priority: "medium" },
+        ],
+      },
+    },
   ];
 }
 
-function toolInventoryRecord(tool: OpenAiToolSpec, options: { includeSdkMcp: boolean }): Record<string, unknown> {
-  const target = options.includeSdkMcp ? mcpTargetForClientToolName(tool.name, { includeMapped: false }) : undefined;
+function toolInventoryRecord(
+  tool: OpenAiToolSpec,
+  options: { includeSdkMcp: boolean },
+): Record<string, unknown> {
+  const target = options.includeSdkMcp
+    ? mcpTargetForClientToolName(tool.name, { includeMapped: false })
+    : undefined;
   return {
     name: tool.name,
     ...(tool.description ? { description: tool.description } : {}),
@@ -927,10 +1409,10 @@ function toolInventoryRecord(tool: OpenAiToolSpec, options: { includeSdkMcp: boo
           sdk_mcp: {
             providerIdentifier: target.provider,
             toolName: target.toolName,
-            args: "match this tool schema"
-          }
+            args: "match this tool schema",
+          },
         }
-      : {})
+      : {}),
   };
 }
 
@@ -943,7 +1425,7 @@ function appendResponsesWorkspaceMutationRequirement(
   required: boolean,
   done: boolean,
   tools: OpenAiToolSpec[],
-  latestUserText: string
+  latestUserText: string,
 ) {
   if (!required) return;
   const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
@@ -957,11 +1439,15 @@ function appendResponsesWorkspaceMutationRequirement(
         ? requestedToolHint(requestedTool)
         : hasCompatibleTool("shell", tools)
           ? "Use SDK shell when it maps to the client shell/bash tool. For unique shell-like client tools, use the SDK mcp route. For creating or overwriting files, run mkdir -p for parent directories and write files with quoted heredocs. After function_call_output returns, continue."
-          : "Use SDK write when it maps to the client write tool. For unique writer tools, use the SDK mcp route with matching arguments. After function_call_output returns, continue."
+          : "Use SDK write when it maps to the client write tool. For unique writer tools, use the SDK mcp route with matching arguments. After function_call_output returns, continue.",
   );
 }
 
-function appendWorkspaceMutationRequirement(transcript: string[], required: boolean, done: boolean) {
+function appendWorkspaceMutationRequirement(
+  transcript: string[],
+  required: boolean,
+  done: boolean,
+) {
   if (!required) return;
   transcript.push(
     "",
@@ -970,7 +1456,7 @@ function appendWorkspaceMutationRequirement(transcript: string[], required: bool
     "If the workspace is empty, create the necessary starter files directly. Do not output a standalone file for the user to save.",
     done
       ? "A file-mutating tool call has already been made. After tool results confirm the change, briefly summarize what you created."
-      : "No file-mutating tool call has been made yet. Your next assistant response must be a write/edit/bash tool call, not prose."
+      : "No file-mutating tool call has been made yet. Your next assistant response must be a write/edit/bash tool call, not prose.",
   );
 }
 
@@ -979,7 +1465,7 @@ function appendSdkWorkspaceMutationRequirement(
   required: boolean,
   done: boolean,
   tools: OpenAiToolSpec[],
-  latestUserText: string
+  latestUserText: string,
 ) {
   if (!required) return;
   const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
@@ -995,31 +1481,42 @@ function appendSdkWorkspaceMutationRequirement(
       ? "A file-mutating tool call has already been made. Continue from the returned tool results and run verification commands when needed."
       : requestedTool
         ? "No file-mutating tool call has been made yet. Your next tool call must use the explicitly requested client tool, not shell/write as a substitute."
-        : "No file-mutating tool call has been made yet. Your next tool call must be write or shell with complete arguments, not glob, edit, or prose."
+        : "No file-mutating tool call has been made yet. Your next tool call must be write or shell with complete arguments, not glob, edit, or prose.",
   );
 }
 
-function explicitlyRequestedToolName(text: string, tools: OpenAiToolSpec[]): string | undefined {
+function explicitlyRequestedToolName(
+  text: string,
+  tools: OpenAiToolSpec[],
+): string | undefined {
   const lower = text.toLowerCase();
-  return [...tools].sort((a, b) => b.name.length - a.name.length).find((tool) => {
-    const name = tool.name.trim();
-    if (name.length <= 3) return false;
-    const loweredName = name.toLowerCase();
-    const normalized = normalizeToolName(name);
-    if (
-      lower.includes(`${loweredName} tool`) ||
-      lower.includes(`tool ${loweredName}`) ||
-      lower.includes(`tool named ${loweredName}`) ||
-      lower.includes(`use ${loweredName}`)
-    ) {
-      return true;
-    }
-    return (name.includes("_") || name.includes("-")) && (lower.includes(loweredName) || lower.includes(normalized));
-  })?.name;
+  return [...tools]
+    .sort((a, b) => b.name.length - a.name.length)
+    .find((tool) => {
+      const name = tool.name.trim();
+      if (name.length <= 3) return false;
+      const loweredName = name.toLowerCase();
+      const normalized = normalizeToolName(name);
+      if (
+        lower.includes(`${loweredName} tool`) ||
+        lower.includes(`tool ${loweredName}`) ||
+        lower.includes(`tool named ${loweredName}`) ||
+        lower.includes(`use ${loweredName}`)
+      ) {
+        return true;
+      }
+      return (
+        (name.includes("_") || name.includes("-")) &&
+        (lower.includes(loweredName) || lower.includes(normalized))
+      );
+    })?.name;
 }
 
 function requestedToolHint(toolName: string): string {
-  if (canonicalToolName(toolName) === "glob" && normalizeToolName(toolName) !== "glob") {
+  if (
+    canonicalToolName(toolName) === "glob" &&
+    normalizeToolName(toolName) !== "glob"
+  ) {
     return `Use SDK glob now; it will be forwarded to client tool ${toolName} with arguments matching its schema. Do not substitute shell or prose for this explicitly requested client tool.`;
   }
   const canonical = canonicalToolName(toolName);
@@ -1035,112 +1532,232 @@ function requestedToolHint(toolName: string): string {
 
 function toolChoiceFunctionName(toolChoice: unknown): string | undefined {
   if (!isRecord(toolChoice) || toolChoice.type !== "function") return undefined;
-  if (typeof toolChoice.name === "string" && toolChoice.name.trim()) return toolChoice.name.trim();
-  if (isRecord(toolChoice.function) && typeof toolChoice.function.name === "string" && toolChoice.function.name.trim()) {
+  if (typeof toolChoice.name === "string" && toolChoice.name.trim())
+    return toolChoice.name.trim();
+  if (
+    isRecord(toolChoice.function) &&
+    typeof toolChoice.function.name === "string" &&
+    toolChoice.function.name.trim()
+  ) {
     return toolChoice.function.name.trim();
   }
   return undefined;
 }
 
-function hasCompatibleTool(sdkToolName: string, tools: OpenAiToolSpec[]): boolean {
+function hasCompatibleTool(
+  sdkToolName: string,
+  tools: OpenAiToolSpec[],
+): boolean {
   return tools.some((tool) => schemaLooksCompatible(sdkToolName, tool));
 }
 
-function hasAnyCompatibleTool(sdkToolNames: string[], tools: OpenAiToolSpec[]): boolean {
-  return sdkToolNames.some((sdkToolName) => hasCompatibleTool(sdkToolName, tools));
+function hasAnyCompatibleTool(
+  sdkToolNames: string[],
+  tools: OpenAiToolSpec[],
+): boolean {
+  return sdkToolNames.some((sdkToolName) =>
+    hasCompatibleTool(sdkToolName, tools),
+  );
 }
 
 function hasWorkspaceMutationCapability(tools: OpenAiToolSpec[]): boolean {
   return hasAnyCompatibleTool(["write", "shell"], tools);
 }
 
-function mcpTargetForClientToolName(name: string, options: { includeMapped?: boolean } = {}): { provider: string; toolName: string } | undefined {
+function mcpTargetForClientToolName(
+  name: string,
+  options: { includeMapped?: boolean } = {},
+): { provider: string; toolName: string } | undefined {
   const trimmed = name.trim();
   if (!trimmed) return undefined;
   if (isKnownMappedToolName(trimmed)) {
-    return options.includeMapped ? { provider: "client", toolName: trimmed } : undefined;
+    return options.includeMapped
+      ? { provider: "client", toolName: trimmed }
+      : undefined;
   }
   if (trimmed.startsWith("mcp__")) {
     const parts = trimmed.split("__").filter(Boolean);
-    if (parts.length >= 3) return { provider: parts[1], toolName: parts.slice(2).join("__") };
+    if (parts.length >= 3)
+      return { provider: parts[1], toolName: parts.slice(2).join("__") };
   }
   const index = trimmed.indexOf("_");
   if (index > 0 && index < trimmed.length - 1) {
-    return { provider: trimmed.slice(0, index), toolName: trimmed.slice(index + 1) };
+    return {
+      provider: trimmed.slice(0, index),
+      toolName: trimmed.slice(index + 1),
+    };
   }
   return { provider: "client", toolName: trimmed };
 }
 
 function isKnownMappedToolName(name: string): boolean {
   return new Set([
-    "bash", "shell", "terminal", "runterminalcmd", "runterminalcommand", "runshellcommand",
-    "write", "writefile", "createfile",
-    "read", "readfile", "openfile",
-    "edit", "editfile", "replacefile", "searchreplace",
-    "delete", "deletefile", "removefile",
-    "grep", "search", "searchfiles", "ripgrep", "rg",
-    "glob", "fileglob", "filesearch", "find", "findfile", "findfiles",
-    "ls", "list", "listfiles", "listdirectory",
-    "mcp", "callmcptool",
-    "semsearch", "semanticsearch", "searchcode",
-    "todowrite", "todowritetoolcall", "updatetodos", "writetodos"
+    "bash",
+    "shell",
+    "terminal",
+    "runterminalcmd",
+    "runterminalcommand",
+    "runshellcommand",
+    "write",
+    "writefile",
+    "createfile",
+    "read",
+    "readfile",
+    "openfile",
+    "edit",
+    "editfile",
+    "replacefile",
+    "searchreplace",
+    "delete",
+    "deletefile",
+    "removefile",
+    "grep",
+    "search",
+    "searchfiles",
+    "ripgrep",
+    "rg",
+    "glob",
+    "fileglob",
+    "filesearch",
+    "find",
+    "findfile",
+    "findfiles",
+    "ls",
+    "list",
+    "listfiles",
+    "listdirectory",
+    "mcp",
+    "callmcptool",
+    "semsearch",
+    "semanticsearch",
+    "searchcode",
+    "todowrite",
+    "todowritetoolcall",
+    "updatetodos",
+    "writetodos",
   ]).has(normalizeToolName(name));
 }
 
 function validateCommonUnsupported(record: Record<string, unknown>) {
   if (typeof record.n === "number" && record.n !== 1) {
-    throw new HttpError("Only n=1 is supported.", 400, "unsupported_parameter", "n");
+    throw new HttpError(
+      "Only n=1 is supported.",
+      400,
+      "unsupported_parameter",
+      "n",
+    );
   }
   if (record.logprobs === true || record.top_logprobs !== undefined) {
-    throw new HttpError("logprobs are not available through Cursor's API.", 400, "unsupported_parameter", "logprobs");
+    throw new HttpError(
+      "logprobs are not available through Cursor's API.",
+      400,
+      "unsupported_parameter",
+      "logprobs",
+    );
   }
-  if (Array.isArray(record.modalities) && record.modalities.some((value) => value !== "text")) {
-    throw new HttpError("Only text output is supported.", 400, "unsupported_parameter", "modalities");
+  if (
+    Array.isArray(record.modalities) &&
+    record.modalities.some((value) => value !== "text")
+  ) {
+    throw new HttpError(
+      "Only text output is supported.",
+      400,
+      "unsupported_parameter",
+      "modalities",
+    );
   }
   if (record.audio !== undefined) {
-    throw new HttpError("Audio output is not supported.", 400, "unsupported_parameter", "audio");
+    throw new HttpError(
+      "Audio output is not supported.",
+      400,
+      "unsupported_parameter",
+      "audio",
+    );
   }
 }
 
-function appendChatOptions(transcript: string[], record: Record<string, unknown>) {
+function appendChatOptions(
+  transcript: string[],
+  record: Record<string, unknown>,
+) {
   const constraints: string[] = [];
-  const maxTokens = integerOrNull(record.max_completion_tokens ?? record.max_tokens);
-  if (maxTokens) constraints.push(`Keep the answer within about ${maxTokens} output tokens.`);
+  const maxTokens = integerOrNull(
+    record.max_completion_tokens ?? record.max_tokens,
+  );
+  if (maxTokens)
+    constraints.push(
+      `Keep the answer within about ${maxTokens} output tokens.`,
+    );
   appendStopConstraint(constraints, record.stop);
   appendJsonConstraint(constraints, record.response_format);
-  if (constraints.length) transcript.push("", "OUTPUT CONSTRAINTS:", ...constraints.map((item) => `- ${item}`));
+  if (constraints.length)
+    transcript.push(
+      "",
+      "OUTPUT CONSTRAINTS:",
+      ...constraints.map((item) => `- ${item}`),
+    );
 }
 
-function appendResponseOptions(transcript: string[], record: Record<string, unknown>) {
+function appendResponseOptions(
+  transcript: string[],
+  record: Record<string, unknown>,
+) {
   const constraints: string[] = [];
   const maxTokens = integerOrNull(record.max_output_tokens);
-  if (maxTokens) constraints.push(`Keep the answer within about ${maxTokens} output tokens.`);
+  if (maxTokens)
+    constraints.push(
+      `Keep the answer within about ${maxTokens} output tokens.`,
+    );
   appendStopConstraint(constraints, record.stop);
   const text = isRecord(record.text) ? record.text : undefined;
   appendJsonConstraint(constraints, text?.format);
-  if (constraints.length) transcript.push("", "OUTPUT CONSTRAINTS:", ...constraints.map((item) => `- ${item}`));
+  if (constraints.length)
+    transcript.push(
+      "",
+      "OUTPUT CONSTRAINTS:",
+      ...constraints.map((item) => `- ${item}`),
+    );
 }
 
 function appendStopConstraint(constraints: string[], stop: unknown) {
-  if (typeof stop === "string") constraints.push(`Do not include text after this stop sequence: ${stop}`);
-  else if (Array.isArray(stop) && stop.length) constraints.push(`Stop before any of these sequences: ${stop.join(", ")}`);
+  if (typeof stop === "string")
+    constraints.push(`Do not include text after this stop sequence: ${stop}`);
+  else if (Array.isArray(stop) && stop.length)
+    constraints.push(`Stop before any of these sequences: ${stop.join(", ")}`);
 }
 
 function appendJsonConstraint(constraints: string[], format: unknown) {
   if (!isRecord(format)) return;
-  if (format.type === "json_object") constraints.push("Return a single valid JSON object and no surrounding prose.");
+  if (format.type === "json_object")
+    constraints.push(
+      "Return a single valid JSON object and no surrounding prose.",
+    );
   if (format.type === "json_schema") {
-    const schema = isRecord(format.json_schema) ? format.json_schema.schema : format.schema;
-    constraints.push(`Return JSON that matches this schema: ${JSON.stringify(schema ?? format)}`);
+    const schema = isRecord(format.json_schema)
+      ? format.json_schema.schema
+      : format.schema;
+    constraints.push(
+      `Return JSON that matches this schema: ${JSON.stringify(schema ?? format)}`,
+    );
   }
 }
 
-function responseInputToTextAndImages(input: unknown, tools: OpenAiToolSpec[] = []): { text: string; images: CursorImage[] } {
+function responseInputToTextAndImages(
+  input: unknown,
+  tools: OpenAiToolSpec[] = [],
+): { text: string; images: CursorImage[] } {
   if (typeof input === "string") return { text: input, images: [] };
-  if (!Array.isArray(input)) return { text: input === undefined ? "" : JSON.stringify(input), images: [] };
+  if (!Array.isArray(input))
+    return {
+      text: input === undefined ? "" : JSON.stringify(input),
+      images: [],
+    };
   const lines: string[] = [];
   const images: CursorImage[] = [];
-  const toolCallById = new Map<string, { name: string; args: Record<string, unknown> }>();
+  const toolCallById = new Map<
+    string,
+    { name: string; args: Record<string, unknown> }
+  >();
   for (const item of input) {
     if (typeof item === "string") {
       lines.push(item);
@@ -1153,22 +1770,34 @@ function responseInputToTextAndImages(input: unknown, tools: OpenAiToolSpec[] = 
       lines.push(`${role.toUpperCase()}: ${content.text || "[empty]"}`);
       images.push(...content.images);
     } else if (record.type === "function_call") {
-      const callId = typeof record.call_id === "string" && record.call_id.trim()
-        ? record.call_id.trim()
-        : typeof record.id === "string" && record.id.trim()
-          ? record.id.trim()
-          : `call_response_${toolCallById.size}`;
+      const callId =
+        typeof record.call_id === "string" && record.call_id.trim()
+          ? record.call_id.trim()
+          : typeof record.id === "string" && record.id.trim()
+            ? record.id.trim()
+            : `call_response_${toolCallById.size}`;
       const name = typeof record.name === "string" ? record.name : "unknown";
       const args = parseToolCallArguments(record.arguments);
       toolCallById.set(callId, { name, args });
-      lines.push(`ASSISTANT TOOL_CALLS: ${JSON.stringify([{ id: callId, type: "function", function: { name, arguments: JSON.stringify(args) } }])}`);
+      lines.push(
+        `ASSISTANT TOOL_CALLS: ${JSON.stringify([{ id: callId, type: "function", function: { name, arguments: JSON.stringify(args) } }])}`,
+      );
     } else if (record.type === "function_call_output") {
       const callId = typeof record.call_id === "string" ? record.call_id : "";
       const output = responseToolOutputText(record.output);
       const remembered = toolCallById.get(callId);
-      const label = [remembered?.name ? `name=${remembered.name}` : "", callId ? `tool_call_id=${callId}` : ""].filter(Boolean).join(" ");
-      lines.push(`TOOL RESULT${label ? ` (${label})` : ""}: ${output || "[empty]"}`);
-      lines.push(`LOCAL TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(callId, remembered?.name || "", output, toolCallById, tools))}`);
+      const label = [
+        remembered?.name ? `name=${remembered.name}` : "",
+        callId ? `tool_call_id=${callId}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      lines.push(
+        `TOOL RESULT${label ? ` (${label})` : ""}: ${output || "[empty]"}`,
+      );
+      lines.push(
+        `LOCAL TOOL RESULT: ${JSON.stringify(sdkToolResultFeedback(callId, remembered?.name || "", output, toolCallById, tools))}`,
+      );
     } else {
       lines.push(JSON.stringify(record));
     }
@@ -1178,11 +1807,11 @@ function responseInputToTextAndImages(input: unknown, tools: OpenAiToolSpec[] = 
 
 function responseInputWithPrevious(
   input: unknown,
-  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] }
+  options: { previousOutput?: unknown[]; previousInputItems?: unknown[] },
 ): unknown {
   const previous = [
     ...(options.previousInputItems ?? []),
-    ...(options.previousOutput ?? [])
+    ...(options.previousOutput ?? []),
   ];
   if (!previous.length) return input;
   return [...previous, ...responseInputArray(input)];
@@ -1204,12 +1833,15 @@ function normalizeResponseInputItem(item: unknown, index: number): unknown {
   return responseInputMessage(responseInputText(item), `item_${index}`);
 }
 
-function responseInputMessage(text: string, id: string): Record<string, unknown> {
+function responseInputMessage(
+  text: string,
+  id: string,
+): Record<string, unknown> {
   return {
     id,
     type: "message",
     role: "user",
-    content: [{ type: "input_text", text }]
+    content: [{ type: "input_text", text }],
   };
 }
 
@@ -1229,10 +1861,15 @@ function responseToolOutputText(output: unknown): string {
   return JSON.stringify(output);
 }
 
-function contentToTextAndImages(content: unknown, role: string): { text: string; images: CursorImage[] } {
+function contentToTextAndImages(
+  content: unknown,
+  role: string,
+): { text: string; images: CursorImage[] } {
   if (typeof content === "string") return { text: content, images: [] };
-  if (content === null || content === undefined) return { text: "", images: [] };
-  if (!Array.isArray(content)) return { text: JSON.stringify(content), images: [] };
+  if (content === null || content === undefined)
+    return { text: "", images: [] };
+  if (!Array.isArray(content))
+    return { text: JSON.stringify(content), images: [] };
 
   const parts: string[] = [];
   const images: CursorImage[] = [];
@@ -1246,17 +1883,17 @@ function contentToTextAndImages(content: unknown, role: string): { text: string;
       continue;
     }
     const type = part.type;
-    if ((type === "text" || type === "input_text" || type === "output_text") && typeof part.text === "string") {
+    if (
+      (type === "text" || type === "input_text" || type === "output_text") &&
+      typeof part.text === "string"
+    ) {
       parts.push(part.text);
-    } else if (type === "image_url" && isRecord(part.image_url) && typeof part.image_url.url === "string") {
-      images.push(imageFromUrl(part.image_url.url, part.image_url));
-      parts.push("[image]");
-    } else if (type === "input_image" && typeof part.image_url === "string") {
-      images.push(imageFromUrl(part.image_url));
-      parts.push("[image]");
-    } else if (type === "input_image" && isRecord(part.image_url) && typeof part.image_url.url === "string") {
-      images.push(imageFromUrl(part.image_url.url, part.image_url));
-      parts.push("[image]");
+    } else if (type === "image_url" || type === "input_image") {
+      // Cursor's SDK path accepts vision/PDF inputs when they are embedded in the
+      // conversation transcript as OpenAI-style file parts. Routing extracted
+      // images through StreamChat requires private backend protobuf details that
+      // are not available in self-hosted Docker deployments.
+      parts.push(embedVisionPartAsFile(part));
     } else if (type === "tool_result" || type === "function_call_output") {
       parts.push(`${role} ${String(type)}: ${JSON.stringify(part)}`);
     } else {
@@ -1266,7 +1903,10 @@ function contentToTextAndImages(content: unknown, role: string): { text: string;
   return { text: parts.join("\n"), images };
 }
 
-function shouldRequireLocalTool(text: string, tools: OpenAiToolSpec[]): boolean {
+function shouldRequireLocalTool(
+  text: string,
+  tools: OpenAiToolSpec[],
+): boolean {
   if (!tools.length) return false;
   if (explicitlyRequestedToolName(text, tools)) return true;
   const lower = text.toLowerCase();
@@ -1277,29 +1917,62 @@ function shouldRequireLocalTool(text: string, tools: OpenAiToolSpec[]): boolean 
     lower.includes("file") ||
     lower.includes("folder") ||
     lower.includes("directory") ||
-    /\b[\w.-]+\.(html|css|js|ts|tsx|jsx|json|md|txt|py|rb|go|rs|swift|toml|ya?ml)\b/.test(lower);
-  const wantsFileMutation = /\b(create|write|save|overwrite|edit|modify|update|delete|remove|make)\b/.test(lower);
-  if (hasPathSignal && wantsFileMutation && hasWorkspaceMutationCapability(tools)) return true;
+    /\b[\w.-]+\.(html|css|js|ts|tsx|jsx|json|md|txt|py|rb|go|rs|swift|toml|ya?ml)\b/.test(
+      lower,
+    );
+  const wantsFileMutation =
+    /\b(create|write|save|overwrite|edit|modify|update|delete|remove|make)\b/.test(
+      lower,
+    );
+  if (
+    hasPathSignal &&
+    wantsFileMutation &&
+    hasWorkspaceMutationCapability(tools)
+  )
+    return true;
 
   const wantsProjectScaffold =
-    /\b(build|create|make|scaffold|generate|implement|setup|set up)\b/.test(lower) &&
-    /\b(app|application|site|website|project|component|page|vite|react|next|vue|svelte|todo|dashboard|cli)\b/.test(lower);
-  if (wantsProjectScaffold && hasWorkspaceMutationCapability(tools)) return true;
+    /\b(build|create|make|scaffold|generate|implement|setup|set up)\b/.test(
+      lower,
+    ) &&
+    /\b(app|application|site|website|project|component|page|vite|react|next|vue|svelte|todo|dashboard|cli)\b/.test(
+      lower,
+    );
+  if (wantsProjectScaffold && hasWorkspaceMutationCapability(tools))
+    return true;
 
-  const wantsCommand = /\b(run|execute|start|launch)\b/.test(lower) &&
-    (lower.includes("command") || lower.includes("shell") || lower.includes("terminal") || lower.includes("server"));
+  const wantsCommand =
+    /\b(run|execute|start|launch)\b/.test(lower) &&
+    (lower.includes("command") ||
+      lower.includes("shell") ||
+      lower.includes("terminal") ||
+      lower.includes("server"));
   return wantsCommand && hasCompatibleTool("shell", tools);
 }
 
-function hasRequiredLocalToolCall(messages: unknown[], tools: OpenAiToolSpec[], latestUserText: string): boolean {
+function hasRequiredLocalToolCall(
+  messages: unknown[],
+  tools: OpenAiToolSpec[],
+  latestUserText: string,
+): boolean {
   const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
-  if (requestedTool) return hasSpecificToolCallAfterLatestUser(messages, requestedTool, tools);
+  if (requestedTool)
+    return hasSpecificToolCallAfterLatestUser(messages, requestedTool, tools);
   return hasWorkspaceMutationToolCall(messages, tools);
 }
 
-function hasRequiredResponseLocalToolCall(input: unknown, tools: OpenAiToolSpec[], latestUserText: string): boolean {
+function hasRequiredResponseLocalToolCall(
+  input: unknown,
+  tools: OpenAiToolSpec[],
+  latestUserText: string,
+): boolean {
   const requestedTool = explicitlyRequestedToolName(latestUserText, tools);
-  if (requestedTool) return hasSpecificResponseToolCallAfterLatestUser(input, requestedTool, tools);
+  if (requestedTool)
+    return hasSpecificResponseToolCallAfterLatestUser(
+      input,
+      requestedTool,
+      tools,
+    );
   return hasResponseWorkspaceMutationToolCall(input, tools);
 }
 
@@ -1325,7 +1998,10 @@ function latestUserTextFromResponseInput(input: unknown): string {
   return "";
 }
 
-function hasWorkspaceMutationToolCall(messages: unknown[], tools: OpenAiToolSpec[] = []): boolean {
+function hasWorkspaceMutationToolCall(
+  messages: unknown[],
+  tools: OpenAiToolSpec[] = [],
+): boolean {
   let sawLatestUser = false;
   let mutationAfterLatestUser = false;
   for (const message of messages) {
@@ -1335,14 +2011,22 @@ function hasWorkspaceMutationToolCall(messages: unknown[], tools: OpenAiToolSpec
       sawLatestUser = true;
       mutationAfterLatestUser = false;
     }
-    if (sawLatestUser && typeof message.name === "string" && isWorkspaceMutationToolCall(message.name, undefined, tools)) {
+    if (
+      sawLatestUser &&
+      typeof message.name === "string" &&
+      isWorkspaceMutationToolCall(message.name, undefined, tools)
+    ) {
       mutationAfterLatestUser = true;
     }
     if (!Array.isArray(message.tool_calls)) continue;
     for (const toolCall of message.tool_calls) {
       if (!isRecord(toolCall)) continue;
       const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
-      if (sawLatestUser && typeof fn?.name === "string" && isWorkspaceMutationToolCall(fn.name, fn.arguments, tools)) {
+      if (
+        sawLatestUser &&
+        typeof fn?.name === "string" &&
+        isWorkspaceMutationToolCall(fn.name, fn.arguments, tools)
+      ) {
         mutationAfterLatestUser = true;
       }
     }
@@ -1350,7 +2034,11 @@ function hasWorkspaceMutationToolCall(messages: unknown[], tools: OpenAiToolSpec
   return mutationAfterLatestUser;
 }
 
-function hasSpecificToolCallAfterLatestUser(messages: unknown[], requestedTool: string, tools: OpenAiToolSpec[] = []): boolean {
+function hasSpecificToolCallAfterLatestUser(
+  messages: unknown[],
+  requestedTool: string,
+  tools: OpenAiToolSpec[] = [],
+): boolean {
   let sawLatestUser = false;
   let foundAfterLatestUser = false;
   for (const message of messages) {
@@ -1365,7 +2053,14 @@ function hasSpecificToolCallAfterLatestUser(messages: unknown[], requestedTool: 
       if (!isRecord(toolCall)) continue;
       const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
       if (!fn || typeof fn.name !== "string") continue;
-      if (toolCallMatchesClientTool(fn.name, parseToolCallArguments(fn.arguments), requestedTool, tools)) {
+      if (
+        toolCallMatchesClientTool(
+          fn.name,
+          parseToolCallArguments(fn.arguments),
+          requestedTool,
+          tools,
+        )
+      ) {
         foundAfterLatestUser = true;
       }
     }
@@ -1373,7 +2068,10 @@ function hasSpecificToolCallAfterLatestUser(messages: unknown[], requestedTool: 
   return foundAfterLatestUser;
 }
 
-function hasResponseWorkspaceMutationToolCall(input: unknown, tools: OpenAiToolSpec[] = []): boolean {
+function hasResponseWorkspaceMutationToolCall(
+  input: unknown,
+  tools: OpenAiToolSpec[] = [],
+): boolean {
   if (!Array.isArray(input)) return false;
   let sawLatestUser = false;
   let mutationAfterLatestUser = false;
@@ -1392,13 +2090,23 @@ function hasResponseWorkspaceMutationToolCall(input: unknown, tools: OpenAiToolS
       }
       continue;
     }
-    if (!sawLatestUser || item.type !== "function_call" || typeof item.name !== "string") continue;
-    if (isWorkspaceMutationToolCall(item.name, item.arguments, tools)) mutationAfterLatestUser = true;
+    if (
+      !sawLatestUser ||
+      item.type !== "function_call" ||
+      typeof item.name !== "string"
+    )
+      continue;
+    if (isWorkspaceMutationToolCall(item.name, item.arguments, tools))
+      mutationAfterLatestUser = true;
   }
   return mutationAfterLatestUser;
 }
 
-function hasSpecificResponseToolCallAfterLatestUser(input: unknown, requestedTool: string, tools: OpenAiToolSpec[] = []): boolean {
+function hasSpecificResponseToolCallAfterLatestUser(
+  input: unknown,
+  requestedTool: string,
+  tools: OpenAiToolSpec[] = [],
+): boolean {
   if (!Array.isArray(input)) return false;
   let sawLatestUser = false;
   let foundAfterLatestUser = false;
@@ -1419,33 +2127,68 @@ function hasSpecificResponseToolCallAfterLatestUser(input: unknown, requestedToo
       }
       continue;
     }
-    if (!sawLatestUser || item.type !== "function_call" || typeof item.name !== "string") continue;
-    if (toolCallMatchesClientTool(item.name, parseToolCallArguments(item.arguments), requestedTool, tools)) {
+    if (
+      !sawLatestUser ||
+      item.type !== "function_call" ||
+      typeof item.name !== "string"
+    )
+      continue;
+    if (
+      toolCallMatchesClientTool(
+        item.name,
+        parseToolCallArguments(item.arguments),
+        requestedTool,
+        tools,
+      )
+    ) {
       foundAfterLatestUser = true;
     }
   }
   return foundAfterLatestUser;
 }
 
-function toolCallMatchesClientTool(name: string, args: Record<string, unknown>, requestedTool: string, tools: OpenAiToolSpec[]): boolean {
+function toolCallMatchesClientTool(
+  name: string,
+  args: Record<string, unknown>,
+  requestedTool: string,
+  tools: OpenAiToolSpec[],
+): boolean {
   if (normalizeToolName(name) === normalizeToolName(requestedTool)) return true;
-  const resolved = tools.length ? resolveToolSpec(name, args, tools) : undefined;
-  return normalizeToolName(resolved?.name || "") === normalizeToolName(requestedTool);
+  const resolved = tools.length
+    ? resolveToolSpec(name, args, tools)
+    : undefined;
+  return (
+    normalizeToolName(resolved?.name || "") === normalizeToolName(requestedTool)
+  );
 }
 
-function isWorkspaceMutationToolCall(name: string, args: unknown, tools: OpenAiToolSpec[] = []): boolean {
+function isWorkspaceMutationToolCall(
+  name: string,
+  args: unknown,
+  tools: OpenAiToolSpec[] = [],
+): boolean {
   const parsed = parseToolCallArguments(args);
   const canonical = canonicalToolName(name);
   if (["write", "edit", "delete"].includes(canonical)) return true;
   if (canonical === "shell") {
-    const command = firstStringArgFromRecords(parsed, ["command", "cmd", "script", "input"]);
+    const command = firstStringArgFromRecords(parsed, [
+      "command",
+      "cmd",
+      "script",
+      "input",
+    ]);
     return command ? isFileMutatingShellCommand(command) : false;
   }
 
   const tool = tools.length ? resolveToolSpec(name, parsed, tools) : undefined;
   if (!tool) return false;
   if (schemaLooksCompatible("shell", tool)) {
-    const command = firstStringArgFromRecords(parsed, ["command", "cmd", "script", "input"]);
+    const command = firstStringArgFromRecords(parsed, [
+      "command",
+      "cmd",
+      "script",
+      "input",
+    ]);
     if (command && isFileMutatingShellCommand(command)) return true;
   }
   if (
@@ -1459,7 +2202,10 @@ function isWorkspaceMutationToolCall(name: string, args: unknown, tools: OpenAiT
   return false;
 }
 
-function argumentRecords(args: Record<string, unknown>, depth = 0): Record<string, unknown>[] {
+function argumentRecords(
+  args: Record<string, unknown>,
+  depth = 0,
+): Record<string, unknown>[] {
   if (depth > 3 || Array.isArray(args)) return [args];
   const records = [args];
   for (const key of wrapperObjectPropertyCandidates()) {
@@ -1470,7 +2216,10 @@ function argumentRecords(args: Record<string, unknown>, depth = 0): Record<strin
   return records;
 }
 
-function firstStringArgFromRecords(args: Record<string, unknown>, keys: string[]): string | undefined {
+function firstStringArgFromRecords(
+  args: Record<string, unknown>,
+  keys: string[],
+): string | undefined {
   for (const record of argumentRecords(args)) {
     const value = firstStringArg(record, ...keys);
     if (value) return value;
@@ -1478,11 +2227,25 @@ function firstStringArgFromRecords(args: Record<string, unknown>, keys: string[]
   return undefined;
 }
 
-function looksLikeWorkspaceMutationArguments(args: Record<string, unknown>): boolean {
+function looksLikeWorkspaceMutationArguments(
+  args: Record<string, unknown>,
+): boolean {
   for (const record of argumentRecords(args)) {
-    const path = firstArg(record, [...pathCandidates(), "target_file", "targetFile"]);
+    const path = firstArg(record, [
+      ...pathCandidates(),
+      "target_file",
+      "targetFile",
+    ]);
     const hasPath = path !== undefined && shouldIncludeOptionalPath(path);
-    const patch = firstStringArgAllowEmpty(record, "patchContent", "patch_content", "patch", "diff", "unifiedDiff", "unified_diff");
+    const patch = firstStringArgAllowEmpty(
+      record,
+      "patchContent",
+      "patch_content",
+      "patch",
+      "diff",
+      "unifiedDiff",
+      "unified_diff",
+    );
     if (patch !== undefined) return true;
 
     const operation = firstStringArg(record, ...operationPropertyCandidates());
@@ -1496,7 +2259,7 @@ function looksLikeWorkspaceMutationArguments(args: Record<string, unknown>): boo
       "update",
       "delete",
       "remove",
-      "strreplace"
+      "strreplace",
     ].includes(normalizedOperation);
     if (!hasPath) continue;
 
@@ -1510,13 +2273,37 @@ function looksLikeWorkspaceMutationArguments(args: Record<string, unknown>): boo
       "fileContent",
       "file_content",
       "streamContent",
-      "stream_content"
+      "stream_content",
     );
-    const oldText = firstStringArgAllowEmpty(record, "oldString", "old_string", "old_str", "oldText", "old_text", "search", "searchString", "search_string");
-    const newText = firstStringArgAllowEmpty(record, "newString", "new_string", "new_str", "newText", "new_text", "replacement", "replace");
+    const oldText = firstStringArgAllowEmpty(
+      record,
+      "oldString",
+      "old_string",
+      "old_str",
+      "oldText",
+      "old_text",
+      "search",
+      "searchString",
+      "search_string",
+    );
+    const newText = firstStringArgAllowEmpty(
+      record,
+      "newString",
+      "new_string",
+      "new_str",
+      "newText",
+      "new_text",
+      "replacement",
+      "replace",
+    );
 
     if (content !== undefined && (!operation || mutatingOperation)) return true;
-    if (oldText !== undefined && newText !== undefined && (!operation || mutatingOperation)) return true;
+    if (
+      oldText !== undefined &&
+      newText !== undefined &&
+      (!operation || mutatingOperation)
+    )
+      return true;
     if (["delete", "remove"].includes(normalizedOperation)) return true;
   }
   return false;
@@ -1524,11 +2311,18 @@ function looksLikeWorkspaceMutationArguments(args: Record<string, unknown>): boo
 
 function isFileMutatingShellCommand(command: string): boolean {
   const text = command.toLowerCase();
-  if (/(^|[\s;&|])(?:cat|printf|echo)\b[\s\S]*(?:>|>>|<<)/.test(text)) return true;
+  if (/(^|[\s;&|])(?:cat|printf|echo)\b[\s\S]*(?:>|>>|<<)/.test(text))
+    return true;
   if (/(?:^|[\s;&|])(?:tee|touch|cp|mv|rm)\b/.test(text)) return true;
   if (/(?:^|[\s;&|])sed\b[^\n]*(?:\s-i\b|\s-i['"]?\s)/.test(text)) return true;
-  if (/(?:^|[\s;&|])perl\b[^\n]*(?:\s-pi\b|\s-pi['"]?\s)/.test(text)) return true;
-  if (/(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:init|install|add|create)\b/.test(text)) return true;
+  if (/(?:^|[\s;&|])perl\b[^\n]*(?:\s-pi\b|\s-pi['"]?\s)/.test(text))
+    return true;
+  if (
+    /(?:^|[\s;&|])(?:npm|pnpm|yarn|bun)\s+(?:init|install|add|create)\b/.test(
+      text,
+    )
+  )
+    return true;
   return /(?:>|>>)\s*(?:\.{0,2}\/)?[a-z0-9._/-]+/.test(text);
 }
 
@@ -1537,7 +2331,7 @@ function addWorkspaceActionToUserText(text: string): string {
   return [
     userText,
     "",
-    "Workspace action required: create or update the necessary project files directly with write/edit/bash tools. Do not output code for the user to save."
+    "Workspace action required: create or update the necessary project files directly with write/edit/bash tools. Do not output code for the user to save.",
   ].join("\n");
 }
 
@@ -1547,20 +2341,28 @@ function contentToPlainText(content: unknown): string {
   const parts: string[] = [];
   for (const part of content) {
     if (typeof part === "string") parts.push(part);
-    else if (isRecord(part) && typeof part.text === "string") parts.push(part.text);
+    else if (isRecord(part) && typeof part.text === "string")
+      parts.push(part.text);
   }
   return parts.join("\n");
 }
 
-function toolCallContextFromMessages(messages: unknown[]): ToolCallContext | undefined {
+function toolCallContextFromMessages(
+  messages: unknown[],
+): ToolCallContext | undefined {
   const workingDirectory = messages
-    .map((message) => isRecord(message) ? contentToPlainText(message.content) : "")
+    .map((message) =>
+      isRecord(message) ? contentToPlainText(message.content) : "",
+    )
     .map(workingDirectoryFromText)
     .find(Boolean);
   return workingDirectory ? { workingDirectory } : undefined;
 }
 
-function toolCallContextFromResponseInput(input: unknown, instructions: unknown): ToolCallContext | undefined {
+function toolCallContextFromResponseInput(
+  input: unknown,
+  instructions: unknown,
+): ToolCallContext | undefined {
   const texts: string[] = [];
   if (typeof instructions === "string") texts.push(instructions);
   for (const item of responseInputArray(input)) {
@@ -1580,7 +2382,7 @@ function workingDirectoryFromText(text: string): string | undefined {
     /^\s*Working directory:\s*(.+)$/im,
     /^\s*Current working directory:\s*(.+)$/im,
     /^\s*Workspace root folder:\s*(.+)$/im,
-    /^\s*Workspace root:\s*(.+)$/im
+    /^\s*Workspace root:\s*(.+)$/im,
   ]) {
     const match = pattern.exec(text);
     const value = sanitizeContextPath(match?.[1]);
@@ -1591,18 +2393,27 @@ function workingDirectoryFromText(text: string): string | undefined {
 
 function sanitizeContextPath(value: string | undefined): string | undefined {
   const trimmed = value?.trim().replace(/^["']|["']$/g, "");
-  if (!trimmed || trimmed === "." || trimmed.toLowerCase() === "undefined" || trimmed.toLowerCase() === "null") return undefined;
+  if (
+    !trimmed ||
+    trimmed === "." ||
+    trimmed.toLowerCase() === "undefined" ||
+    trimmed.toLowerCase() === "null"
+  )
+    return undefined;
   return trimmed;
 }
 
-function rememberOpenCodeToolCalls(toolCalls: unknown[], output: Map<string, { name: string; args: Record<string, unknown> }>) {
+function rememberOpenCodeToolCalls(
+  toolCalls: unknown[],
+  output: Map<string, { name: string; args: Record<string, unknown> }>,
+) {
   for (const toolCall of toolCalls) {
     if (!isRecord(toolCall) || typeof toolCall.id !== "string") continue;
     const fn = isRecord(toolCall.function) ? toolCall.function : undefined;
     if (!fn || typeof fn.name !== "string") continue;
     output.set(toolCall.id, {
       name: fn.name,
-      args: parseToolCallArguments(fn.arguments)
+      args: parseToolCallArguments(fn.arguments),
     });
   }
 }
@@ -1623,38 +2434,57 @@ function sdkToolResultFeedback(
   fallbackToolName: string,
   resultText: string,
   toolCallById: Map<string, { name: string; args: Record<string, unknown> }>,
-  tools: OpenAiToolSpec[] = []
+  tools: OpenAiToolSpec[] = [],
 ): Record<string, unknown> {
   const original = toolCallById.get(toolCallId);
   const sdkMemory = sdkToolCallMemory.get(toolCallId);
   const name = original?.name || fallbackToolName || "unknown";
   const args = original?.args ?? {};
   const tool = toolSpecByName(tools, name);
-  const sdkName = sdkMemory?.name ?? sdkCanonicalFromToolCallId(toolCallId) ?? sdkToolNameForOpenCodeTool(name, args, tool);
-  const sdkArgs = sdkMemory?.args ?? openCodeArgsToSdkArgs(name, args, tool, sdkName);
+  const sdkName =
+    sdkMemory?.name ??
+    sdkCanonicalFromToolCallId(toolCallId) ??
+    sdkToolNameForOpenCodeTool(name, args, tool);
+  const sdkArgs =
+    sdkMemory?.args ?? openCodeArgsToSdkArgs(name, args, tool, sdkName);
   return {
     type: "tool_call",
     call_id: toolCallId || "unknown",
     name: sdkName,
     status: "completed",
     args: sdkArgs,
-    result: openCodeToolResultToSdkResult(sdkMemory?.name ?? name, sdkMemory?.args ?? args, resultText, sdkName)
+    result: openCodeToolResultToSdkResult(
+      sdkMemory?.name ?? name,
+      sdkMemory?.args ?? args,
+      resultText,
+      sdkName,
+    ),
   };
 }
 
 function sdkCanonicalFromToolCallId(toolCallId: string): string | undefined {
-  const match = /_(shell|write|read|edit|delete|grep|glob|ls|readlints|mcp|semsearch|todowrite)_\d+$/i.exec(toolCallId);
+  const match =
+    /_(shell|write|read|edit|delete|grep|glob|ls|readlints|mcp|semsearch|todowrite)_\d+$/i.exec(
+      toolCallId,
+    );
   if (!match) return undefined;
   const canonical = match[1].toLowerCase();
   return KNOWN_SDK_CANONICAL_TOOLS.has(canonical) ? canonical : undefined;
 }
 
-function toolSpecByName(tools: OpenAiToolSpec[], name: string): OpenAiToolSpec | undefined {
+function toolSpecByName(
+  tools: OpenAiToolSpec[],
+  name: string,
+): OpenAiToolSpec | undefined {
   const normalized = normalizeToolName(name);
   return tools.find((tool) => normalizeToolName(tool.name) === normalized);
 }
 
-function sdkToolNameForOpenCodeTool(name: string, args: Record<string, unknown> = {}, tool?: OpenAiToolSpec): string {
+function sdkToolNameForOpenCodeTool(
+  name: string,
+  args: Record<string, unknown> = {},
+  tool?: OpenAiToolSpec,
+): string {
   const directCanonical = canonicalToolName(name);
   if (KNOWN_SDK_CANONICAL_TOOLS.has(directCanonical)) return directCanonical;
   if (explicitMcpTargetForClientToolName(name)) return "mcp";
@@ -1664,35 +2494,95 @@ function sdkToolNameForOpenCodeTool(name: string, args: Record<string, unknown> 
   return name;
 }
 
-function explicitMcpTargetForClientToolName(name: string): { provider: string; toolName: string } | undefined {
+function explicitMcpTargetForClientToolName(
+  name: string,
+): { provider: string; toolName: string } | undefined {
   const trimmed = name.trim();
-  return trimmed.startsWith("mcp__") ? mcpTargetForClientToolName(trimmed) : undefined;
+  return trimmed.startsWith("mcp__")
+    ? mcpTargetForClientToolName(trimmed)
+    : undefined;
 }
 
-function inferSdkCanonicalFromClientTool(args: Record<string, unknown>, tool?: OpenAiToolSpec): string | undefined {
+function inferSdkCanonicalFromClientTool(
+  args: Record<string, unknown>,
+  tool?: OpenAiToolSpec,
+): string | undefined {
   const operation = firstStringArg(args, ...operationPropertyCandidates());
   const normalizedOperation = normalizeToolName(operation || "");
-  if (["write", "create", "overwrite"].includes(normalizedOperation)) return "write";
-  if (["replace", "strreplace", "edit", "update"].includes(normalizedOperation)) return "edit";
+  if (["write", "create", "overwrite"].includes(normalizedOperation))
+    return "write";
+  if (["replace", "strreplace", "edit", "update"].includes(normalizedOperation))
+    return "edit";
   if (["read", "view", "open"].includes(normalizedOperation)) return "read";
   if (["delete", "remove"].includes(normalizedOperation)) return "delete";
-  if (tool && schemaLooksCompatible("shell", tool) && firstStringArg(args, ...shellCommandCandidates())) return "shell";
-  if (tool && schemaLooksCompatible("edit", tool) && firstStringArgAllowEmpty(args, ...oldTextCandidates()) !== undefined && firstStringArgAllowEmpty(args, ...newTextCandidates()) !== undefined) return "edit";
-  if (tool && schemaLooksCompatible("write", tool) && firstStringArg(args, ...pathCandidates()) && firstStringArgAllowEmpty(args, ...fileContentCandidates()) !== undefined) return "write";
-  if (tool && schemaLooksCompatible("glob", tool) && firstStringArg(args, ...globPatternCandidates())) return "glob";
-  if (tool && schemaLooksCompatible("grep", tool) && firstStringArg(args, "pattern", "query", "search", "regex", "searchPattern", "search_pattern")) return "grep";
-  if (tool && schemaLooksCompatible("ls", tool) && firstStringArg(args, ...pathCandidates(), "directory", "dir")) return "ls";
+  if (
+    tool &&
+    schemaLooksCompatible("shell", tool) &&
+    firstStringArg(args, ...shellCommandCandidates())
+  )
+    return "shell";
+  if (
+    tool &&
+    schemaLooksCompatible("edit", tool) &&
+    firstStringArgAllowEmpty(args, ...oldTextCandidates()) !== undefined &&
+    firstStringArgAllowEmpty(args, ...newTextCandidates()) !== undefined
+  )
+    return "edit";
+  if (
+    tool &&
+    schemaLooksCompatible("write", tool) &&
+    firstStringArg(args, ...pathCandidates()) &&
+    firstStringArgAllowEmpty(args, ...fileContentCandidates()) !== undefined
+  )
+    return "write";
+  if (
+    tool &&
+    schemaLooksCompatible("glob", tool) &&
+    firstStringArg(args, ...globPatternCandidates())
+  )
+    return "glob";
+  if (
+    tool &&
+    schemaLooksCompatible("grep", tool) &&
+    firstStringArg(
+      args,
+      "pattern",
+      "query",
+      "search",
+      "regex",
+      "searchPattern",
+      "search_pattern",
+    )
+  )
+    return "grep";
+  if (
+    tool &&
+    schemaLooksCompatible("ls", tool) &&
+    firstStringArg(args, ...pathCandidates(), "directory", "dir")
+  )
+    return "ls";
   return undefined;
 }
 
-function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>, tool?: OpenAiToolSpec, sdkName?: string): Record<string, unknown> {
-  const canonical = sdkName && KNOWN_SDK_CANONICAL_TOOLS.has(sdkName) ? sdkName : sdkToolNameForOpenCodeTool(toolName, args, tool);
-  const mcpTarget = canonical === "mcp" ? mcpTargetForClientToolName(toolName, { includeMapped: true }) : undefined;
+function openCodeArgsToSdkArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  tool?: OpenAiToolSpec,
+  sdkName?: string,
+): Record<string, unknown> {
+  const canonical =
+    sdkName && KNOWN_SDK_CANONICAL_TOOLS.has(sdkName)
+      ? sdkName
+      : sdkToolNameForOpenCodeTool(toolName, args, tool);
+  const mcpTarget =
+    canonical === "mcp"
+      ? mcpTargetForClientToolName(toolName, { includeMapped: true })
+      : undefined;
   if (mcpTarget) {
     return {
       providerIdentifier: mcpTarget.provider,
       toolName: mcpTarget.toolName,
-      args
+      args,
     };
   }
   if (canonical === "shell") {
@@ -1700,44 +2590,61 @@ function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>, 
     return compactRecord({
       command: firstStringArg(args, ...shellCommandCandidates()),
       workingDirectory: firstStringArg(args, ...shellWorkdirCandidates()),
-      timeout: sdkTimeoutArgument(timeout, tool)
+      timeout: sdkTimeoutArgument(timeout, tool),
     });
   }
   if (canonical === "write") {
     return compactRecord({
       path: firstStringArg(args, ...pathCandidates()),
-      fileText: firstStringArg(args, ...fileContentCandidates(), ...newTextCandidates())
+      fileText: firstStringArg(
+        args,
+        ...fileContentCandidates(),
+        ...newTextCandidates(),
+      ),
     });
   }
   if (canonical === "read") {
     return compactRecord({
       path: firstStringArg(args, ...pathCandidates(), "directory", "dir"),
-      offset: firstNumberArg(args, "offset", "start", "startLine", "start_line"),
-      limit: firstNumberArg(args, "limit", "maxLines", "max_lines", "lineCount", "line_count")
+      offset: firstNumberArg(
+        args,
+        "offset",
+        "start",
+        "startLine",
+        "start_line",
+      ),
+      limit: firstNumberArg(
+        args,
+        "limit",
+        "maxLines",
+        "max_lines",
+        "lineCount",
+        "line_count",
+      ),
     });
   }
   if (canonical === "delete") {
     return compactRecord({
-      path: firstStringArg(args, ...pathCandidates(), "directory", "dir")
+      path: firstStringArg(args, ...pathCandidates(), "directory", "dir"),
     });
   }
   if (canonical === "ls") {
     return compactRecord({
       path: firstStringArg(args, ...pathCandidates(), "directory", "dir"),
-      limit: firstNumberArg(args, "limit", "maxResults", "max_results")
+      limit: firstNumberArg(args, "limit", "maxResults", "max_results"),
     });
   }
   if (canonical === "edit") {
     return compactRecord({
       path: firstStringArg(args, ...pathCandidates(), "directory", "dir"),
       oldString: firstStringArgAllowEmpty(args, ...oldTextCandidates()),
-      newString: firstStringArgAllowEmpty(args, ...newTextCandidates())
+      newString: firstStringArgAllowEmpty(args, ...newTextCandidates()),
     });
   }
   if (canonical === "glob") {
     return compactRecord({
       targetDirectory: firstStringArg(args, ...globPathCandidates()),
-      globPattern: firstStringArg(args, ...globPatternCandidates())
+      globPattern: firstStringArg(args, ...globPatternCandidates()),
     });
   }
   if (canonical === "grep") {
@@ -1745,68 +2652,111 @@ function openCodeArgsToSdkArgs(toolName: string, args: Record<string, unknown>, 
       pattern: firstStringArg(args, "pattern", "query", "search", "regex"),
       path: firstStringArg(args, "path", "directory", "cwd"),
       glob: firstStringArg(args, "glob", "include"),
-      caseInsensitive: firstBooleanArg(args, "caseInsensitive", "case_insensitive", "ignoreCase", "ignore_case"),
+      caseInsensitive: firstBooleanArg(
+        args,
+        "caseInsensitive",
+        "case_insensitive",
+        "ignoreCase",
+        "ignore_case",
+      ),
       literal: firstBooleanArg(args, "literal", "fixedString", "fixed_string"),
       context: firstNumberArg(args, "context", "contextLines", "context_lines"),
-      headLimit: firstNumberArg(args, "headLimit", "head_limit", "limit", "maxResults", "max_results")
+      headLimit: firstNumberArg(
+        args,
+        "headLimit",
+        "head_limit",
+        "limit",
+        "maxResults",
+        "max_results",
+      ),
     });
   }
   return args;
 }
 
-function openCodeToolResultToSdkResult(toolName: string, args: Record<string, unknown>, resultText: string, sdkName?: string): Record<string, unknown> {
+function openCodeToolResultToSdkResult(
+  toolName: string,
+  args: Record<string, unknown>,
+  resultText: string,
+  sdkName?: string,
+): Record<string, unknown> {
   const parsed = parseToolResultPayload(resultText);
-  const canonical = sdkName && KNOWN_SDK_CANONICAL_TOOLS.has(sdkName) ? sdkName : sdkToolNameForOpenCodeTool(toolName, args);
+  const canonical =
+    sdkName && KNOWN_SDK_CANONICAL_TOOLS.has(sdkName)
+      ? sdkName
+      : sdkToolNameForOpenCodeTool(toolName, args);
   if (canonical === "mcp") {
-    return sdkToolResult(parsed, resultText, isRecord(parsed) ? parsed : { text: resultText });
+    return sdkToolResult(
+      parsed,
+      resultText,
+      isRecord(parsed) ? parsed : { text: resultText },
+    );
   }
   if (canonical === "shell") {
     return sdkToolResult(parsed, resultText, {
-      exitCode: numberFromParsed(parsed, ["exitCode", "exit_code", "code"]) ?? 0,
+      exitCode:
+        numberFromParsed(parsed, ["exitCode", "exit_code", "code"]) ?? 0,
       signal: stringFromParsed(parsed, ["signal"]) ?? "",
-      stdout: stringFromParsed(parsed, ["stdout", "output", "text"]) ?? resultText,
+      stdout:
+        stringFromParsed(parsed, ["stdout", "output", "text"]) ?? resultText,
       stderr: stringFromParsed(parsed, ["stderr", "error"]) ?? "",
-      executionTime: numberFromParsed(parsed, ["executionTime", "durationMs", "duration_ms"]) ?? 0
+      executionTime:
+        numberFromParsed(parsed, [
+          "executionTime",
+          "durationMs",
+          "duration_ms",
+        ]) ?? 0,
     });
   }
   if (canonical === "read") {
-    const content = stringFromParsed(parsed, ["content", "text", "output"]) ?? resultText;
+    const content =
+      stringFromParsed(parsed, ["content", "text", "output"]) ?? resultText;
     return sdkToolResult(parsed, resultText, {
       content,
       totalLines: lineCount(content),
-      fileSize: content.length
+      fileSize: content.length,
     });
   }
   if (canonical === "write") {
-    const fileText = firstStringArg(args, ...fileContentCandidates(), ...newTextCandidates()) || "";
+    const fileText =
+      firstStringArg(
+        args,
+        ...fileContentCandidates(),
+        ...newTextCandidates(),
+      ) || "";
     return sdkToolResult(parsed, resultText, {
       path: firstStringArg(args, ...pathCandidates()) || "",
       linesCreated: lineCount(fileText),
-      fileSize: fileText.length
+      fileSize: fileText.length,
     });
   }
   if (canonical === "edit") {
     return sdkToolResult(parsed, resultText, {
-      diffString: stringFromParsed(parsed, ["diff", "diffString", "output"]) ?? resultText
+      diffString:
+        stringFromParsed(parsed, ["diff", "diffString", "output"]) ??
+        resultText,
     });
   }
   if (canonical === "glob") {
-    const files = stringsFromParsed(parsed, ["files", "paths"]) ?? resultTextLines(resultText);
+    const files =
+      stringsFromParsed(parsed, ["files", "paths"]) ??
+      resultTextLines(resultText);
     return sdkToolResult(parsed, resultText, {
       files,
       totalFiles: files.length,
       clientTruncated: false,
-      ripgrepTruncated: false
+      ripgrepTruncated: false,
     });
   }
   return sdkToolResult(parsed, resultText, {
-    text: resultText
+    text: resultText,
   });
 }
 
 function parseToolResultPayload(text: string): unknown {
   const trimmed = text.trim();
-  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return undefined;
+  if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("[")))
+    return undefined;
   try {
     return JSON.parse(trimmed) as unknown;
   } catch {
@@ -1817,15 +2767,26 @@ function parseToolResultPayload(text: string): unknown {
 function isErrorToolResult(parsed: unknown, text: string): boolean {
   if (isRecord(parsed)) {
     if (parsed.isError === true || parsed.error !== undefined) return true;
-    const exitCode = numberFromParsed(parsed, ["exitCode", "exit_code", "code"]);
+    const exitCode = numberFromParsed(parsed, [
+      "exitCode",
+      "exit_code",
+      "code",
+    ]);
     if (exitCode !== undefined && exitCode !== 0) return true;
   }
   return /^\s*(error|failed|exception)\b/i.test(text);
 }
 
-function sdkToolResult(parsed: unknown, resultText: string, value: Record<string, unknown>): Record<string, unknown> {
+function sdkToolResult(
+  parsed: unknown,
+  resultText: string,
+  value: Record<string, unknown>,
+): Record<string, unknown> {
   if (isErrorToolResult(parsed, resultText)) {
-    return { status: "error", error: { message: errorMessageFromToolResult(parsed, resultText) } };
+    return {
+      status: "error",
+      error: { message: errorMessageFromToolResult(parsed, resultText) },
+    };
   }
   return { status: "success", value };
 }
@@ -1834,13 +2795,17 @@ function errorMessageFromToolResult(parsed: unknown, text: string): string {
   if (isRecord(parsed)) {
     const error = parsed.error;
     if (typeof error === "string") return error;
-    if (isRecord(error) && typeof error.message === "string") return error.message;
+    if (isRecord(error) && typeof error.message === "string")
+      return error.message;
     if (typeof parsed.message === "string") return parsed.message;
   }
   return text || "Tool failed";
 }
 
-function firstStringArg(args: Record<string, unknown>, ...keys: string[]): string | undefined {
+function firstStringArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): string | undefined {
   for (const key of keys) {
     const value = args[key];
     if (typeof value === "string" && value.trim()) return value;
@@ -1848,7 +2813,10 @@ function firstStringArg(args: Record<string, unknown>, ...keys: string[]): strin
   return undefined;
 }
 
-function firstNumberArg(args: Record<string, unknown>, ...keys: string[]): number | undefined {
+function firstNumberArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
   for (const key of keys) {
     const value = args[key];
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -1856,32 +2824,60 @@ function firstNumberArg(args: Record<string, unknown>, ...keys: string[]): numbe
   return undefined;
 }
 
-function firstNumberNamedArg(args: Record<string, unknown>, ...keys: string[]): { key: string; value: number } | undefined {
+function firstNumberNamedArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): { key: string; value: number } | undefined {
   for (const key of keys) {
     const value = args[key];
-    if (typeof value === "number" && Number.isFinite(value)) return { key, value };
+    if (typeof value === "number" && Number.isFinite(value))
+      return { key, value };
   }
   const normalizedKeys = new Set(keys.map(normalizeToolName));
   for (const [key, value] of Object.entries(args)) {
-    if (normalizedKeys.has(normalizeToolName(key)) && typeof value === "number" && Number.isFinite(value)) {
+    if (
+      normalizedKeys.has(normalizeToolName(key)) &&
+      typeof value === "number" &&
+      Number.isFinite(value)
+    ) {
       return { key, value };
     }
   }
   return undefined;
 }
 
-function sdkTimeoutArgument(argument: { key: string; value: number } | undefined, tool: OpenAiToolSpec | undefined): number | undefined {
+function sdkTimeoutArgument(
+  argument: { key: string; value: number } | undefined,
+  tool: OpenAiToolSpec | undefined,
+): number | undefined {
   if (!argument) return undefined;
   const source = normalizeToolName(argument.key);
-  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source)) return argument.value;
-  if (["timeoutseconds", "seconds"].includes(source)) return argument.value * 1000;
+  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source))
+    return argument.value;
+  if (["timeoutseconds", "seconds"].includes(source))
+    return argument.value * 1000;
   const schema = toolParameterSchema(tool);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const target = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties) || argument.key;
-  return toolPropertyPrefersSecondsTimeout(tool, target) ? argument.value * 1000 : argument.value;
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const target =
+    firstMatchingProperty(
+      timeoutCandidates(),
+      schema.properties,
+      normalizedProperties,
+    ) || argument.key;
+  return toolPropertyPrefersSecondsTimeout(tool, target)
+    ? argument.value * 1000
+    : argument.value;
 }
 
-function firstBooleanArg(args: Record<string, unknown>, ...keys: string[]): boolean | undefined {
+function firstBooleanArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): boolean | undefined {
   for (const key of keys) {
     const value = args[key];
     if (typeof value === "boolean") return value;
@@ -1903,17 +2899,26 @@ function numberFromParsed(value: unknown, keys: string[]): number | undefined {
   if (!isRecord(value)) return undefined;
   for (const key of keys) {
     const candidate = value[key];
-    if (typeof candidate === "number" && Number.isFinite(candidate)) return candidate;
+    if (typeof candidate === "number" && Number.isFinite(candidate))
+      return candidate;
   }
   return undefined;
 }
 
-function stringsFromParsed(value: unknown, keys: string[]): string[] | undefined {
-  if (Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+function stringsFromParsed(
+  value: unknown,
+  keys: string[],
+): string[] | undefined {
+  if (Array.isArray(value) && value.every((item) => typeof item === "string"))
+    return value;
   if (!isRecord(value)) return undefined;
   for (const key of keys) {
     const candidate = value[key];
-    if (Array.isArray(candidate) && candidate.every((item) => typeof item === "string")) return candidate;
+    if (
+      Array.isArray(candidate) &&
+      candidate.every((item) => typeof item === "string")
+    )
+      return candidate;
   }
   return undefined;
 }
@@ -1930,26 +2935,71 @@ function lineCount(text: string): number {
   return text.split(/\r?\n/).length;
 }
 
-function compactRecord(input: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+function compactRecord(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  );
 }
 
-function imageFromUrl(url: string, metadata?: Record<string, unknown>): CursorImage {
-  const dimension =
-    typeof metadata?.width === "number" &&
-    typeof metadata.height === "number" &&
-    Number.isFinite(metadata.width) &&
-    Number.isFinite(metadata.height)
-      ? { width: Math.round(metadata.width), height: Math.round(metadata.height) }
-      : undefined;
-  const dataUrl = /^data:([^;,]+);base64,(.+)$/i.exec(url);
-  if (dataUrl) {
-    return { mimeType: dataUrl[1], data: dataUrl[2], ...(dimension ? { dimension } : {}) };
+function embedVisionPartAsFile(part: Record<string, unknown>): string {
+  const url = visionPartUrl(part);
+  if (!url) return JSON.stringify(part);
+  return JSON.stringify({
+    type: "file",
+    file: {
+      filename: visionPartFilename(url),
+      file_data: url,
+    },
+  });
+}
+
+function visionPartUrl(part: Record<string, unknown>): string | undefined {
+  const type = part.type;
+  if (
+    type === "image_url" &&
+    isRecord(part.image_url) &&
+    typeof part.image_url.url === "string"
+  ) {
+    return part.image_url.url;
   }
-  return { url, ...(dimension ? { dimension } : {}) };
+  if (type === "input_image") {
+    if (typeof part.image_url === "string") return part.image_url;
+    if (
+      isRecord(part.image_url) &&
+      typeof part.image_url.url === "string"
+    ) {
+      return part.image_url.url;
+    }
+  }
+  return undefined;
 }
 
-function usageFromChars(model: string, promptChars: number, completionChars: number) {
+function visionPartFilename(url: string): string {
+  const dataMatch = /^data:([^;,]+);/i.exec(url);
+  if (dataMatch) {
+    const mime = dataMatch[1].toLowerCase();
+    if (mime.includes("jpeg") || mime.includes("jpg")) return "image.jpg";
+    if (mime.includes("webp")) return "image.webp";
+    if (mime.includes("gif")) return "image.gif";
+    return "image.png";
+  }
+  try {
+    const pathname = new URL(url).pathname;
+    const base = pathname.split("/").pop();
+    if (base && /\.(png|jpe?g|webp|gif)$/i.test(base)) return base;
+  } catch {
+    // Ignore invalid URLs and fall back to a generic filename.
+  }
+  return "image.png";
+}
+
+function usageFromChars(
+  model: string,
+  promptChars: number,
+  completionChars: number,
+) {
   const promptTokens = estimateTokens(promptChars);
   const completionTokens = estimateTokens(completionChars);
   return {
@@ -1961,13 +3011,17 @@ function usageFromChars(model: string, promptChars: number, completionChars: num
       reasoning_tokens: 0,
       audio_tokens: 0,
       accepted_prediction_tokens: 0,
-      rejected_prediction_tokens: 0
+      rejected_prediction_tokens: 0,
     },
-    cost: costFromTokens(model, promptTokens, completionTokens)
+    cost: costFromTokens(model, promptTokens, completionTokens),
   };
 }
 
-function responseUsageFromChars(model: string, inputChars: number, outputChars: number) {
+function responseUsageFromChars(
+  model: string,
+  inputChars: number,
+  outputChars: number,
+) {
   const inputTokens = estimateTokens(inputChars);
   const outputTokens = estimateTokens(outputChars);
   return {
@@ -1976,11 +3030,15 @@ function responseUsageFromChars(model: string, inputChars: number, outputChars: 
     output_tokens: outputTokens,
     output_tokens_details: { reasoning_tokens: 0 },
     total_tokens: inputTokens + outputTokens,
-    cost: costFromTokens(model, inputTokens, outputTokens)
+    cost: costFromTokens(model, inputTokens, outputTokens),
   };
 }
 
-function costFromTokens(model: string, inputTokens: number, outputTokens: number) {
+function costFromTokens(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+) {
   const pricing = pricingForModel(model);
   if (!pricing) return null;
   const inputUsd = roundUsd((inputTokens / 1_000_000) * pricing.input);
@@ -1994,8 +3052,8 @@ function costFromTokens(model: string, inputTokens: number, outputTokens: number
     pricing: {
       input_per_million_tokens_usd: pricing.input,
       output_per_million_tokens_usd: pricing.output,
-      source: pricing.source
-    }
+      source: pricing.source,
+    },
   };
 }
 
@@ -2008,30 +3066,60 @@ function roundUsd(value: number): number {
 }
 
 function serializedToolCallLength(toolCalls: OpenAiToolCall[]): number {
-  return toolCalls.reduce((sum, toolCall) => sum + toolCall.function.name.length + toolCall.function.arguments.length, 0);
+  return toolCalls.reduce(
+    (sum, toolCall) =>
+      sum + toolCall.function.name.length + toolCall.function.arguments.length,
+    0,
+  );
 }
 
-const KNOWN_SDK_CANONICAL_TOOLS = new Set(["shell", "write", "read", "edit", "delete", "grep", "glob", "ls", "readlints", "mcp", "semsearch", "todowrite"]);
+const KNOWN_SDK_CANONICAL_TOOLS = new Set([
+  "shell",
+  "write",
+  "read",
+  "edit",
+  "delete",
+  "grep",
+  "glob",
+  "ls",
+  "readlints",
+  "mcp",
+  "semsearch",
+  "todowrite",
+]);
 
-function resolveToolSpec(emittedName: string, args: Record<string, unknown>, tools: OpenAiToolSpec[]): OpenAiToolSpec | undefined {
+function resolveToolSpec(
+  emittedName: string,
+  args: Record<string, unknown>,
+  tools: OpenAiToolSpec[],
+): OpenAiToolSpec | undefined {
   const exact = tools.find((tool) => tool.name === emittedName);
   if (exact && nameMatchedToolCanAccept(emittedName, exact)) return exact;
   const normalized = normalizeToolName(emittedName);
-  const match = tools.find((tool) => normalizeToolName(tool.name) === normalized);
+  const match = tools.find(
+    (tool) => normalizeToolName(tool.name) === normalized,
+  );
   if (match && nameMatchedToolCanAccept(emittedName, match)) return match;
   if (canonicalToolName(emittedName) === "mcp") {
     const specific = resolveSpecificMCPTool(args, tools);
     if (specific) return specific;
   }
   const candidates = toolNameAliases(normalized);
-  const alias = tools.find((tool) => candidates.includes(normalizeToolName(tool.name)) && schemaLooksCompatible(emittedName, tool));
+  const alias = tools.find(
+    (tool) =>
+      candidates.includes(normalizeToolName(tool.name)) &&
+      schemaLooksCompatible(emittedName, tool),
+  );
   if (alias) return alias;
   if (canonicalToolName(emittedName) === "ls") {
     const glob = tools.find((tool) => schemaLooksCompatible("glob", tool));
     if (glob) return glob;
   }
   const compatible = tools
-    .map((tool) => ({ tool, score: schemaCompatibilityScore(emittedName, tool) }))
+    .map((tool) => ({
+      tool,
+      score: schemaCompatibilityScore(emittedName, tool),
+    }))
     .filter((candidate) => candidate.score > 0)
     .sort((a, b) => b.score - a.score)[0]?.tool;
   if (compatible) return compatible;
@@ -2041,7 +3129,10 @@ function resolveToolSpec(emittedName: string, args: Record<string, unknown>, too
   return undefined;
 }
 
-function nameMatchedToolCanAccept(emittedName: string, tool: OpenAiToolSpec): boolean {
+function nameMatchedToolCanAccept(
+  emittedName: string,
+  tool: OpenAiToolSpec,
+): boolean {
   if (!isKnownSdkCanonical(canonicalToolName(emittedName))) return true;
   if (!toolParameterSchema(tool).properties.length) return true;
   return schemaLooksCompatible(emittedName, tool);
@@ -2057,20 +3148,51 @@ function normalizeToolName(value: string): string {
 
 function canonicalToolName(value: string): string {
   const normalized = normalizeToolName(value);
-  if (["bash", "runshellcommand", "runterminalcommand", "runterminalcmd", "terminal", "execute", "executecommand", "runcommand", "run"].includes(normalized)) {
+  if (
+    [
+      "bash",
+      "runshellcommand",
+      "runterminalcommand",
+      "runterminalcmd",
+      "terminal",
+      "execute",
+      "executecommand",
+      "runcommand",
+      "run",
+    ].includes(normalized)
+  ) {
     return "shell";
   }
-  if (["writefile", "createfile", "strreplaceeditor"].includes(normalized)) return "write";
+  if (["writefile", "createfile", "strreplaceeditor"].includes(normalized))
+    return "write";
   if (["readfile", "openfile", "viewfile"].includes(normalized)) return "read";
-  if (["editfile", "replacefile", "searchreplace"].includes(normalized)) return "edit";
+  if (["editfile", "replacefile", "searchreplace"].includes(normalized))
+    return "edit";
   if (["deletefile", "removefile"].includes(normalized)) return "delete";
-  if (["search", "searchfiles", "searchfilesystem", "ripgrep", "rg"].includes(normalized)) return "grep";
+  if (
+    ["search", "searchfiles", "searchfilesystem", "ripgrep", "rg"].includes(
+      normalized,
+    )
+  )
+    return "grep";
   if (isGlobLikeToolName(normalized)) return "glob";
-  if (["list", "listfiles", "listdirectory", "listdir"].includes(normalized)) return "ls";
-  if (["readlints", "diagnostics", "getdiagnostics"].includes(normalized)) return "readlints";
+  if (["list", "listfiles", "listdirectory", "listdir"].includes(normalized))
+    return "ls";
+  if (["readlints", "diagnostics", "getdiagnostics"].includes(normalized))
+    return "readlints";
   if (["callmcptool"].includes(normalized)) return "mcp";
-  if (["semanticsearch", "semsearch", "searchcode"].includes(normalized)) return "semsearch";
-  if (["updatetodos", "updatetodostoolcall", "writetodos", "todowrite", "todowritetoolcall"].includes(normalized)) return "todowrite";
+  if (["semanticsearch", "semsearch", "searchcode"].includes(normalized))
+    return "semsearch";
+  if (
+    [
+      "updatetodos",
+      "updatetodostoolcall",
+      "writetodos",
+      "todowrite",
+      "todowritetoolcall",
+    ].includes(normalized)
+  )
+    return "todowrite";
   return normalized;
 }
 
@@ -2079,7 +3201,7 @@ function normalizeToolArguments(
   tool: OpenAiToolSpec | undefined,
   emittedName = "",
   wrapperDepth = 0,
-  context?: ToolCallContext
+  context?: ToolCallContext,
 ): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
   const emittedCanonical = canonicalToolName(emittedName);
@@ -2088,22 +3210,40 @@ function normalizeToolArguments(
   if (emittedCanonical === "mcp" && selectedCanonical === "mcp") {
     return normalizeMCPWrapperArguments(args, schema);
   }
-  const argsToNormalize = emittedCanonical === "mcp"
-    ? expandToolArguments(mcpPayloadArguments(args))
-    : expandToolArguments(args);
+  const argsToNormalize =
+    emittedCanonical === "mcp"
+      ? expandToolArguments(mcpPayloadArguments(args))
+      : expandToolArguments(args);
   if (!schema.properties.length) return argsToNormalize;
-  const wrapperObjectArguments = normalizeWrapperObjectArguments(argsToNormalize, tool, emittedName, schema, wrapperDepth, context);
+  const wrapperObjectArguments = normalizeWrapperObjectArguments(
+    argsToNormalize,
+    tool,
+    emittedName,
+    schema,
+    wrapperDepth,
+    context,
+  );
   if (wrapperObjectArguments) {
     return wrapperObjectArguments;
   }
   if (selectedTool === "strreplaceeditor") {
     return strReplaceEditorArguments(argsToNormalize, emittedCanonical, tool);
   }
-  const commandStyleFile = commandStyleFileArguments(argsToNormalize, emittedCanonical, tool, context);
+  const commandStyleFile = commandStyleFileArguments(
+    argsToNormalize,
+    emittedCanonical,
+    tool,
+    context,
+  );
   if (commandStyleFile) {
     return commandStyleFile;
   }
-  const patchStyleFile = patchStyleFileArguments(argsToNormalize, emittedCanonical, tool, context);
+  const patchStyleFile = patchStyleFileArguments(
+    argsToNormalize,
+    emittedCanonical,
+    tool,
+    context,
+  );
   if (patchStyleFile) {
     return patchStyleFile;
   }
@@ -2117,38 +3257,83 @@ function normalizeToolArguments(
     return globArguments(argsToNormalize, tool, context);
   }
 
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const output: Record<string, unknown> = {};
   const priorities = new Map<string, number>();
   for (const [key, value] of Object.entries(argsToNormalize)) {
-    const mapped = mapToolArgument(key, schema.properties, normalizedProperties, tool?.name);
+    const mapped = mapToolArgument(
+      key,
+      schema.properties,
+      normalizedProperties,
+      tool?.name,
+    );
     if (!mapped) {
       if (schema.allowAdditionalProperties) output[key] = value;
       continue;
     }
     const previous = priorities.get(mapped.target) ?? -1;
     if (mapped.priority >= previous) {
-      output[mapped.target] = normalizeToolArgumentValue(value, mapped.target, tool, context, key);
+      output[mapped.target] = normalizeToolArgumentValue(
+        value,
+        mapped.target,
+        tool,
+        context,
+        key,
+      );
       priorities.set(mapped.target, mapped.priority);
     }
   }
-  return sanitizeNormalizedToolArguments(applyRequiredToolDefaults(output, schema.required, tool, argsToNormalize), tool, argsToNormalize);
+  return sanitizeNormalizedToolArguments(
+    applyRequiredToolDefaults(output, schema.required, tool, argsToNormalize),
+    tool,
+    argsToNormalize,
+  );
 }
 
-function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boolean {
+function schemaLooksCompatible(
+  emittedName: string,
+  tool: OpenAiToolSpec,
+): boolean {
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return false;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const has = (candidates: string[]) => Boolean(firstMatchingProperty(candidates, schema.properties, normalizedProperties));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const has = (candidates: string[]) =>
+    Boolean(
+      firstMatchingProperty(
+        candidates,
+        schema.properties,
+        normalizedProperties,
+      ),
+    );
   const canonical = canonicalToolName(emittedName);
   const wrapper = wrapperObjectArgumentProperty(tool, schema);
   if (wrapper) {
-    if (canonical === "mcp" && (has(["toolName", "tool_name", "tool", "name"]) || normalizeToolName(tool.name).includes("mcp"))) {
+    if (
+      canonical === "mcp" &&
+      (has(["toolName", "tool_name", "tool", "name"]) ||
+        normalizeToolName(tool.name).includes("mcp"))
+    ) {
       return true;
     }
-    return schemaLooksCompatible(emittedName, { ...tool, parameters: wrapper.parameters });
+    return schemaLooksCompatible(emittedName, {
+      ...tool,
+      parameters: wrapper.parameters,
+    });
   }
-  if (normalizeToolName(tool.name) === "strreplaceeditor" && !["write", "read", "edit"].includes(canonical)) {
+  if (
+    normalizeToolName(tool.name) === "strreplaceeditor" &&
+    !["write", "read", "edit"].includes(canonical)
+  ) {
     return false;
   }
   if (commandStyleFileToolSupports(canonical, tool)) {
@@ -2168,13 +3353,18 @@ function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boole
     case "delete":
       return toolCanonical === "delete" && has(pathCandidates());
     case "edit":
-      return has(pathCandidates())
-        && has(oldTextCandidates())
-        && has(newTextCandidates());
+      return (
+        has(pathCandidates()) &&
+        has(oldTextCandidates()) &&
+        has(newTextCandidates())
+      );
     case "grep":
       return has(["pattern", "query", "regex", "search"]);
     case "glob":
-      return has(globPatternCandidates({ includeQuery: false })) || (canonicalToolName(tool.name) === "glob" && has(["query"]));
+      return (
+        has(globPatternCandidates({ includeQuery: false })) ||
+        (canonicalToolName(tool.name) === "glob" && has(["query"]))
+      );
     case "ls":
       return has([...pathCandidates(), "directory", "dir"]);
     case "readlints":
@@ -2182,7 +3372,9 @@ function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boole
     case "mcp":
       return has(["toolName", "tool_name", "tool", "name"]);
     case "semsearch":
-      return toolCanonical === "semsearch" && has(["query", "pattern", "search"]);
+      return (
+        toolCanonical === "semsearch" && has(["query", "pattern", "search"])
+      );
     case "todowrite":
       return has(["todos", "todoList", "todo_list", "items"]);
     default:
@@ -2190,48 +3382,102 @@ function schemaLooksCompatible(emittedName: string, tool: OpenAiToolSpec): boole
   }
 }
 
-function schemaCompatibilityScore(emittedName: string, tool: OpenAiToolSpec): number {
+function schemaCompatibilityScore(
+  emittedName: string,
+  tool: OpenAiToolSpec,
+): number {
   if (!schemaLooksCompatible(emittedName, tool)) return 0;
   const emittedCanonical = canonicalToolName(emittedName);
   const toolCanonical = canonicalToolName(tool.name);
   if (toolCanonical === emittedCanonical) return 100;
-  if (toolNameAliases(normalizeToolName(emittedName)).includes(normalizeToolName(tool.name))) return 95;
-  if (emittedCanonical === "write" && normalizeToolName(tool.name).includes("edit")) return 80;
+  if (
+    toolNameAliases(normalizeToolName(emittedName)).includes(
+      normalizeToolName(tool.name),
+    )
+  )
+    return 95;
+  if (
+    emittedCanonical === "write" &&
+    normalizeToolName(tool.name).includes("edit")
+  )
+    return 80;
   if (emittedCanonical === "ls" && toolCanonical === "read") return 20;
   return 50;
 }
 
 function canEmulateWithShell(emittedName: string): boolean {
-  return ["write", "read", "edit", "delete", "grep", "glob", "ls", "semsearch"].includes(canonicalToolName(emittedName));
+  return [
+    "write",
+    "read",
+    "edit",
+    "delete",
+    "grep",
+    "glob",
+    "ls",
+    "semsearch",
+  ].includes(canonicalToolName(emittedName));
 }
 
 function shellFallbackArguments(
   args: Record<string, unknown>,
   emittedName: string,
-  tool: OpenAiToolSpec | undefined
+  tool: OpenAiToolSpec | undefined,
 ): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const commandKey = firstMatchingProperty(shellCommandCandidates(), schema.properties, normalizedProperties);
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const commandKey = firstMatchingProperty(
+    shellCommandCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
   const command = shellFallbackCommand(args, emittedName);
   if (!commandKey || !command) return args;
   const output: Record<string, unknown> = { [commandKey]: command };
   const workdir = firstArg(args, shellExplicitWorkdirCandidates());
-  const workdirKey = firstMatchingProperty(shellExplicitWorkdirCandidates(), schema.properties, normalizedProperties);
-  if (workdirKey && shouldIncludeOptionalPath(workdir)) output[workdirKey] = workdir;
+  const workdirKey = firstMatchingProperty(
+    shellExplicitWorkdirCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  if (workdirKey && shouldIncludeOptionalPath(workdir))
+    output[workdirKey] = workdir;
   const timeout = firstArg(args, timeoutCandidates());
-  const timeoutKey = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties);
-  if (timeoutKey && timeout !== undefined) output[timeoutKey] = normalizeToolArgumentValue(timeout, timeoutKey, tool);
-  const descriptionKey = firstMatchingProperty(["description"], schema.properties, normalizedProperties);
+  const timeoutKey = firstMatchingProperty(
+    timeoutCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  if (timeoutKey && timeout !== undefined)
+    output[timeoutKey] = normalizeToolArgumentValue(timeout, timeoutKey, tool);
+  const descriptionKey = firstMatchingProperty(
+    ["description"],
+    schema.properties,
+    normalizedProperties,
+  );
   if (descriptionKey) output[descriptionKey] = shellDescription(command);
-  return sanitizeNormalizedToolArguments(applyRequiredToolDefaults(output, schema.required, tool, args), tool, args);
+  return sanitizeNormalizedToolArguments(
+    applyRequiredToolDefaults(output, schema.required, tool, args),
+    tool,
+    args,
+  );
 }
 
-function shellFallbackCommand(args: Record<string, unknown>, emittedName: string): string | undefined {
+function shellFallbackCommand(
+  args: Record<string, unknown>,
+  emittedName: string,
+): string | undefined {
   switch (canonicalToolName(emittedName)) {
     case "write": {
       const filePath = firstStringArg(args, ...pathCandidates());
-      const content = firstStringArgAllowEmpty(args, ...fileContentCandidates());
+      const content = firstStringArgAllowEmpty(
+        args,
+        ...fileContentCandidates(),
+      );
       if (!filePath || content === undefined) return undefined;
       const delimiter = heredocDelimiter(content);
       return `mkdir -p "$(dirname ${shellQuote(filePath)})" && cat > ${shellQuote(filePath)} <<'${delimiter}'\n${content}\n${delimiter}`;
@@ -2239,8 +3485,21 @@ function shellFallbackCommand(args: Record<string, unknown>, emittedName: string
     case "read": {
       const filePath = firstStringArg(args, ...pathCandidates());
       if (!filePath) return undefined;
-      const offset = firstNumberArg(args, "offset", "start", "startLine", "start_line");
-      const limit = firstNumberArg(args, "limit", "maxLines", "max_lines", "lineCount", "line_count");
+      const offset = firstNumberArg(
+        args,
+        "offset",
+        "start",
+        "startLine",
+        "start_line",
+      );
+      const limit = firstNumberArg(
+        args,
+        "limit",
+        "maxLines",
+        "max_lines",
+        "lineCount",
+        "line_count",
+      );
       if (offset !== undefined && limit !== undefined && limit > 0) {
         const start = Math.max(1, Math.floor(offset));
         const end = start + Math.floor(limit) - 1;
@@ -2253,7 +3512,14 @@ function shellFallbackCommand(args: Record<string, unknown>, emittedName: string
       const oldString = firstStringArgAllowEmpty(args, ...oldTextCandidates());
       const newString = firstStringArgAllowEmpty(args, ...newTextCandidates());
       if (!filePath || !oldString || newString === undefined) return undefined;
-      const replaceAll = firstBooleanArg(args, "replaceAll", "replace_all", "replaceAllOccurrences", "replace_all_occurrences") === true;
+      const replaceAll =
+        firstBooleanArg(
+          args,
+          "replaceAll",
+          "replace_all",
+          "replaceAllOccurrences",
+          "replace_all_occurrences",
+        ) === true;
       return `python3 - <<'PY'\nfrom pathlib import Path\npath = Path(${JSON.stringify(filePath)})\nold = ${JSON.stringify(oldString)}\nnew = ${JSON.stringify(newString)}\ntext = path.read_text()\nif old not in text:\n    raise SystemExit(f"oldString not found in {path}")\npath.write_text(text.replace(old, new, ${replaceAll ? "-1" : "1"}))\nPY`;
     }
     case "delete": {
@@ -2262,11 +3528,39 @@ function shellFallbackCommand(args: Record<string, unknown>, emittedName: string
       return `rm -rf ${shellQuote(filePath)}`;
     }
     case "grep": {
-      const pattern = firstStringArg(args, "pattern", "query", "regex", "search", "searchPattern", "search_pattern");
+      const pattern = firstStringArg(
+        args,
+        "pattern",
+        "query",
+        "regex",
+        "search",
+        "searchPattern",
+        "search_pattern",
+      );
       if (!pattern) return undefined;
-      const targetPath = firstStringArg(args, ...pathCandidates(), "directory", "dir") || ".";
-      const include = firstStringArg(args, "glob", "include", "includeGlob", "include_glob", "fileGlob", "file_glob", "includePattern", "include_pattern");
-      return ["rg", "--line-number", "--color", "never", "--hidden", include ? `--glob ${shellQuote(include)}` : "", shellQuote(pattern), shellQuote(targetPath)]
+      const targetPath =
+        firstStringArg(args, ...pathCandidates(), "directory", "dir") || ".";
+      const include = firstStringArg(
+        args,
+        "glob",
+        "include",
+        "includeGlob",
+        "include_glob",
+        "fileGlob",
+        "file_glob",
+        "includePattern",
+        "include_pattern",
+      );
+      return [
+        "rg",
+        "--line-number",
+        "--color",
+        "never",
+        "--hidden",
+        include ? `--glob ${shellQuote(include)}` : "",
+        shellQuote(pattern),
+        shellQuote(targetPath),
+      ]
         .filter(Boolean)
         .join(" ");
     }
@@ -2280,8 +3574,22 @@ function shellFallbackCommand(args: Record<string, unknown>, emittedName: string
     case "semsearch": {
       const query = firstStringArg(args, "query", "pattern", "search");
       if (!query) return undefined;
-      const directories = firstStringArrayArg(args, "targetDirectories", "target_directories", "directories", "paths");
-      return ["rg", "--line-number", "--color", "never", "--hidden", shellQuote(query), ...(directories.length ? directories : ["."]).map(shellQuote)].join(" ");
+      const directories = firstStringArrayArg(
+        args,
+        "targetDirectories",
+        "target_directories",
+        "directories",
+        "paths",
+      );
+      return [
+        "rg",
+        "--line-number",
+        "--color",
+        "never",
+        "--hidden",
+        shellQuote(query),
+        ...(directories.length ? directories : ["."]).map(shellQuote),
+      ].join(" ");
     }
     default:
       return undefined;
@@ -2303,7 +3611,7 @@ function pathCandidates(): string[] {
     "absolutePath",
     "absolute_path",
     "relativePath",
-    "relative_path"
+    "relative_path",
   ];
 }
 
@@ -2322,7 +3630,7 @@ function fileContentCandidates(): string[] {
     "fileContent",
     "file_content",
     "streamContent",
-    "stream_content"
+    "stream_content",
   ];
 }
 
@@ -2341,7 +3649,7 @@ function oldTextCandidates(): string[] {
     "search_string",
     "find",
     "findText",
-    "find_text"
+    "find_text",
   ];
 }
 
@@ -2358,12 +3666,22 @@ function newTextCandidates(): string[] {
     "replace",
     "replaceWith",
     "replace_with",
-    "content"
+    "content",
   ];
 }
 
 function shellCommandCandidates(): string[] {
-  return ["command", "cmd", "script", "input", "shellCommand", "shell_command", "commandLine", "command_line", "code"];
+  return [
+    "command",
+    "cmd",
+    "script",
+    "input",
+    "shellCommand",
+    "shell_command",
+    "commandLine",
+    "command_line",
+    "code",
+  ];
 }
 
 function shellWorkdirCandidates(): string[] {
@@ -2381,16 +3699,27 @@ function shellWorkdirCandidates(): string[] {
     "rootDir",
     "root_dir",
     "projectRoot",
-    "project_root"
+    "project_root",
   ];
 }
 
 function shellExplicitWorkdirCandidates(): string[] {
-  return shellWorkdirCandidates().filter((candidate) => normalizeToolName(candidate) !== "path");
+  return shellWorkdirCandidates().filter(
+    (candidate) => normalizeToolName(candidate) !== "path",
+  );
 }
 
 function timeoutCandidates(): string[] {
-  return ["timeout", "timeoutMs", "timeout_ms", "timeoutMilliseconds", "timeout_milliseconds", "timeoutSeconds", "timeout_seconds", "seconds"];
+  return [
+    "timeout",
+    "timeoutMs",
+    "timeout_ms",
+    "timeoutMilliseconds",
+    "timeout_milliseconds",
+    "timeoutSeconds",
+    "timeout_seconds",
+    "seconds",
+  ];
 }
 
 function firstArg(args: Record<string, unknown>, keys: string[]): unknown {
@@ -2404,14 +3733,24 @@ function firstArg(args: Record<string, unknown>, keys: string[]): unknown {
   return undefined;
 }
 
-function firstStringArgAllowEmpty(args: Record<string, unknown>, ...keys: string[]): string | undefined {
+function firstStringArgAllowEmpty(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): string | undefined {
   const value = firstArg(args, keys);
   return typeof value === "string" ? value : undefined;
 }
 
-function firstStringArrayArg(args: Record<string, unknown>, ...keys: string[]): string[] {
+function firstStringArrayArg(
+  args: Record<string, unknown>,
+  ...keys: string[]
+): string[] {
   const value = firstArg(args, keys);
-  if (Array.isArray(value)) return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  if (Array.isArray(value))
+    return value.filter(
+      (item): item is string =>
+        typeof item === "string" && item.trim().length > 0,
+    );
   return typeof value === "string" && value.trim() ? [value] : [];
 }
 
@@ -2420,10 +3759,14 @@ function shouldIncludeOptionalPath(value: unknown): boolean {
   if (typeof value !== "string") return true;
   const trimmed = value.trim();
   if (!trimmed) return false;
-  return trimmed.toLowerCase() !== "undefined" && trimmed.toLowerCase() !== "null";
+  return (
+    trimmed.toLowerCase() !== "undefined" && trimmed.toLowerCase() !== "null"
+  );
 }
 
-function globPatternCandidates(options: { includeQuery?: boolean } = {}): string[] {
+function globPatternCandidates(
+  options: { includeQuery?: boolean } = {},
+): string[] {
   return [
     "globPattern",
     "glob_pattern",
@@ -2440,7 +3783,7 @@ function globPatternCandidates(options: { includeQuery?: boolean } = {}): string
     ...(options.includeQuery === false ? [] : ["query"]),
     "include",
     "includeGlob",
-    "include_glob"
+    "include_glob",
   ];
 }
 
@@ -2462,16 +3805,23 @@ function globPathCandidates(): string[] {
     "basePath",
     "base_path",
     "searchPath",
-    "search_path"
+    "search_path",
   ];
 }
 
-function normalizedGlobArguments(args: Record<string, unknown>, context?: ToolCallContext): { pattern?: string; path?: string } {
+function normalizedGlobArguments(
+  args: Record<string, unknown>,
+  context?: ToolCallContext,
+): { pattern?: string; path?: string } {
   let pattern = firstStringArg(args, ...globPatternCandidates());
   let targetPath = firstStringArg(args, ...globPathCandidates());
   if (targetPath) targetPath = absolutizeToolPath(targetPath, context);
   if (targetPath && looksLikeGlobPattern(targetPath)) {
-    if (pattern && !looksLikeGlobPattern(pattern) && looksLikeGlobSearchRoot(pattern)) {
+    if (
+      pattern &&
+      !looksLikeGlobPattern(pattern) &&
+      looksLikeGlobSearchRoot(pattern)
+    ) {
       const nextPattern = targetPath;
       targetPath = absolutizeToolPath(pattern, context);
       pattern = nextPattern;
@@ -2490,18 +3840,31 @@ function looksLikeGlobPattern(value: string): boolean {
 
 function looksLikePath(value: string): boolean {
   const trimmed = value.trim();
-  return trimmed.startsWith("/") || trimmed.startsWith("./") || trimmed.startsWith("../") || trimmed.includes("/");
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.includes("/")
+  );
 }
 
 function looksLikeGlobSearchRoot(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return false;
   if ([".", "./", "..", "../"].includes(trimmed)) return true;
-  if (looksLikePath(trimmed) || trimmed.startsWith("~") || trimmed.startsWith("$")) return true;
+  if (
+    looksLikePath(trimmed) ||
+    trimmed.startsWith("~") ||
+    trimmed.startsWith("$")
+  )
+    return true;
   return !looksLikeGlobPattern(trimmed) && !/\.[^/.]+$/.test(trimmed);
 }
 
-function splitGlobTargetPath(value: string): { path?: string; pattern?: string } {
+function splitGlobTargetPath(value: string): {
+  path?: string;
+  pattern?: string;
+} {
   const trimmed = value.trim();
   const firstGlob = trimmed.search(/[*?[\]{}]/);
   if (firstGlob < 0) return { path: trimmed };
@@ -2511,12 +3874,16 @@ function splitGlobTargetPath(value: string): { path?: string; pattern?: string }
   return { path: base || undefined, pattern: pattern || undefined };
 }
 
-function combineGlobPatterns(targetPattern: string | undefined, pattern: string | undefined): string | undefined {
+function combineGlobPatterns(
+  targetPattern: string | undefined,
+  pattern: string | undefined,
+): string | undefined {
   const cleanTarget = targetPattern?.replace(/^\/+|\/+$/g, "");
   const cleanPattern = pattern?.replace(/^\/+/, "");
   if (!cleanTarget) return cleanPattern;
   if (!cleanPattern) return cleanTarget;
-  if (cleanTarget === "**") return cleanPattern === "*" ? "**/*" : `**/${cleanPattern}`;
+  if (cleanTarget === "**")
+    return cleanPattern === "*" ? "**/*" : `**/${cleanPattern}`;
   if (cleanTarget === "*") return cleanPattern;
   if (cleanPattern === "*") return cleanTarget;
   return cleanPattern;
@@ -2530,28 +3897,64 @@ function heredocDelimiter(content: string): string {
   return `API_FOR_CURSOR_EOF_${hashString(content)}`;
 }
 
-function listAsGlobArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | undefined, context?: ToolCallContext): Record<string, unknown> {
+function listAsGlobArguments(
+  args: Record<string, unknown>,
+  tool: OpenAiToolSpec | undefined,
+  context?: ToolCallContext,
+): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const output: Record<string, unknown> = {};
-  const patternKey = firstMatchingProperty(globPatternCandidates(), schema.properties, normalizedProperties);
+  const patternKey = firstMatchingProperty(
+    globPatternCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
   if (patternKey) output[patternKey] = Object.keys(args).length ? "*" : "**/*";
   const path = firstArg(args, globPathCandidates());
-  const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
-  if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
+  const pathKey = firstMatchingProperty(
+    globPathCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  if (pathKey && shouldIncludeOptionalPath(path))
+    output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
   else if (pathKey && schema.required.includes(pathKey)) output[pathKey] = ".";
   return Object.keys(output).length ? output : args;
 }
 
-function globArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | undefined, context?: ToolCallContext): Record<string, unknown> {
+function globArguments(
+  args: Record<string, unknown>,
+  tool: OpenAiToolSpec | undefined,
+  context?: ToolCallContext,
+): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const output: Record<string, unknown> = {};
   const { pattern, path } = normalizedGlobArguments(args, context);
-  const patternKey = firstMatchingProperty(globPatternCandidates(), schema.properties, normalizedProperties);
+  const patternKey = firstMatchingProperty(
+    globPatternCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
   if (patternKey) output[patternKey] = pattern || "**/*";
-  const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
-  if (pathKey && shouldIncludeOptionalPath(path)) output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
+  const pathKey = firstMatchingProperty(
+    globPathCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  if (pathKey && shouldIncludeOptionalPath(path))
+    output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
   else if (pathKey && schema.required.includes(pathKey)) output[pathKey] = ".";
   return Object.keys(output).length ? output : args;
 }
@@ -2559,17 +3962,29 @@ function globArguments(args: Record<string, unknown>, tool: OpenAiToolSpec | und
 function strReplaceEditorArguments(
   args: Record<string, unknown>,
   emittedCanonical: string,
-  tool: OpenAiToolSpec | undefined
+  tool: OpenAiToolSpec | undefined,
 ): Record<string, unknown> {
   const schema = toolParameterSchema(tool);
-  const properties = schema.properties.length ? schema.properties : ["command", "path", "file_text", "old_str", "new_str", "view_range"];
-  const normalizedProperties = new Map(properties.map((property) => [normalizeToolName(property), property]));
+  const properties = schema.properties.length
+    ? schema.properties
+    : ["command", "path", "file_text", "old_str", "new_str", "view_range"];
+  const normalizedProperties = new Map(
+    properties.map((property) => [normalizeToolName(property), property]),
+  );
   const output: Record<string, unknown> = {};
   const set = (candidates: string[], value: unknown) => {
-    const key = firstMatchingProperty(candidates, properties, normalizedProperties);
+    const key = firstMatchingProperty(
+      candidates,
+      properties,
+      normalizedProperties,
+    );
     if (key && value !== undefined) output[key] = value;
   };
-  const path = firstArg(args, [...pathCandidates(), "target_file", "targetFile"]);
+  const path = firstArg(args, [
+    ...pathCandidates(),
+    "target_file",
+    "targetFile",
+  ]);
   set(pathCandidates(), path);
 
   if (emittedCanonical === "read") {
@@ -2600,9 +4015,24 @@ function strReplaceEditorArguments(
   return Object.keys(output).length ? output : args;
 }
 
-function viewRangeFromArgs(args: Record<string, unknown>): number[] | undefined {
-  const offset = firstNumberArg(args, "offset", "start", "startLine", "start_line");
-  const limit = firstNumberArg(args, "limit", "maxLines", "max_lines", "lineCount", "line_count");
+function viewRangeFromArgs(
+  args: Record<string, unknown>,
+): number[] | undefined {
+  const offset = firstNumberArg(
+    args,
+    "offset",
+    "start",
+    "startLine",
+    "start_line",
+  );
+  const limit = firstNumberArg(
+    args,
+    "limit",
+    "maxLines",
+    "max_lines",
+    "lineCount",
+    "line_count",
+  );
   if (offset === undefined && limit === undefined) return undefined;
   const start = Math.max(1, Math.trunc(offset ?? 1));
   if (limit === undefined || limit <= 0) return [start, -1];
@@ -2613,37 +4043,81 @@ function commandStyleFileArguments(
   args: Record<string, unknown>,
   emittedCanonical: string,
   tool: OpenAiToolSpec | undefined,
-  context?: ToolCallContext
+  context?: ToolCallContext,
 ): Record<string, unknown> | undefined {
-  if (!["write", "read", "edit", "delete"].includes(emittedCanonical)) return undefined;
+  if (!["write", "read", "edit", "delete"].includes(emittedCanonical))
+    return undefined;
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return undefined;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const operationKey = firstMatchingProperty(operationPropertyCandidates(), schema.properties, normalizedProperties);
-  const pathKey = firstMatchingProperty(pathCandidates(), schema.properties, normalizedProperties);
-  const path = firstArg(args, [...pathCandidates(), "target_file", "targetFile"]);
-  if (!operationKey || !pathKey || !shouldIncludeOptionalPath(path)) return undefined;
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const operationKey = firstMatchingProperty(
+    operationPropertyCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  const pathKey = firstMatchingProperty(
+    pathCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
+  const path = firstArg(args, [
+    ...pathCandidates(),
+    "target_file",
+    "targetFile",
+  ]);
+  if (!operationKey || !pathKey || !shouldIncludeOptionalPath(path))
+    return undefined;
 
   const output: Record<string, unknown> = {
     [operationKey]: operationValue(tool, operationKey, emittedCanonical),
-    [pathKey]: normalizeToolArgumentValue(path, pathKey, tool, context)
+    [pathKey]: normalizeToolArgumentValue(path, pathKey, tool, context),
   };
   if (emittedCanonical === "write") {
     const content = firstStringArgAllowEmpty(args, ...fileContentCandidates());
-    const contentKey = firstMatchingProperty(fileContentCandidates(), schema.properties, normalizedProperties);
+    const contentKey = firstMatchingProperty(
+      fileContentCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
     if (!contentKey || content === undefined) return undefined;
     output[contentKey] = content;
   } else if (emittedCanonical === "edit") {
     const oldText = firstStringArgAllowEmpty(args, ...oldTextCandidates());
     const newText = firstStringArgAllowEmpty(args, ...newTextCandidates());
-    const oldKey = firstMatchingProperty(oldTextCandidates(), schema.properties, normalizedProperties);
-    const newKey = firstMatchingProperty(newTextCandidates(), schema.properties, normalizedProperties);
-    if (!oldKey || !newKey || oldText === undefined || newText === undefined) return undefined;
+    const oldKey = firstMatchingProperty(
+      oldTextCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
+    const newKey = firstMatchingProperty(
+      newTextCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
+    if (!oldKey || !newKey || oldText === undefined || newText === undefined)
+      return undefined;
     output[oldKey] = oldText;
     output[newKey] = newText;
   } else if (emittedCanonical === "read") {
-    copyOptionalArgument(output, schema.properties, normalizedProperties, args, ["offset", "start", "startLine", "start_line"]);
-    copyOptionalArgument(output, schema.properties, normalizedProperties, args, ["limit", "maxLines", "max_lines", "lineCount", "line_count"]);
+    copyOptionalArgument(
+      output,
+      schema.properties,
+      normalizedProperties,
+      args,
+      ["offset", "start", "startLine", "start_line"],
+    );
+    copyOptionalArgument(
+      output,
+      schema.properties,
+      normalizedProperties,
+      args,
+      ["limit", "maxLines", "max_lines", "lineCount", "line_count"],
+    );
   }
   return output;
 }
@@ -2653,20 +4127,40 @@ function copyOptionalArgument(
   properties: string[],
   normalizedProperties: Map<string, string>,
   args: Record<string, unknown>,
-  candidates: string[]
+  candidates: string[],
 ) {
   const value = firstArg(args, candidates);
-  const key = firstMatchingProperty(candidates, properties, normalizedProperties);
+  const key = firstMatchingProperty(
+    candidates,
+    properties,
+    normalizedProperties,
+  );
   if (key && value !== undefined) output[key] = value;
 }
 
-function commandStyleFileToolSupports(canonical: string, tool: OpenAiToolSpec): boolean {
+function commandStyleFileToolSupports(
+  canonical: string,
+  tool: OpenAiToolSpec,
+): boolean {
   if (!["write", "read", "edit", "delete"].includes(canonical)) return false;
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return false;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const has = (candidates: string[]) => Boolean(firstMatchingProperty(candidates, schema.properties, normalizedProperties));
-  if (!has(operationPropertyCandidates()) || !has(pathCandidates())) return false;
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const has = (candidates: string[]) =>
+    Boolean(
+      firstMatchingProperty(
+        candidates,
+        schema.properties,
+        normalizedProperties,
+      ),
+    );
+  if (!has(operationPropertyCandidates()) || !has(pathCandidates()))
+    return false;
   if (canonical === "write") return has(fileContentCandidates());
   if (canonical === "edit") {
     return has(oldTextCandidates()) && has(newTextCandidates());
@@ -2678,117 +4172,264 @@ function operationPropertyCandidates(): string[] {
   return ["command", "action", "operation", "op", "mode"];
 }
 
-function operationValue(tool: OpenAiToolSpec | undefined, property: string, canonical: string): string {
+function operationValue(
+  tool: OpenAiToolSpec | undefined,
+  property: string,
+  canonical: string,
+): string {
   const candidates: Record<string, string[]> = {
     write: ["write", "create", "overwrite", "replace"],
     read: ["read", "view", "open"],
     edit: ["replace", "str_replace", "edit", "update"],
-    delete: ["delete", "remove"]
+    delete: ["delete", "remove"],
   };
   const allowed = stringEnumValues(tool, property);
   for (const candidate of candidates[canonical] ?? [canonical]) {
-    const allowedMatch = allowed.find((value) => normalizeToolName(value) === normalizeToolName(candidate));
+    const allowedMatch = allowed.find(
+      (value) => normalizeToolName(value) === normalizeToolName(candidate),
+    );
     if (allowedMatch) return allowedMatch;
   }
   return (candidates[canonical] ?? [canonical])[0];
 }
 
-function stringEnumValues(tool: OpenAiToolSpec | undefined, property: string): string[] {
+function stringEnumValues(
+  tool: OpenAiToolSpec | undefined,
+  property: string,
+): string[] {
   const propertySchema = toolPropertySchema(tool, property);
   if (!isRecord(propertySchema)) return [];
-  return unionStringArrays(propertySchema.enum, propertySchema.const === undefined ? undefined : [propertySchema.const]);
+  return unionStringArrays(
+    propertySchema.enum,
+    propertySchema.const === undefined ? undefined : [propertySchema.const],
+  );
 }
 
-function toolPropertySchema(tool: OpenAiToolSpec | undefined, property: string): unknown {
+function toolPropertySchema(
+  tool: OpenAiToolSpec | undefined,
+  property: string,
+): unknown {
   return toolParameterSchema(tool).propertySchemas[property];
 }
 
-function toolArgumentsSatisfySchema(args: Record<string, unknown>, tool: OpenAiToolSpec): boolean {
+function toolArgumentsSatisfySchema(
+  args: Record<string, unknown>,
+  tool: OpenAiToolSpec,
+): boolean {
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return true;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   for (const required of schema.required) {
-    const property = firstMatchingProperty([required], schema.properties, normalizedProperties) ?? required;
-    if (!argumentValueSatisfiesSchema(args[property], schema.propertySchemas[property], true)) return false;
+    const property =
+      firstMatchingProperty(
+        [required],
+        schema.properties,
+        normalizedProperties,
+      ) ?? required;
+    if (
+      !argumentValueSatisfiesSchema(
+        args[property],
+        schema.propertySchemas[property],
+        true,
+      )
+    )
+      return false;
   }
   for (const [property, value] of Object.entries(args)) {
-    const propertyName = firstMatchingProperty([property], schema.properties, normalizedProperties);
+    const propertyName = firstMatchingProperty(
+      [property],
+      schema.properties,
+      normalizedProperties,
+    );
     if (!propertyName) continue;
-    if (!argumentValueSatisfiesSchema(value, schema.propertySchemas[propertyName], false)) return false;
+    if (
+      !argumentValueSatisfiesSchema(
+        value,
+        schema.propertySchemas[propertyName],
+        false,
+      )
+    )
+      return false;
   }
   return true;
 }
 
-function argumentValueSatisfiesSchema(value: unknown, schema: unknown, required: boolean): boolean {
+function argumentValueSatisfiesSchema(
+  value: unknown,
+  schema: unknown,
+  required: boolean,
+): boolean {
   if (value === undefined) return !required;
   const record = isRecord(schema) ? schema : undefined;
-  if (value === null) return Boolean(record && schemaAllowsJsonType(record, "null"));
+  if (value === null)
+    return Boolean(record && schemaAllowsJsonType(record, "null"));
   if (!record) return true;
   const constValue = record.const;
   if (constValue !== undefined && value !== constValue) return false;
-  if (Array.isArray(record.enum) && !record.enum.some((item) => item === value)) return false;
+  if (Array.isArray(record.enum) && !record.enum.some((item) => item === value))
+    return false;
   const anyOf = composedToolSchemas(record.anyOf);
-  if (anyOf.length && !anyOf.some((item) => argumentValueSatisfiesSchema(value, item, true))) return false;
+  if (
+    anyOf.length &&
+    !anyOf.some((item) => argumentValueSatisfiesSchema(value, item, true))
+  )
+    return false;
   const oneOf = composedToolSchemas(record.oneOf);
-  if (oneOf.length && !oneOf.some((item) => argumentValueSatisfiesSchema(value, item, true))) return false;
+  if (
+    oneOf.length &&
+    !oneOf.some((item) => argumentValueSatisfiesSchema(value, item, true))
+  )
+    return false;
   const allOf = composedToolSchemas(record.allOf);
-  if (allOf.length && !allOf.every((item) => argumentValueSatisfiesSchema(value, item, true))) return false;
+  if (
+    allOf.length &&
+    !allOf.every((item) => argumentValueSatisfiesSchema(value, item, true))
+  )
+    return false;
   const types = schemaJsonTypes(record);
-  if (types.length && !types.some((type) => jsonValueMatchesType(value, type))) return false;
-  if (objectConstraintsApply(record, value, types) && !objectValueSatisfiesSchema(value, record)) return false;
-  if (arrayConstraintsApply(record, value, types) && !arrayValueSatisfiesSchema(value, record)) return false;
+  if (types.length && !types.some((type) => jsonValueMatchesType(value, type)))
+    return false;
+  if (
+    objectConstraintsApply(record, value, types) &&
+    !objectValueSatisfiesSchema(value, record)
+  )
+    return false;
+  if (
+    arrayConstraintsApply(record, value, types) &&
+    !arrayValueSatisfiesSchema(value, record)
+  )
+    return false;
   return true;
 }
 
-function objectConstraintsApply(schema: Record<string, unknown>, value: unknown, types: string[]): boolean {
-  if (!isRecord(schema.properties) && !Array.isArray(schema.required) && schema.additionalProperties === undefined) return false;
+function objectConstraintsApply(
+  schema: Record<string, unknown>,
+  value: unknown,
+  types: string[],
+): boolean {
+  if (
+    !isRecord(schema.properties) &&
+    !Array.isArray(schema.required) &&
+    schema.additionalProperties === undefined
+  )
+    return false;
   if (jsonValueMatchesType(value, "object")) return true;
   return !types.length || types.includes("object");
 }
 
-function objectValueSatisfiesSchema(value: unknown, schema: Record<string, unknown>): boolean {
+function objectValueSatisfiesSchema(
+  value: unknown,
+  schema: Record<string, unknown>,
+): boolean {
   if (!jsonValueMatchesType(value, "object")) return false;
   const recordValue = value as Record<string, unknown>;
   const properties = isRecord(schema.properties) ? schema.properties : {};
   const propertyNames = Object.keys(properties);
-  const normalizedProperties = new Map(propertyNames.map((property) => [normalizeToolName(property), property]));
-  const required = Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : [];
+  const normalizedProperties = new Map(
+    propertyNames.map((property) => [normalizeToolName(property), property]),
+  );
+  const required = Array.isArray(schema.required)
+    ? schema.required.filter((item): item is string => typeof item === "string")
+    : [];
   for (const requiredProperty of required) {
-    const property = firstMatchingProperty([requiredProperty], propertyNames, normalizedProperties) ?? requiredProperty;
-    if (!argumentValueSatisfiesSchema(recordValue[property], properties[property], true)) return false;
+    const property =
+      firstMatchingProperty(
+        [requiredProperty],
+        propertyNames,
+        normalizedProperties,
+      ) ?? requiredProperty;
+    if (
+      !argumentValueSatisfiesSchema(
+        recordValue[property],
+        properties[property],
+        true,
+      )
+    )
+      return false;
   }
   for (const [property, nestedValue] of Object.entries(recordValue)) {
-    const propertyName = firstMatchingProperty([property], propertyNames, normalizedProperties);
+    const propertyName = firstMatchingProperty(
+      [property],
+      propertyNames,
+      normalizedProperties,
+    );
     if (propertyName) {
-      if (!argumentValueSatisfiesSchema(nestedValue, properties[propertyName], false)) return false;
+      if (
+        !argumentValueSatisfiesSchema(
+          nestedValue,
+          properties[propertyName],
+          false,
+        )
+      )
+        return false;
       continue;
     }
     if (schema.additionalProperties === false) return false;
-    if (isRecord(schema.additionalProperties) && !argumentValueSatisfiesSchema(nestedValue, schema.additionalProperties, false)) return false;
+    if (
+      isRecord(schema.additionalProperties) &&
+      !argumentValueSatisfiesSchema(
+        nestedValue,
+        schema.additionalProperties,
+        false,
+      )
+    )
+      return false;
   }
   return true;
 }
 
-function arrayConstraintsApply(schema: Record<string, unknown>, value: unknown, types: string[]): boolean {
-  if (schema.items === undefined && !Array.isArray(schema.prefixItems) && schema.minItems === undefined && schema.maxItems === undefined) return false;
+function arrayConstraintsApply(
+  schema: Record<string, unknown>,
+  value: unknown,
+  types: string[],
+): boolean {
+  if (
+    schema.items === undefined &&
+    !Array.isArray(schema.prefixItems) &&
+    schema.minItems === undefined &&
+    schema.maxItems === undefined
+  )
+    return false;
   if (Array.isArray(value)) return true;
   return !types.length || types.includes("array");
 }
 
-function arrayValueSatisfiesSchema(value: unknown, schema: Record<string, unknown>): boolean {
+function arrayValueSatisfiesSchema(
+  value: unknown,
+  schema: Record<string, unknown>,
+): boolean {
   if (!Array.isArray(value)) return false;
-  const minItems = typeof schema.minItems === "number" && Number.isFinite(schema.minItems) ? schema.minItems : undefined;
-  const maxItems = typeof schema.maxItems === "number" && Number.isFinite(schema.maxItems) ? schema.maxItems : undefined;
+  const minItems =
+    typeof schema.minItems === "number" && Number.isFinite(schema.minItems)
+      ? schema.minItems
+      : undefined;
+  const maxItems =
+    typeof schema.maxItems === "number" && Number.isFinite(schema.maxItems)
+      ? schema.maxItems
+      : undefined;
   if (minItems !== undefined && value.length < minItems) return false;
   if (maxItems !== undefined && value.length > maxItems) return false;
-  const prefixItems = Array.isArray(schema.prefixItems) ? schema.prefixItems : [];
-  for (let index = 0; index < prefixItems.length && index < value.length; index += 1) {
-    if (!argumentValueSatisfiesSchema(value[index], prefixItems[index], true)) return false;
+  const prefixItems = Array.isArray(schema.prefixItems)
+    ? schema.prefixItems
+    : [];
+  for (
+    let index = 0;
+    index < prefixItems.length && index < value.length;
+    index += 1
+  ) {
+    if (!argumentValueSatisfiesSchema(value[index], prefixItems[index], true))
+      return false;
   }
   if (schema.items === false && value.length > prefixItems.length) return false;
   if (isRecord(schema.items)) {
     for (let index = prefixItems.length; index < value.length; index += 1) {
-      if (!argumentValueSatisfiesSchema(value[index], schema.items, true)) return false;
+      if (!argumentValueSatisfiesSchema(value[index], schema.items, true))
+        return false;
     }
   }
   return true;
@@ -2796,10 +4437,15 @@ function arrayValueSatisfiesSchema(value: unknown, schema: Record<string, unknow
 
 function schemaJsonTypes(schema: Record<string, unknown>): string[] {
   if (typeof schema.type === "string") return [schema.type];
-  return Array.isArray(schema.type) ? schema.type.filter((item): item is string => typeof item === "string") : [];
+  return Array.isArray(schema.type)
+    ? schema.type.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
-function schemaAllowsJsonType(schema: Record<string, unknown>, type: string): boolean {
+function schemaAllowsJsonType(
+  schema: Record<string, unknown>,
+  type: string,
+): boolean {
   const types = schemaJsonTypes(schema);
   return !types.length || types.includes(type);
 }
@@ -2828,27 +4474,51 @@ function jsonValueMatchesType(value: unknown, type: string): boolean {
 function toolRequiredArgumentSummary(tool: OpenAiToolSpec): string {
   const schema = toolParameterSchema(tool);
   if (!schema.required.length) return "none";
-  return schema.required.flatMap((property) => {
-    const canonicalProperty = schema.properties.find((item) => normalizeToolName(item) === normalizeToolName(property)) ?? property;
-    return requiredArgumentSummaryForSchema(canonicalProperty, schema.propertySchemas[canonicalProperty]);
-  }).join(", ");
+  return schema.required
+    .flatMap((property) => {
+      const canonicalProperty =
+        schema.properties.find(
+          (item) => normalizeToolName(item) === normalizeToolName(property),
+        ) ?? property;
+      return requiredArgumentSummaryForSchema(
+        canonicalProperty,
+        schema.propertySchemas[canonicalProperty],
+      );
+    })
+    .join(", ");
 }
 
-function requiredArgumentSummaryForSchema(prefix: string, schema: unknown): string[] {
+function requiredArgumentSummaryForSchema(
+  prefix: string,
+  schema: unknown,
+): string[] {
   if (!isRecord(schema)) return [`${prefix}:unknown`];
   const nestedProperties = isRecord(schema.properties) ? schema.properties : {};
   const nestedNames = Object.keys(nestedProperties);
-  const nestedRequired = Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : [];
+  const nestedRequired = Array.isArray(schema.required)
+    ? schema.required.filter((item): item is string => typeof item === "string")
+    : [];
   if (nestedNames.length && nestedRequired.length) {
-    const normalizedProperties = new Map(nestedNames.map((property) => [normalizeToolName(property), property]));
+    const normalizedProperties = new Map(
+      nestedNames.map((property) => [normalizeToolName(property), property]),
+    );
     return nestedRequired.flatMap((property) => {
-      const canonicalProperty = firstMatchingProperty([property], nestedNames, normalizedProperties) ?? property;
-      return requiredArgumentSummaryForSchema(`${prefix}.${canonicalProperty}`, nestedProperties[canonicalProperty]);
+      const canonicalProperty =
+        firstMatchingProperty([property], nestedNames, normalizedProperties) ??
+        property;
+      return requiredArgumentSummaryForSchema(
+        `${prefix}.${canonicalProperty}`,
+        nestedProperties[canonicalProperty],
+      );
     });
   }
   if (isRecord(schema.items)) {
-    const itemSummaries = requiredArgumentSummaryForSchema(`${prefix}[]`, schema.items);
-    if (itemSummaries.some((item) => item !== `${prefix}[]:unknown`)) return itemSummaries;
+    const itemSummaries = requiredArgumentSummaryForSchema(
+      `${prefix}[]`,
+      schema.items,
+    );
+    if (itemSummaries.some((item) => item !== `${prefix}[]:unknown`))
+      return itemSummaries;
   }
   return [`${prefix}:${schemaTypeLabel(schema)}`];
 }
@@ -2856,13 +4526,20 @@ function requiredArgumentSummaryForSchema(prefix: string, schema: unknown): stri
 function toolSchemaPropertySummary(tool: OpenAiToolSpec): string {
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return "none";
-  return schema.properties.map((property) => `${property}:${schemaTypeLabel(schema.propertySchemas[property])}`).join(", ");
+  return schema.properties
+    .map(
+      (property) =>
+        `${property}:${schemaTypeLabel(schema.propertySchemas[property])}`,
+    )
+    .join(", ");
 }
 
 function schemaTypeLabel(schema: unknown): string {
   if (!isRecord(schema)) return "unknown";
   const constValue = typeof schema.const === "string" ? `=${schema.const}` : "";
-  const enumValues = Array.isArray(schema.enum) ? schema.enum.filter((item): item is string => typeof item === "string") : [];
+  const enumValues = Array.isArray(schema.enum)
+    ? schema.enum.filter((item): item is string => typeof item === "string")
+    : [];
   if (enumValues.length) return `enum(${enumValues.join("|")})`;
   const types = schemaJsonTypes(schema);
   return `${types.join("|") || "any"}${constValue}`;
@@ -2883,9 +4560,13 @@ function normalizeToolArgumentValue(
   targetProperty: string,
   tool: OpenAiToolSpec | undefined,
   context?: ToolCallContext,
-  sourceProperty?: string
+  sourceProperty?: string,
 ): unknown {
-  if (typeof value === "number" && Number.isFinite(value) && toolPropertyPrefersSecondsTimeout(tool, targetProperty)) {
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value) &&
+    toolPropertyPrefersSecondsTimeout(tool, targetProperty)
+  ) {
     return normalizeTimeoutForSecondsTool(value, sourceProperty);
   }
   if (typeof value !== "string") return value;
@@ -2893,29 +4574,52 @@ function normalizeToolArgumentValue(
   return absolutizeToolPath(value, context);
 }
 
-function normalizeTimeoutForSecondsTool(value: number, sourceProperty?: string): number {
+function normalizeTimeoutForSecondsTool(
+  value: number,
+  sourceProperty?: string,
+): number {
   const source = normalizeToolName(sourceProperty || "");
   if (["timeoutseconds", "seconds"].includes(source)) return value;
-  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source)) return Math.max(1, Math.ceil(value / 1000));
+  if (["timeoutms", "timeoutmilliseconds", "milliseconds"].includes(source))
+    return Math.max(1, Math.ceil(value / 1000));
   return value >= 1000 ? Math.max(1, Math.ceil(value / 1000)) : value;
 }
 
-function toolPropertyPrefersSecondsTimeout(tool: OpenAiToolSpec | undefined, property: string): boolean {
+function toolPropertyPrefersSecondsTimeout(
+  tool: OpenAiToolSpec | undefined,
+  property: string,
+): boolean {
   const normalizedProperty = normalizeToolName(property);
-  if (!["timeout", "timeoutseconds", "seconds"].includes(normalizedProperty)) return false;
+  if (!["timeout", "timeoutseconds", "seconds"].includes(normalizedProperty))
+    return false;
   if (["timeoutseconds", "seconds"].includes(normalizedProperty)) return true;
   const schema = toolPropertySchema(tool, property);
-  const description = isRecord(schema) && typeof schema.description === "string" ? schema.description.toLowerCase() : "";
-  return /\bseconds?\b/.test(description) && !/\bmilliseconds?\b|\bms\b/.test(description);
+  const description =
+    isRecord(schema) && typeof schema.description === "string"
+      ? schema.description.toLowerCase()
+      : "";
+  return (
+    /\bseconds?\b/.test(description) &&
+    !/\bmilliseconds?\b|\bms\b/.test(description)
+  );
 }
 
-function toolPropertyPrefersAbsolutePath(tool: OpenAiToolSpec | undefined, property: string): boolean {
+function toolPropertyPrefersAbsolutePath(
+  tool: OpenAiToolSpec | undefined,
+  property: string,
+): boolean {
   const schema = toolPropertySchema(tool, property);
-  const description = isRecord(schema) && typeof schema.description === "string" ? schema.description.toLowerCase() : "";
+  const description =
+    isRecord(schema) && typeof schema.description === "string"
+      ? schema.description.toLowerCase()
+      : "";
   if (description.includes("absolute path")) return true;
   const normalizedProperty = normalizeToolName(property);
   const canonical = canonicalToolName(tool?.name || "");
-  return ["read", "write", "edit", "delete"].includes(canonical) && ["filepath", "absolutepath"].includes(normalizedProperty);
+  return (
+    ["read", "write", "edit", "delete"].includes(canonical) &&
+    ["filepath", "absolutepath"].includes(normalizedProperty)
+  );
 }
 
 function absolutizeToolPath(value: string, context?: ToolCallContext): string {
@@ -2924,7 +4628,9 @@ function absolutizeToolPath(value: string, context?: ToolCallContext): string {
   if (trimmed === "~" || trimmed.startsWith("~/")) {
     const home = homeDirectoryFromContext(context);
     if (!home) return trimmed;
-    return normalizePosixPath(trimmed === "~" ? home : `${home}/${trimmed.slice(2)}`);
+    return normalizePosixPath(
+      trimmed === "~" ? home : `${home}/${trimmed.slice(2)}`,
+    );
   }
   if (trimmed.startsWith("/")) return normalizePosixPath(trimmed);
   const base = sanitizeContextPath(context?.workingDirectory);
@@ -2932,7 +4638,9 @@ function absolutizeToolPath(value: string, context?: ToolCallContext): string {
   return normalizePosixPath(`${base.replace(/\/+$/, "")}/${trimmed}`);
 }
 
-function homeDirectoryFromContext(context?: ToolCallContext): string | undefined {
+function homeDirectoryFromContext(
+  context?: ToolCallContext,
+): string | undefined {
   const base = sanitizeContextPath(context?.workingDirectory);
   if (!base?.startsWith("/")) return undefined;
   return /^\/Users\/[^/]+/.exec(base)?.[0] ?? /^\/home\/[^/]+/.exec(base)?.[0];
@@ -2956,15 +4664,29 @@ function patchStyleFileArguments(
   args: Record<string, unknown>,
   emittedCanonical: string,
   tool: OpenAiToolSpec | undefined,
-  context?: ToolCallContext
+  context?: ToolCallContext,
 ): Record<string, unknown> | undefined {
   if (!["write", "edit", "delete"].includes(emittedCanonical)) return undefined;
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return undefined;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  const patchKey = patchPropertyKey(tool, schema.properties, normalizedProperties);
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  const patchKey = patchPropertyKey(
+    tool,
+    schema.properties,
+    normalizedProperties,
+  );
   if (!patchKey) return undefined;
-  const path = firstStringArg(args, ...pathCandidates(), "target_file", "targetFile");
+  const path = firstStringArg(
+    args,
+    ...pathCandidates(),
+    "target_file",
+    "targetFile",
+  );
 
   let patch: string | undefined;
   if (emittedCanonical === "write") {
@@ -2973,7 +4695,15 @@ function patchStyleFileArguments(
     if (content === undefined) return undefined;
     patch = addFilePatch(path, content);
   } else if (emittedCanonical === "edit") {
-    const patchContent = firstStringArgAllowEmpty(args, "patchContent", "patch_content", "patch", "diff", "unifiedDiff", "unified_diff");
+    const patchContent = firstStringArgAllowEmpty(
+      args,
+      "patchContent",
+      "patch_content",
+      "patch",
+      "diff",
+      "unifiedDiff",
+      "unified_diff",
+    );
     if (patchContent !== undefined) {
       patch = patchContent;
     } else {
@@ -2989,7 +4719,11 @@ function patchStyleFileArguments(
   }
 
   const output: Record<string, unknown> = { [patchKey]: patch };
-  const pathKey = firstMatchingProperty(pathCandidates(), schema.properties, normalizedProperties);
+  const pathKey = firstMatchingProperty(
+    pathCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
   if (path && pathKey) {
     output[pathKey] = normalizeToolArgumentValue(path, pathKey, tool, context);
   } else if (pathKey && schema.required.includes(pathKey)) {
@@ -2998,24 +4732,42 @@ function patchStyleFileArguments(
   return output;
 }
 
-function patchStyleFileToolSupports(canonical: string, tool: OpenAiToolSpec): boolean {
+function patchStyleFileToolSupports(
+  canonical: string,
+  tool: OpenAiToolSpec,
+): boolean {
   if (!["write", "edit", "delete"].includes(canonical)) return false;
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return false;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  return Boolean(patchPropertyKey(tool, schema.properties, normalizedProperties));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  return Boolean(
+    patchPropertyKey(tool, schema.properties, normalizedProperties),
+  );
 }
 
 function patchPropertyKey(
   tool: OpenAiToolSpec | undefined,
   properties: string[],
-  normalizedProperties: Map<string, string>
+  normalizedProperties: Map<string, string>,
 ): string | undefined {
-  const direct = firstMatchingProperty(["patch", "diff", "unifiedDiff", "unified_diff"], properties, normalizedProperties);
+  const direct = firstMatchingProperty(
+    ["patch", "diff", "unifiedDiff", "unified_diff"],
+    properties,
+    normalizedProperties,
+  );
   if (direct) return direct;
   const normalizedTool = normalizeToolName(tool?.name || "");
   if (!normalizedTool.includes("patch")) return undefined;
-  return firstMatchingProperty(["input", "content", "text"], properties, normalizedProperties);
+  return firstMatchingProperty(
+    ["input", "content", "text"],
+    properties,
+    normalizedProperties,
+  );
 }
 
 function addFilePatch(path: string, content: string): string {
@@ -3023,27 +4775,29 @@ function addFilePatch(path: string, content: string): string {
     "*** Begin Patch",
     `*** Add File: ${path}`,
     ...patchLines(content, "+"),
-    "*** End Patch"
+    "*** End Patch",
   ].join("\n");
 }
 
-function updateFilePatch(path: string, oldText: string, newText: string): string {
+function updateFilePatch(
+  path: string,
+  oldText: string,
+  newText: string,
+): string {
   return [
     "*** Begin Patch",
     `*** Update File: ${path}`,
     "@@",
     ...patchLines(oldText, "-"),
     ...patchLines(newText, "+"),
-    "*** End Patch"
+    "*** End Patch",
   ].join("\n");
 }
 
 function deleteFilePatch(path: string): string {
-  return [
-    "*** Begin Patch",
-    `*** Delete File: ${path}`,
-    "*** End Patch"
-  ].join("\n");
+  return ["*** Begin Patch", `*** Delete File: ${path}`, "*** End Patch"].join(
+    "\n",
+  );
 }
 
 function patchLines(text: string, prefix: "+" | "-"): string[] {
@@ -3053,19 +4807,40 @@ function patchLines(text: string, prefix: "+" | "-"): string[] {
   return (lines.length ? lines : [""]).map((line) => `${prefix}${line}`);
 }
 
-function resolveSpecificMCPTool(args: Record<string, unknown>, tools: OpenAiToolSpec[]): OpenAiToolSpec | undefined {
-  const normalizedCandidates = new Set(mcpToolNameCandidates(args).map(normalizeToolName));
+function resolveSpecificMCPTool(
+  args: Record<string, unknown>,
+  tools: OpenAiToolSpec[],
+): OpenAiToolSpec | undefined {
+  const normalizedCandidates = new Set(
+    mcpToolNameCandidates(args).map(normalizeToolName),
+  );
   if (!normalizedCandidates.size) return undefined;
   return tools.find((tool) => {
     const normalizedTool = normalizeToolName(tool.name);
     if (normalizedCandidates.has(normalizedTool)) return true;
-    return Array.from(normalizedCandidates).some((candidate) => normalizedTool.endsWith(candidate));
+    return Array.from(normalizedCandidates).some((candidate) =>
+      normalizedTool.endsWith(candidate),
+    );
   });
 }
 
 function mcpToolNameCandidates(args: Record<string, unknown>): string[] {
-  const provider = firstStringArg(args, "providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name");
-  const toolName = firstStringArg(args, "toolName", "tool_name", "tool", "name");
+  const provider = firstStringArg(
+    args,
+    "providerIdentifier",
+    "provider_identifier",
+    "provider",
+    "server",
+    "serverName",
+    "server_name",
+  );
+  const toolName = firstStringArg(
+    args,
+    "toolName",
+    "tool_name",
+    "tool",
+    "name",
+  );
   const candidates: string[] = [];
   if (toolName) candidates.push(toolName);
   if (toolName) {
@@ -3074,7 +4849,7 @@ function mcpToolNameCandidates(args: Record<string, unknown>): string[] {
         `${providerName}__${toolName}`,
         `${providerName}_${toolName}`,
         `mcp__${providerName}__${toolName}`,
-        `mcp_${providerName}_${toolName}`
+        `mcp_${providerName}_${toolName}`,
       );
     }
   }
@@ -3093,23 +4868,61 @@ function mcpProviderNameVariants(provider: string | undefined): string[] {
     append(provider.split(separator).filter(Boolean).pop());
   }
   for (const prefix of ["mcp__", "mcp_", "mcp-", "mcp:"]) {
-    if (provider.toLowerCase().startsWith(prefix)) append(provider.slice(prefix.length));
+    if (provider.toLowerCase().startsWith(prefix))
+      append(provider.slice(prefix.length));
   }
   return variants;
 }
 
 function normalizeMCPWrapperArguments(
   args: Record<string, unknown>,
-  schema: ToolParameterSchemaShape
+  schema: ToolParameterSchemaShape,
 ): Record<string, unknown> {
   if (!schema.properties.length) return args;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const output: Record<string, unknown> = {};
-  const serverKey = firstMatchingProperty(["serverName", "server", "provider", "providerIdentifier", "provider_identifier"], schema.properties, normalizedProperties);
-  const toolKey = firstMatchingProperty(["toolName", "tool", "name", "tool_name"], schema.properties, normalizedProperties);
-  const argsKey = firstMatchingProperty(["arguments", "args", "input", "params", "parameters"], schema.properties, normalizedProperties);
-  const serverName = firstStringArg(args, "providerIdentifier", "provider_identifier", "provider", "server", "serverName", "server_name");
-  const toolName = firstStringArg(args, "toolName", "tool_name", "tool", "name");
+  const serverKey = firstMatchingProperty(
+    [
+      "serverName",
+      "server",
+      "provider",
+      "providerIdentifier",
+      "provider_identifier",
+    ],
+    schema.properties,
+    normalizedProperties,
+  );
+  const toolKey = firstMatchingProperty(
+    ["toolName", "tool", "name", "tool_name"],
+    schema.properties,
+    normalizedProperties,
+  );
+  const argsKey = firstMatchingProperty(
+    ["arguments", "args", "input", "params", "parameters"],
+    schema.properties,
+    normalizedProperties,
+  );
+  const serverName = firstStringArg(
+    args,
+    "providerIdentifier",
+    "provider_identifier",
+    "provider",
+    "server",
+    "serverName",
+    "server_name",
+  );
+  const toolName = firstStringArg(
+    args,
+    "toolName",
+    "tool_name",
+    "tool",
+    "name",
+  );
   const payload = mcpPayloadArguments(args);
   if (serverKey && serverName) output[serverKey] = serverName;
   if (toolKey && toolName) output[toolKey] = toolName;
@@ -3117,12 +4930,22 @@ function normalizeMCPWrapperArguments(
   return Object.keys(output).length ? output : args;
 }
 
-function mcpPayloadArguments(args: Record<string, unknown>): Record<string, unknown> {
+function mcpPayloadArguments(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
   return recordArgumentValue(firstArg(args, mcpPayloadCandidates())) ?? {};
 }
 
 function mcpPayloadCandidates(): string[] {
-  return ["args", "arguments", "input", "params", "parameters", "payload", "data"];
+  return [
+    "args",
+    "arguments",
+    "input",
+    "params",
+    "parameters",
+    "payload",
+    "data",
+  ];
 }
 
 function normalizeWrapperObjectArguments(
@@ -3131,29 +4954,45 @@ function normalizeWrapperObjectArguments(
   emittedName: string,
   schema: ToolParameterSchemaShape,
   wrapperDepth: number,
-  context?: ToolCallContext
+  context?: ToolCallContext,
 ): Record<string, unknown> | undefined {
   if (!tool || wrapperDepth > 1) return undefined;
   const wrapper = wrapperObjectArgumentProperty(tool, schema);
   if (!wrapper) return undefined;
   const nested = normalizeToolArguments(
     args,
-    { name: tool.name, description: tool.description, parameters: wrapper.parameters },
-    canonicalToolName(emittedName) === "mcp" && canonicalToolName(tool.name) !== "mcp" ? tool.name : emittedName,
+    {
+      name: tool.name,
+      description: tool.description,
+      parameters: wrapper.parameters,
+    },
+    canonicalToolName(emittedName) === "mcp" &&
+      canonicalToolName(tool.name) !== "mcp"
+      ? tool.name
+      : emittedName,
     wrapperDepth + 1,
-    context
+    context,
   );
   return { [wrapper.key]: nested };
 }
 
 function wrapperObjectArgumentProperty(
   tool: OpenAiToolSpec | undefined,
-  schema = toolParameterSchema(tool)
+  schema = toolParameterSchema(tool),
 ): { key: string; parameters: unknown } | undefined {
   if (!tool || !schema.properties.length) return undefined;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   for (const candidate of wrapperObjectPropertyCandidates()) {
-    const key = firstMatchingProperty([candidate], schema.properties, normalizedProperties);
+    const key = firstMatchingProperty(
+      [candidate],
+      schema.properties,
+      normalizedProperties,
+    );
     if (!key) continue;
     const parameters = schema.propertySchemas[key];
     if (toolParameterSchemaFromValue(parameters).properties.length > 0) {
@@ -3164,33 +5003,51 @@ function wrapperObjectArgumentProperty(
 }
 
 function wrapperObjectPropertyCandidates(): string[] {
-  return ["input", "args", "arguments", "params", "parameters", "payload", "data"];
+  return [
+    "input",
+    "args",
+    "arguments",
+    "params",
+    "parameters",
+    "payload",
+    "data",
+  ];
 }
 
-function toolParameterSchema(tool: OpenAiToolSpec | undefined): ToolParameterSchemaShape {
+function toolParameterSchema(
+  tool: OpenAiToolSpec | undefined,
+): ToolParameterSchemaShape {
   return toolParameterSchemaFromValue(tool?.parameters);
 }
 
-function toolParameterSchemaFromValue(value: unknown, depth = 0, root: unknown = value, seenRefs: Set<string> = new Set()): ToolParameterSchemaShape {
+function toolParameterSchemaFromValue(
+  value: unknown,
+  depth = 0,
+  root: unknown = value,
+  seenRefs: Set<string> = new Set(),
+): ToolParameterSchemaShape {
   if (depth > 5) return emptyToolParameterSchema();
   const parameters = canonicalToolSchemaRecord(value, root, depth, seenRefs);
   if (!parameters) return emptyToolParameterSchema();
 
   const direct = directToolParameterSchema(parameters, root, depth, seenRefs);
-  const allOf = composedToolSchemas(parameters.allOf)
-    .map((schema) => toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs));
+  const allOf = composedToolSchemas(parameters.allOf).map((schema) =>
+    toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs),
+  );
   const variants = [
     ...composedToolSchemas(parameters.anyOf),
-    ...composedToolSchemas(parameters.oneOf)
-  ].map((schema) => toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs));
+    ...composedToolSchemas(parameters.oneOf),
+  ].map((schema) =>
+    toolParameterSchemaFromValue(schema, depth + 1, root, seenRefs),
+  );
 
   return mergeToolParameterSchemas(
     [
       direct,
       mergeToolParameterSchemas(allOf, "union"),
-      mergeToolParameterSchemas(variants, "intersection")
+      mergeToolParameterSchemas(variants, "intersection"),
     ],
-    "union"
+    "union",
   );
 }
 
@@ -3199,32 +5056,67 @@ function emptyToolParameterSchema(): ToolParameterSchemaShape {
     properties: [],
     required: [],
     allowAdditionalProperties: false,
-    propertySchemas: {}
+    propertySchemas: {},
   };
 }
 
-function canonicalToolSchemaRecord(value: unknown, root: unknown, depth = 0, seenRefs: Set<string> = new Set()): Record<string, unknown> | undefined {
+function canonicalToolSchemaRecord(
+  value: unknown,
+  root: unknown,
+  depth = 0,
+  seenRefs: Set<string> = new Set(),
+): Record<string, unknown> | undefined {
   if (depth > 5) return undefined;
   const dereferenced = dereferenceToolSchema(value, root, depth, seenRefs);
   if (!isRecord(dereferenced)) return undefined;
   if (!isRecord(dereferenced.properties)) {
-    if (isRecord(dereferenced.schema)) return canonicalToolSchemaRecord(dereferenced.schema, root, depth + 1, seenRefs);
-    if (isRecord(dereferenced.json_schema)) return canonicalToolSchemaRecord(dereferenced.json_schema, root, depth + 1, seenRefs);
+    if (isRecord(dereferenced.schema))
+      return canonicalToolSchemaRecord(
+        dereferenced.schema,
+        root,
+        depth + 1,
+        seenRefs,
+      );
+    if (isRecord(dereferenced.json_schema))
+      return canonicalToolSchemaRecord(
+        dereferenced.json_schema,
+        root,
+        depth + 1,
+        seenRefs,
+      );
   }
   return dereferenced;
 }
 
-function directToolParameterSchema(parameters: Record<string, unknown>, root: unknown, depth: number, seenRefs: Set<string>): ToolParameterSchemaShape {
-  const properties = isRecord(parameters.properties) ? parameters.properties : undefined;
-  const required = Array.isArray(parameters.required) ? parameters.required.filter((item): item is string => typeof item === "string") : [];
+function directToolParameterSchema(
+  parameters: Record<string, unknown>,
+  root: unknown,
+  depth: number,
+  seenRefs: Set<string>,
+): ToolParameterSchemaShape {
+  const properties = isRecord(parameters.properties)
+    ? parameters.properties
+    : undefined;
+  const required = Array.isArray(parameters.required)
+    ? parameters.required.filter(
+        (item): item is string => typeof item === "string",
+      )
+    : [];
   const propertySchemas = properties
-    ? Object.fromEntries(Object.entries(properties).map(([key, schema]) => [key, dereferenceToolSchema(schema, root, depth + 1, seenRefs)]))
+    ? Object.fromEntries(
+        Object.entries(properties).map(([key, schema]) => [
+          key,
+          dereferenceToolSchema(schema, root, depth + 1, seenRefs),
+        ]),
+      )
     : {};
   return {
     properties: properties ? Object.keys(properties) : [],
     required,
-    allowAdditionalProperties: parameters.additionalProperties === true || isRecord(parameters.additionalProperties),
-    propertySchemas
+    allowAdditionalProperties:
+      parameters.additionalProperties === true ||
+      isRecord(parameters.additionalProperties),
+    propertySchemas,
   };
 }
 
@@ -3232,13 +5124,24 @@ function composedToolSchemas(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function dereferenceToolSchema(value: unknown, root: unknown, depth = 0, seenRefs: Set<string> = new Set()): unknown {
-  if (depth > 5 || !isRecord(value) || typeof value.$ref !== "string") return value;
+function dereferenceToolSchema(
+  value: unknown,
+  root: unknown,
+  depth = 0,
+  seenRefs: Set<string> = new Set(),
+): unknown {
+  if (depth > 5 || !isRecord(value) || typeof value.$ref !== "string")
+    return value;
   const ref = value.$ref.trim();
   if (!ref || seenRefs.has(ref)) return value;
   const target = localSchemaReference(root, ref);
   if (target === undefined || target === value) return value;
-  return dereferenceToolSchema(target, root, depth + 1, new Set([...seenRefs, ref]));
+  return dereferenceToolSchema(
+    target,
+    root,
+    depth + 1,
+    new Set([...seenRefs, ref]),
+  );
 }
 
 function localSchemaReference(root: unknown, ref: string): unknown {
@@ -3246,7 +5149,10 @@ function localSchemaReference(root: unknown, ref: string): unknown {
   const direct = jsonPointerTarget(root, ref);
   if (direct !== undefined) return direct;
   if (!isRecord(root)) return undefined;
-  return jsonPointerTarget(root.schema, ref) ?? jsonPointerTarget(root.json_schema, ref);
+  return (
+    jsonPointerTarget(root.schema, ref) ??
+    jsonPointerTarget(root.json_schema, ref)
+  );
 }
 
 function jsonPointerTarget(root: unknown, ref: string): unknown {
@@ -3272,27 +5178,42 @@ function jsonPointerToken(value: string): string {
   return value.replace(/~1/g, "/").replace(/~0/g, "~");
 }
 
-function mergeToolParameterSchemas(shapes: ToolParameterSchemaShape[], requiredMode: "union" | "intersection"): ToolParameterSchemaShape {
-  const useful = shapes.filter((shape) => shape.properties.length || shape.required.length || shape.allowAdditionalProperties);
+function mergeToolParameterSchemas(
+  shapes: ToolParameterSchemaShape[],
+  requiredMode: "union" | "intersection",
+): ToolParameterSchemaShape {
+  const useful = shapes.filter(
+    (shape) =>
+      shape.properties.length ||
+      shape.required.length ||
+      shape.allowAdditionalProperties,
+  );
   if (!useful.length) return emptyToolParameterSchema();
   const propertySchemas: Record<string, unknown> = {};
   const properties: string[] = [];
   for (const shape of useful) {
     for (const property of shape.properties) {
       if (!properties.includes(property)) properties.push(property);
-      propertySchemas[property] = propertySchemas[property] === undefined
-        ? shape.propertySchemas[property]
-        : mergePropertySchemas(propertySchemas[property], shape.propertySchemas[property]);
+      propertySchemas[property] =
+        propertySchemas[property] === undefined
+          ? shape.propertySchemas[property]
+          : mergePropertySchemas(
+              propertySchemas[property],
+              shape.propertySchemas[property],
+            );
     }
   }
-  const required = requiredMode === "intersection"
-    ? intersectRequiredProperties(useful.map((shape) => shape.required))
-    : Array.from(new Set(useful.flatMap((shape) => shape.required)));
+  const required =
+    requiredMode === "intersection"
+      ? intersectRequiredProperties(useful.map((shape) => shape.required))
+      : Array.from(new Set(useful.flatMap((shape) => shape.required)));
   return {
     properties,
     required,
-    allowAdditionalProperties: useful.some((shape) => shape.allowAdditionalProperties),
-    propertySchemas
+    allowAdditionalProperties: useful.some(
+      (shape) => shape.allowAdditionalProperties,
+    ),
+    propertySchemas,
   };
 }
 
@@ -3303,13 +5224,14 @@ function mergePropertySchemas(left: unknown, right: unknown): unknown {
     left.enum,
     right.enum,
     left.const === undefined ? undefined : [left.const],
-    right.const === undefined ? undefined : [right.const]
+    right.const === undefined ? undefined : [right.const],
   );
   if (enumValues.length) {
     merged.enum = enumValues;
     if (enumValues.length > 1) delete merged.const;
   }
-  if (merged.description === undefined && typeof right.description === "string") merged.description = right.description;
+  if (merged.description === undefined && typeof right.description === "string")
+    merged.description = right.description;
   return merged;
 }
 
@@ -3327,45 +5249,89 @@ function unionStringArrays(...values: unknown[]): string[] {
 function intersectRequiredProperties(requiredSets: string[][]): string[] {
   const nonEmpty = requiredSets.filter((required) => required.length > 0);
   if (!nonEmpty.length) return [];
-  return nonEmpty[0].filter((property) => nonEmpty.every((required) => required.includes(property)));
+  return nonEmpty[0].filter((property) =>
+    nonEmpty.every((required) => required.includes(property)),
+  );
 }
 
 function applyRequiredToolDefaults(
   output: Record<string, unknown>,
   required: string[],
   tool: OpenAiToolSpec | undefined,
-  originalArgs: Record<string, unknown>
+  originalArgs: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!required.length) return output;
   const normalizedTool = normalizeToolName(tool?.name || "");
   const schema = toolParameterSchema(tool);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const next = { ...output };
   if (isShellLikeTool(tool, originalArgs)) {
-    const workdirKey = firstMatchingProperty(shellExplicitWorkdirCandidates(), schema.properties, normalizedProperties);
-    if (workdirKey && required.includes(workdirKey) && !shouldIncludeOptionalPath(next[workdirKey])) {
+    const workdirKey = firstMatchingProperty(
+      shellExplicitWorkdirCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
+    if (
+      workdirKey &&
+      required.includes(workdirKey) &&
+      !shouldIncludeOptionalPath(next[workdirKey])
+    ) {
       next[workdirKey] = ".";
     }
-    const timeoutKey = firstMatchingProperty(timeoutCandidates(), schema.properties, normalizedProperties);
-    if (timeoutKey && required.includes(timeoutKey) && next[timeoutKey] === undefined) {
+    const timeoutKey = firstMatchingProperty(
+      timeoutCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
+    if (
+      timeoutKey &&
+      required.includes(timeoutKey) &&
+      next[timeoutKey] === undefined
+    ) {
       next[timeoutKey] = normalizeToolArgumentValue(120_000, timeoutKey, tool);
     }
-    if (required.includes("description") && typeof next.description !== "string") {
-      const command = commandLikeValue(next, tool) ?? firstStringArg(originalArgs, ...shellCommandCandidates());
+    if (
+      required.includes("description") &&
+      typeof next.description !== "string"
+    ) {
+      const command =
+        commandLikeValue(next, tool) ??
+        firstStringArg(originalArgs, ...shellCommandCandidates());
       next.description = shellDescription(command);
     }
     const commandKey = commandLikeProperty(tool) ?? "command";
     if (required.includes(commandKey) && typeof next[commandKey] !== "string") {
-      next[commandKey] = firstStringArg(originalArgs, ...shellCommandCandidates()) || "";
+      next[commandKey] =
+        firstStringArg(originalArgs, ...shellCommandCandidates()) || "";
     }
   } else if (isGlobLikeToolName(normalizedTool)) {
-    const requiredProperties = new Map(required.map((property) => [normalizeToolName(property), property]));
-    const patternKey = firstMatchingProperty(globPatternCandidates(), required, requiredProperties);
+    const requiredProperties = new Map(
+      required.map((property) => [normalizeToolName(property), property]),
+    );
+    const patternKey = firstMatchingProperty(
+      globPatternCandidates(),
+      required,
+      requiredProperties,
+    );
     if (patternKey && typeof next[patternKey] !== "string") {
-      next[patternKey] = firstStringArg(originalArgs, ...globPatternCandidates()) || "*";
+      next[patternKey] =
+        firstStringArg(originalArgs, ...globPatternCandidates()) || "*";
     }
-    const pathKey = firstMatchingProperty(globPathCandidates(), schema.properties, normalizedProperties);
-    if (pathKey && required.includes(pathKey) && !shouldIncludeOptionalPath(next[pathKey])) {
+    const pathKey = firstMatchingProperty(
+      globPathCandidates(),
+      schema.properties,
+      normalizedProperties,
+    );
+    if (
+      pathKey &&
+      required.includes(pathKey) &&
+      !shouldIncludeOptionalPath(next[pathKey])
+    ) {
       next[pathKey] = ".";
     }
   }
@@ -3375,16 +5341,26 @@ function applyRequiredToolDefaults(
 function sanitizeNormalizedToolArguments(
   output: Record<string, unknown>,
   tool: OpenAiToolSpec | undefined,
-  originalArgs: Record<string, unknown>
+  originalArgs: Record<string, unknown>,
 ): Record<string, unknown> {
   if (!isShellLikeTool(tool, originalArgs)) return output;
   const next = { ...output };
   const schema = toolParameterSchema(tool);
   const required = new Set(schema.required);
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
   const seen = new Set<string>();
   for (const candidate of shellExplicitWorkdirCandidates()) {
-    const key = firstMatchingProperty([candidate], schema.properties, normalizedProperties) ?? candidate;
+    const key =
+      firstMatchingProperty(
+        [candidate],
+        schema.properties,
+        normalizedProperties,
+      ) ?? candidate;
     if (seen.has(key)) continue;
     seen.add(key);
     if (!isSyntheticSdkWorkingDirectory(next[key])) continue;
@@ -3392,7 +5368,10 @@ function sanitizeNormalizedToolArguments(
     else delete next[key];
   }
   const commandKey = commandLikeProperty(tool) ?? "command";
-  const command = typeof next[commandKey] === "string" ? next[commandKey] : firstStringArg(originalArgs, ...shellCommandCandidates());
+  const command =
+    typeof next[commandKey] === "string"
+      ? next[commandKey]
+      : firstStringArg(originalArgs, ...shellCommandCandidates());
   if (typeof command === "string" && shouldBackgroundShellCommand(command)) {
     next[commandKey] = backgroundShellCommand(command);
     if (typeof next.description === "string") {
@@ -3402,30 +5381,58 @@ function sanitizeNormalizedToolArguments(
   return next;
 }
 
-function isShellLikeTool(tool: OpenAiToolSpec | undefined, originalArgs: Record<string, unknown>): boolean {
+function isShellLikeTool(
+  tool: OpenAiToolSpec | undefined,
+  originalArgs: Record<string, unknown>,
+): boolean {
   const normalizedTool = normalizeToolName(tool?.name || "");
-  if (["bash", "shell", "terminal"].includes(normalizedTool) || canonicalToolName(tool?.name || "") === "shell") return true;
-  return Boolean(commandLikeProperty(tool) && firstStringArg(originalArgs, ...shellCommandCandidates()));
+  if (
+    ["bash", "shell", "terminal"].includes(normalizedTool) ||
+    canonicalToolName(tool?.name || "") === "shell"
+  )
+    return true;
+  return Boolean(
+    commandLikeProperty(tool) &&
+    firstStringArg(originalArgs, ...shellCommandCandidates()),
+  );
 }
 
-function commandLikeProperty(tool: OpenAiToolSpec | undefined): string | undefined {
+function commandLikeProperty(
+  tool: OpenAiToolSpec | undefined,
+): string | undefined {
   const schema = toolParameterSchema(tool);
   if (!schema.properties.length) return undefined;
-  const normalizedProperties = new Map(schema.properties.map((property) => [normalizeToolName(property), property]));
-  return firstMatchingProperty(shellCommandCandidates(), schema.properties, normalizedProperties);
+  const normalizedProperties = new Map(
+    schema.properties.map((property) => [
+      normalizeToolName(property),
+      property,
+    ]),
+  );
+  return firstMatchingProperty(
+    shellCommandCandidates(),
+    schema.properties,
+    normalizedProperties,
+  );
 }
 
-function commandLikeValue(output: Record<string, unknown>, tool: OpenAiToolSpec | undefined): unknown {
+function commandLikeValue(
+  output: Record<string, unknown>,
+  tool: OpenAiToolSpec | undefined,
+): unknown {
   const commandKey = commandLikeProperty(tool);
   return commandKey ? output[commandKey] : output.command;
 }
 
 function isSyntheticSdkWorkingDirectory(value: unknown): boolean {
-  return typeof value === "string" && ["", ".", "/workspace", "workspace"].includes(value.trim());
+  return (
+    typeof value === "string" &&
+    ["", ".", "/workspace", "workspace"].includes(value.trim())
+  );
 }
 
 function shellDescription(command: unknown): string {
-  if (typeof command !== "string" || !command.trim()) return "Runs shell command";
+  if (typeof command !== "string" || !command.trim())
+    return "Runs shell command";
   const first = command.trim().split(/\s+/).slice(0, 5).join(" ");
   return `Runs ${first}`;
 }
@@ -3434,16 +5441,27 @@ function shouldBackgroundShellCommand(command: string): boolean {
   const text = command.trim().toLowerCase();
   if (!text || isAlreadyBackgroundedShellCommand(text)) return false;
   if (/\bpython(?:3(?:\.\d+)?)?\s+-m\s+http\.server\b/.test(text)) return true;
-  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|serve|preview)\b/.test(text)) return true;
-  if (/\b(?:npx|bunx)\s+(?:vite|next|nuxt|astro|webpack-dev-server)\b/.test(text)) return true;
-  if (/\b(?:vite|next|nuxt|astro|webpack-dev-server)\b/.test(text) && /\b(?:--host|--port|localhost|127\.0\.0\.1|0\.0\.0\.0)\b/.test(text)) {
+  if (/\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|serve|preview)\b/.test(text))
+    return true;
+  if (
+    /\b(?:npx|bunx)\s+(?:vite|next|nuxt|astro|webpack-dev-server)\b/.test(text)
+  )
+    return true;
+  if (
+    /\b(?:vite|next|nuxt|astro|webpack-dev-server)\b/.test(text) &&
+    /\b(?:--host|--port|localhost|127\.0\.0\.1|0\.0\.0\.0)\b/.test(text)
+  ) {
     return true;
   }
   return /\b(?:uvicorn|gunicorn|flask\s+run|php\s+-s)\b/.test(text);
 }
 
 function isAlreadyBackgroundedShellCommand(command: string): boolean {
-  return /(^|[\s;&|])(?:nohup|setsid|tmux|screen)\b/.test(command) || /(^|[^&])&\s*(?:$|[;|])/.test(command) || /\bdisown\b|\$!/.test(command);
+  return (
+    /(^|[\s;&|])(?:nohup|setsid|tmux|screen)\b/.test(command) ||
+    /(^|[^&])&\s*(?:$|[;|])/.test(command) ||
+    /\bdisown\b|\$!/.test(command)
+  );
 }
 
 function backgroundShellCommand(command: string): string {
@@ -3464,12 +5482,19 @@ function hashString(value: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
-function expandToolArguments(args: Record<string, unknown>): Record<string, unknown> {
+function expandToolArguments(
+  args: Record<string, unknown>,
+): Record<string, unknown> {
   const output: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(args)) {
     const normalized = normalizeToolName(key);
     const nested = recordArgumentValue(value);
-    if (nested && ["arguments", "args", "input", "parameters", "params"].includes(normalized)) {
+    if (
+      nested &&
+      ["arguments", "args", "input", "parameters", "params"].includes(
+        normalized,
+      )
+    ) {
       Object.assign(output, expandToolArguments(nested));
       continue;
     }
@@ -3497,9 +5522,11 @@ function mapToolArgument(
   key: string,
   properties: string[],
   normalizedProperties: Map<string, string>,
-  toolName: string | undefined
+  toolName: string | undefined,
 ): { target: string; priority: number } | null {
-  const exact = properties.includes(key) ? key : normalizedProperties.get(normalizeToolName(key));
+  const exact = properties.includes(key)
+    ? key
+    : normalizedProperties.get(normalizeToolName(key));
   if (exact) return { target: exact, priority: 100 };
   return aliasToolArgument(key, properties, normalizedProperties, toolName);
 }
@@ -3508,12 +5535,22 @@ function aliasToolArgument(
   key: string,
   properties: string[],
   normalizedProperties: Map<string, string>,
-  toolName: string | undefined
+  toolName: string | undefined,
 ): { target: string; priority: number } | null {
   const normalized = normalizeToolName(key);
-  const rules = [...toolSpecificArgumentAliases(normalizeToolName(toolName || ""), normalized), ...commonArgumentAliases(normalized)];
+  const rules = [
+    ...toolSpecificArgumentAliases(
+      normalizeToolName(toolName || ""),
+      normalized,
+    ),
+    ...commonArgumentAliases(normalized),
+  ];
   for (const rule of rules) {
-    const target = firstMatchingProperty(rule.candidates, properties, normalizedProperties);
+    const target = firstMatchingProperty(
+      rule.candidates,
+      properties,
+      normalizedProperties,
+    );
     if (target) return { target, priority: rule.priority };
   }
   return null;
@@ -3522,7 +5559,7 @@ function aliasToolArgument(
 function firstMatchingProperty(
   candidates: string[],
   properties: string[],
-  normalizedProperties: Map<string, string>
+  normalizedProperties: Map<string, string>,
 ): string | undefined {
   for (const candidate of candidates) {
     if (properties.includes(candidate)) return candidate;
@@ -3532,17 +5569,31 @@ function firstMatchingProperty(
   return undefined;
 }
 
-function commonArgumentAliases(normalized: string): Array<{ candidates: string[]; priority: number }> {
-  const aliases: Record<string, Array<{ candidates: string[]; priority: number }>> = {
+function commonArgumentAliases(
+  normalized: string,
+): Array<{ candidates: string[]; priority: number }> {
+  const aliases: Record<
+    string,
+    Array<{ candidates: string[]; priority: number }>
+  > = {
     absolutepath: [{ candidates: pathCandidates(), priority: 80 }],
     commandline: [{ candidates: shellCommandCandidates(), priority: 80 }],
-    contents: [{ candidates: [...fileContentCandidates(), "newString"], priority: 70 }],
+    contents: [
+      { candidates: [...fileContentCandidates(), "newString"], priority: 70 },
+    ],
     command: [{ candidates: shellCommandCandidates(), priority: 90 }],
     shellcommand: [{ candidates: shellCommandCandidates(), priority: 95 }],
     code: [{ candidates: shellCommandCandidates(), priority: 60 }],
     cwd: [{ candidates: shellWorkdirCandidates(), priority: 45 }],
-    directory: [{ candidates: [...shellWorkdirCandidates(), ...globPathCandidates()], priority: 45 }],
-    filetext: [{ candidates: [...fileContentCandidates(), "newString"], priority: 95 }],
+    directory: [
+      {
+        candidates: [...shellWorkdirCandidates(), ...globPathCandidates()],
+        priority: 45,
+      },
+    ],
+    filetext: [
+      { candidates: [...fileContentCandidates(), "newString"], priority: 95 },
+    ],
     filepath: [{ candidates: pathCandidates(), priority: 90 }],
     filename: [{ candidates: pathCandidates(), priority: 75 }],
     fileglob: [{ candidates: globPatternCandidates(), priority: 90 }],
@@ -3551,128 +5602,360 @@ function commonArgumentAliases(normalized: string): Array<{ candidates: string[]
     globpattern: [{ candidates: globPatternCandidates(), priority: 95 }],
     includepattern: [{ candidates: globPatternCandidates(), priority: 80 }],
     include: [{ candidates: globPatternCandidates(), priority: 70 }],
-    literal: [{ candidates: ["literal", "fixedString", "fixed_string"], priority: 90 }],
-    newcontents: [{ candidates: [...newTextCandidates(), ...fileContentCandidates()], priority: 85 }],
+    literal: [
+      { candidates: ["literal", "fixedString", "fixed_string"], priority: 90 },
+    ],
+    newcontents: [
+      {
+        candidates: [...newTextCandidates(), ...fileContentCandidates()],
+        priority: 85,
+      },
+    ],
     newstring: [{ candidates: newTextCandidates(), priority: 95 }],
     newtext: [{ candidates: [...newTextCandidates(), "text"], priority: 85 }],
-    oldcontents: [{ candidates: [...oldTextCandidates(), "text"], priority: 80 }],
+    oldcontents: [
+      { candidates: [...oldTextCandidates(), "text"], priority: 80 },
+    ],
     oldstring: [{ candidates: oldTextCandidates(), priority: 95 }],
     oldtext: [{ candidates: [...oldTextCandidates(), "text"], priority: 85 }],
-    pattern: [{ candidates: ["pattern", "query", "regex", "search"], priority: 80 }],
-    query: [{ candidates: ["query", "pattern", "search", "prompt"], priority: 80 }],
+    pattern: [
+      { candidates: ["pattern", "query", "regex", "search"], priority: 80 },
+    ],
+    query: [
+      { candidates: ["query", "pattern", "search", "prompt"], priority: 80 },
+    ],
     regex: [{ candidates: ["pattern", "regex", "query"], priority: 75 }],
     replacement: [{ candidates: newTextCandidates(), priority: 85 }],
     replacewith: [{ candidates: newTextCandidates(), priority: 90 }],
     script: [{ candidates: shellCommandCandidates(), priority: 75 }],
-    search: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 70 }],
-    searchstring: [{ candidates: ["pattern", "query", "oldString", "search"], priority: 80 }],
+    search: [
+      { candidates: ["pattern", "query", "oldString", "search"], priority: 70 },
+    ],
+    searchstring: [
+      { candidates: ["pattern", "query", "oldString", "search"], priority: 80 },
+    ],
     searchpath: [{ candidates: globPathCandidates(), priority: 80 }],
     targetdirectory: [{ candidates: globPathCandidates(), priority: 55 }],
     target: [{ candidates: pathCandidates(), priority: 80 }],
     targetpath: [{ candidates: pathCandidates(), priority: 90 }],
     targetfile: [{ candidates: pathCandidates(), priority: 90 }],
-    targeting: [{ candidates: ["path", "directory", "cwd", "pattern", "filePath"], priority: 45 }],
+    targeting: [
+      {
+        candidates: ["path", "directory", "cwd", "pattern", "filePath"],
+        priority: 45,
+      },
+    ],
     timeout: [{ candidates: timeoutCandidates(), priority: 90 }],
     timeoutms: [{ candidates: timeoutCandidates(), priority: 95 }],
     timeoutmilliseconds: [{ candidates: timeoutCandidates(), priority: 95 }],
     timeoutseconds: [{ candidates: timeoutCandidates(), priority: 95 }],
     seconds: [{ candidates: timeoutCandidates(), priority: 80 }],
-    url: [{ candidates: ["url", "uri", "href"], priority: 90 }]
+    url: [{ candidates: ["url", "uri", "href"], priority: 90 }],
   };
-  if (normalized === "workingdirectory" || normalized === "workingdir") return [{ candidates: shellWorkdirCandidates(), priority: 90 }];
-  if (normalized === "cmd") return [{ candidates: shellCommandCandidates(), priority: 95 }];
-  if (normalized === "path") return [{ candidates: ["filePath", "path", "directory", "cwd", "pattern"], priority: 75 }];
-  if (normalized === "prompt") return [{ candidates: ["prompt", "description", "instructions", "query"], priority: 80 }];
-  if (normalized === "tasks") return [{ candidates: ["todos", "tasks", "items"], priority: 75 }];
-  if (normalized === "todo" || normalized === "items") return [{ candidates: ["todos", "items", "tasks"], priority: 70 }];
+  if (normalized === "workingdirectory" || normalized === "workingdir")
+    return [{ candidates: shellWorkdirCandidates(), priority: 90 }];
+  if (normalized === "cmd")
+    return [{ candidates: shellCommandCandidates(), priority: 95 }];
+  if (normalized === "path")
+    return [
+      {
+        candidates: ["filePath", "path", "directory", "cwd", "pattern"],
+        priority: 75,
+      },
+    ];
+  if (normalized === "prompt")
+    return [
+      {
+        candidates: ["prompt", "description", "instructions", "query"],
+        priority: 80,
+      },
+    ];
+  if (normalized === "tasks")
+    return [{ candidates: ["todos", "tasks", "items"], priority: 75 }];
+  if (normalized === "todo" || normalized === "items")
+    return [{ candidates: ["todos", "items", "tasks"], priority: 70 }];
   return aliases[normalized] ?? [];
 }
 
-function toolSpecificArgumentAliases(tool: string, normalized: string): Array<{ candidates: string[]; priority: number }> {
+function toolSpecificArgumentAliases(
+  tool: string,
+  normalized: string,
+): Array<{ candidates: string[]; priority: number }> {
   if (isGlobLikeToolName(tool)) {
-    if (["globpattern", "fileglob", "filepattern", "includepattern", "glob", "include", "pattern", "query"].includes(normalized)) {
+    if (
+      [
+        "globpattern",
+        "fileglob",
+        "filepattern",
+        "includepattern",
+        "glob",
+        "include",
+        "pattern",
+        "query",
+      ].includes(normalized)
+    ) {
       return [{ candidates: globPatternCandidates(), priority: 98 }];
     }
-    if (["targeting", "targetdirectory", "searchpath", "basepath", "root", "rootdir", "cwd", "directory", "path"].includes(normalized)) {
+    if (
+      [
+        "targeting",
+        "targetdirectory",
+        "searchpath",
+        "basepath",
+        "root",
+        "rootdir",
+        "cwd",
+        "directory",
+        "path",
+      ].includes(normalized)
+    ) {
       return [{ candidates: globPathCandidates(), priority: 40 }];
     }
   }
   if (["grep", "search", "searchfiles"].includes(tool)) {
-    if (["query", "search", "searchstring", "regex", "pattern"].includes(normalized)) {
-      return [{ candidates: ["pattern", "query", "regex", "search"], priority: 95 }];
+    if (
+      ["query", "search", "searchstring", "regex", "pattern"].includes(
+        normalized,
+      )
+    ) {
+      return [
+        { candidates: ["pattern", "query", "regex", "search"], priority: 95 },
+      ];
     }
     if (["globpattern", "glob", "include"].includes(normalized)) {
-      return [{ candidates: ["include", "glob", "files", "pattern"], priority: 75 }];
+      return [
+        { candidates: ["include", "glob", "files", "pattern"], priority: 75 },
+      ];
     }
     if (["caseinsensitive", "ignorecase"].includes(normalized)) {
-      return [{ candidates: ["ignoreCase", "ignore_case", "caseInsensitive", "case_insensitive"], priority: 95 }];
+      return [
+        {
+          candidates: [
+            "ignoreCase",
+            "ignore_case",
+            "caseInsensitive",
+            "case_insensitive",
+          ],
+          priority: 95,
+        },
+      ];
     }
     if (["literal", "fixedstring"].includes(normalized)) {
-      return [{ candidates: ["literal", "fixedString", "fixed_string"], priority: 95 }];
+      return [
+        {
+          candidates: ["literal", "fixedString", "fixed_string"],
+          priority: 95,
+        },
+      ];
     }
-    if (["headlimit", "limit", "maxresults", "maxresult"].includes(normalized)) {
-      return [{ candidates: ["limit", "headLimit", "head_limit", "maxResults", "max_results"], priority: 90 }];
+    if (
+      ["headlimit", "limit", "maxresults", "maxresult"].includes(normalized)
+    ) {
+      return [
+        {
+          candidates: [
+            "limit",
+            "headLimit",
+            "head_limit",
+            "maxResults",
+            "max_results",
+          ],
+          priority: 90,
+        },
+      ];
     }
     if (["context", "contextlines"].includes(normalized)) {
-      return [{ candidates: ["context", "contextLines", "context_lines"], priority: 90 }];
+      return [
+        {
+          candidates: ["context", "contextLines", "context_lines"],
+          priority: 90,
+        },
+      ];
     }
     if (["contextbefore", "beforecontext"].includes(normalized)) {
-      return [{ candidates: ["contextBefore", "context_before", "beforeContext", "before_context"], priority: 90 }];
+      return [
+        {
+          candidates: [
+            "contextBefore",
+            "context_before",
+            "beforeContext",
+            "before_context",
+          ],
+          priority: 90,
+        },
+      ];
     }
     if (["contextafter", "aftercontext"].includes(normalized)) {
-      return [{ candidates: ["contextAfter", "context_after", "afterContext", "after_context"], priority: 90 }];
+      return [
+        {
+          candidates: [
+            "contextAfter",
+            "context_after",
+            "afterContext",
+            "after_context",
+          ],
+          priority: 90,
+        },
+      ];
     }
   }
   if (["read", "readfile", "openfile"].includes(tool)) {
-    if (["targeting", "target", "targetpath", "targetfile", "filepath", "absolutepath", "relativepath", "path", "file"].includes(normalized)) {
+    if (
+      [
+        "targeting",
+        "target",
+        "targetpath",
+        "targetfile",
+        "filepath",
+        "absolutepath",
+        "relativepath",
+        "path",
+        "file",
+      ].includes(normalized)
+    ) {
       return [{ candidates: pathCandidates(), priority: 95 }];
     }
   }
   if (["write", "writefile", "createfile"].includes(tool)) {
-    if (["targeting", "target", "targetpath", "targetfile", "filepath", "absolutepath", "relativepath", "path", "file"].includes(normalized)) {
+    if (
+      [
+        "targeting",
+        "target",
+        "targetpath",
+        "targetfile",
+        "filepath",
+        "absolutepath",
+        "relativepath",
+        "path",
+        "file",
+      ].includes(normalized)
+    ) {
       return [{ candidates: pathCandidates(), priority: 95 }];
     }
-    if (["newcontents", "contents", "content", "text", "body", "data", "value"].includes(normalized)) {
+    if (
+      [
+        "newcontents",
+        "contents",
+        "content",
+        "text",
+        "body",
+        "data",
+        "value",
+      ].includes(normalized)
+    ) {
       return [{ candidates: fileContentCandidates(), priority: 95 }];
     }
   }
   if (["edit", "editfile", "replacefile", "searchreplace"].includes(tool)) {
-    if (["targeting", "target", "targetpath", "targetfile", "filepath", "absolutepath", "relativepath", "path", "file"].includes(normalized)) {
+    if (
+      [
+        "targeting",
+        "target",
+        "targetpath",
+        "targetfile",
+        "filepath",
+        "absolutepath",
+        "relativepath",
+        "path",
+        "file",
+      ].includes(normalized)
+    ) {
       return [{ candidates: pathCandidates(), priority: 95 }];
     }
-    if (["oldstring", "oldtext", "oldcontents", "search", "searchstring", "find", "findtext"].includes(normalized)) {
+    if (
+      [
+        "oldstring",
+        "oldtext",
+        "oldcontents",
+        "search",
+        "searchstring",
+        "find",
+        "findtext",
+      ].includes(normalized)
+    ) {
       return [{ candidates: oldTextCandidates(), priority: 95 }];
     }
-    if (["newstring", "newtext", "newcontents", "replacement", "replace", "replacewith", "content"].includes(normalized)) {
+    if (
+      [
+        "newstring",
+        "newtext",
+        "newcontents",
+        "replacement",
+        "replace",
+        "replacewith",
+        "content",
+      ].includes(normalized)
+    ) {
       return [{ candidates: newTextCandidates(), priority: 95 }];
     }
   }
   if (["bash", "shell", "terminal", "runterminalcmd"].includes(tool)) {
-    if (["cmd", "commandline", "command", "script", "shellcommand", "code"].includes(normalized)) {
+    if (
+      [
+        "cmd",
+        "commandline",
+        "command",
+        "script",
+        "shellcommand",
+        "code",
+      ].includes(normalized)
+    ) {
       return [{ candidates: shellCommandCandidates(), priority: 95 }];
     }
-    if (["workingdirectory", "workingdir", "cwd", "directory", "dir", "path", "workdir", "projectroot"].includes(normalized)) {
+    if (
+      [
+        "workingdirectory",
+        "workingdir",
+        "cwd",
+        "directory",
+        "dir",
+        "path",
+        "workdir",
+        "projectroot",
+      ].includes(normalized)
+    ) {
       return [{ candidates: shellWorkdirCandidates(), priority: 95 }];
     }
-    if (["timeout", "timeoutms", "timeoutmilliseconds", "timeoutseconds", "seconds"].includes(normalized)) {
+    if (
+      [
+        "timeout",
+        "timeoutms",
+        "timeoutmilliseconds",
+        "timeoutseconds",
+        "seconds",
+      ].includes(normalized)
+    ) {
       return [{ candidates: timeoutCandidates(), priority: 95 }];
     }
   }
   if (["webfetch", "fetch", "web"].includes(tool)) {
-    if (["url", "uri", "href"].includes(normalized)) return [{ candidates: ["url", "uri", "href"], priority: 95 }];
+    if (["url", "uri", "href"].includes(normalized))
+      return [{ candidates: ["url", "uri", "href"], priority: 95 }];
     if (["prompt", "query", "instructions"].includes(normalized)) {
-      return [{ candidates: ["prompt", "query", "instructions"], priority: 90 }];
+      return [
+        { candidates: ["prompt", "query", "instructions"], priority: 90 },
+      ];
     }
   }
-  if (["todowrite", "todo"].includes(tool) && ["todos", "tasks", "items"].includes(normalized)) {
+  if (
+    ["todowrite", "todo"].includes(tool) &&
+    ["todos", "tasks", "items"].includes(normalized)
+  ) {
     return [{ candidates: ["todos", "tasks", "items"], priority: 95 }];
   }
   if (tool === "task") {
     if (["prompt", "instructions", "query"].includes(normalized)) {
-      return [{ candidates: ["prompt", "description", "instructions"], priority: 90 }];
+      return [
+        { candidates: ["prompt", "description", "instructions"], priority: 90 },
+      ];
     }
     if (["subagenttype", "agent", "agenttype"].includes(normalized)) {
-      return [{ candidates: ["subagent_type", "subagentType", "agent"], priority: 90 }];
+      return [
+        {
+          candidates: ["subagent_type", "subagentType", "agent"],
+          priority: 90,
+        },
+      ];
     }
   }
   return [];
@@ -3698,13 +5981,21 @@ function toolNameAliases(normalized: string): string[] {
     ls: ["list"],
     list: ["ls"],
     mcp: ["callmcptool"],
-    writefile: ["write"]
+    writefile: ["write"],
   };
   return aliases[normalized] ?? [];
 }
 
 function isGlobLikeToolName(normalized: string): boolean {
-  return ["glob", "fileglob", "filesearch", "find", "findfile", "findfiles", "globfiles"].includes(normalized);
+  return [
+    "glob",
+    "fileglob",
+    "filesearch",
+    "find",
+    "findfile",
+    "findfiles",
+    "globfiles",
+  ].includes(normalized);
 }
 
 function estimateTokens(chars: number): number {
@@ -3712,16 +6003,31 @@ function estimateTokens(chars: number): number {
 }
 
 function includeStreamUsage(record: Record<string, unknown>): boolean {
-  return isRecord(record.stream_options) && record.stream_options.include_usage === true;
+  return (
+    isRecord(record.stream_options) &&
+    record.stream_options.include_usage === true
+  );
 }
 
 function expectRecord(value: unknown, name: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new HttpError(`${name} must be an object`, 400, "invalid_request_error", name);
+  if (!isRecord(value))
+    throw new HttpError(
+      `${name} must be an object`,
+      400,
+      "invalid_request_error",
+      name,
+    );
   return value;
 }
 
 function expectArray(value: unknown, name: string): unknown[] {
-  if (!Array.isArray(value)) throw new HttpError(`${name} must be an array`, 400, "invalid_request_error", name);
+  if (!Array.isArray(value))
+    throw new HttpError(
+      `${name} must be an array`,
+      400,
+      "invalid_request_error",
+      name,
+    );
   return value;
 }
 

@@ -18,13 +18,25 @@ events.defaultMaxListeners = Math.max(events.defaultMaxListeners, 64);
 loadEnvFile(path.join(repoRoot, ".env"));
 loadEnvFile(path.join(process.cwd(), ".env"));
 
-const workspaceCwd = path.resolve(process.env.CURSOR_SDK_PROXY_CWD || process.cwd());
+const workspaceCwd = path.resolve(
+  process.env.CURSOR_SDK_PROXY_CWD || process.cwd(),
+);
 const port = parseInteger(process.env.CURSOR_SDK_PROXY_PORT, 8791);
 const host = process.env.CURSOR_SDK_PROXY_HOST || "127.0.0.1";
 const stateRoot =
   process.env.CURSOR_SDK_PROXY_STATE_ROOT ||
-  path.join(os.homedir(), ".local", "share", "standardagents", "cursor-sdk-responses");
-const workspaceHash = crypto.createHash("sha256").update(workspaceCwd).digest("hex").slice(0, 24);
+  path.join(
+    os.homedir(),
+    ".local",
+    "share",
+    "standardagents",
+    "cursor-sdk-responses",
+  );
+const workspaceHash = crypto
+  .createHash("sha256")
+  .update(workspaceCwd)
+  .digest("hex")
+  .slice(0, 24);
 const stateDir = path.join(stateRoot, workspaceHash);
 const statePath = path.join(stateDir, "state.json");
 const defaultModel = process.env.CURSOR_SDK_PROXY_MODEL || "composer-2.5";
@@ -47,8 +59,8 @@ const server = http.createServer((request, response) => {
           model: defaultModel,
           text: "",
           status: "failed",
-          error: normalizeError(error)
-        })
+          error: normalizeError(error),
+        }),
       });
       response.end();
       return;
@@ -58,7 +70,9 @@ const server = http.createServer((request, response) => {
 });
 
 server.listen(port, host, () => {
-  console.log(`Cursor SDK Responses proxy listening on http://${host}:${port}/sdk/v1`);
+  console.log(
+    `Cursor SDK Responses proxy listening on http://${host}:${port}/sdk/v1`,
+  );
   console.log(`Workspace: ${workspaceCwd}`);
 });
 
@@ -66,7 +80,10 @@ process.on("SIGINT", () => closeAndExit(0));
 process.on("SIGTERM", () => closeAndExit(0));
 
 async function handleRequest(request, response) {
-  const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
+  const url = new URL(
+    request.url || "/",
+    `http://${request.headers.host || `${host}:${port}`}`,
+  );
   const apiPath = normalizeApiPath(url.pathname);
 
   if (request.method === "OPTIONS") {
@@ -90,7 +107,11 @@ async function handleRequest(request, response) {
   if (request.method === "GET" && responseMatch) {
     const record = state.responses?.[responseMatch[1]];
     if (!record?.response) {
-      writeJson(response, openAiError(new HttpError("Response not found", 404, "not_found")), 404);
+      writeJson(
+        response,
+        openAiError(new HttpError("Response not found", 404, "not_found")),
+        404,
+      );
       return;
     }
     writeJson(response, record.response);
@@ -102,7 +123,11 @@ async function handleRequest(request, response) {
     return;
   }
 
-  writeJson(response, openAiError(new HttpError("Not found", 404, "not_found")), 404);
+  writeJson(
+    response,
+    openAiError(new HttpError("Not found", 404, "not_found")),
+    404,
+  );
 }
 
 function normalizeApiPath(pathname) {
@@ -117,26 +142,41 @@ async function handleCreateResponse(request, response) {
   const body = await readJsonBody(request);
   const apiKey = getApiKey(request);
   if (!apiKey) {
-    writeJson(response, openAiError(new HttpError("Missing Cursor API key", 401, "unauthorized")), 401);
+    writeJson(
+      response,
+      openAiError(new HttpError("Missing Cursor API key", 401, "unauthorized")),
+      401,
+    );
     return;
   }
 
   const created = nowSeconds();
   const responseId = `resp_${randomId()}`;
   const model = normalizeModel(body.model);
-  const previousResponseId = typeof body.previous_response_id === "string" ? body.previous_response_id : null;
-  const previous = previousResponseId ? state.responses?.[previousResponseId] : undefined;
+  const previousResponseId =
+    typeof body.previous_response_id === "string"
+      ? body.previous_response_id
+      : null;
+  const previous = previousResponseId
+    ? state.responses?.[previousResponseId]
+    : undefined;
   const parsed = parseResponseInput(body);
   const prompt = buildPrompt({
-    instructions: typeof body.instructions === "string" ? body.instructions : "",
+    instructions:
+      typeof body.instructions === "string" ? body.instructions : "",
     inputText: parsed.text,
     previous,
-    cwd: workspaceCwd
+    cwd: workspaceCwd,
   });
 
   if (body.stream === true) {
     writeSseHeaders(response);
-    for (const event of responseStartedEvents({ id: responseId, created, model, previousResponseId })) {
+    for (const event of responseStartedEvents({
+      id: responseId,
+      created,
+      model,
+      previousResponseId,
+    })) {
       response.write(event);
     }
 
@@ -145,9 +185,11 @@ async function handleCreateResponse(request, response) {
         apiKey,
         model,
         previous,
-        message: parsed.images.length ? { text: prompt, images: parsed.images } : prompt,
+        message: parsed.images.length
+          ? { text: prompt, images: parsed.images }
+          : prompt,
         responseId,
-        response
+        response,
       });
       const output = text || "Done.";
       const responsePayload = responseObject({
@@ -157,9 +199,10 @@ async function handleCreateResponse(request, response) {
         text: output,
         previousResponseId,
         agentId,
-        runId
+        runId,
       });
-      for (const event of responseCompletedEvents(responsePayload, output)) response.write(event);
+      for (const event of responseCompletedEvents(responsePayload, output))
+        response.write(event);
       await saveResponseRecord(responseId, {
         response: responsePayload,
         agentId,
@@ -167,8 +210,12 @@ async function handleCreateResponse(request, response) {
         model,
         cwd: workspaceCwd,
         previousResponseId,
-        history: [...(previous?.history ?? []), { role: "user", text: parsed.text }, { role: "assistant", text: output }],
-        createdAt: new Date().toISOString()
+        history: [
+          ...(previous?.history ?? []),
+          { role: "user", text: parsed.text },
+          { role: "assistant", text: output },
+        ],
+        createdAt: new Date().toISOString(),
       });
     } catch (error) {
       const payload = responseObject({
@@ -178,9 +225,12 @@ async function handleCreateResponse(request, response) {
         text: "",
         previousResponseId,
         status: "failed",
-        error: normalizeError(error)
+        error: normalizeError(error),
       });
-      writeSse(response, "response.failed", { type: "response.failed", response: payload });
+      writeSse(response, "response.failed", {
+        type: "response.failed",
+        response: payload,
+      });
     } finally {
       response.end();
     }
@@ -191,8 +241,10 @@ async function handleCreateResponse(request, response) {
     apiKey,
     model,
     previous,
-    message: parsed.images.length ? { text: prompt, images: parsed.images } : prompt,
-    responseId
+    message: parsed.images.length
+      ? { text: prompt, images: parsed.images }
+      : prompt,
+    responseId,
   });
   const output = text || "Done.";
   const responsePayload = responseObject({
@@ -202,7 +254,7 @@ async function handleCreateResponse(request, response) {
     text: output,
     previousResponseId,
     agentId,
-    runId
+    runId,
   });
   await saveResponseRecord(responseId, {
     response: responsePayload,
@@ -211,17 +263,28 @@ async function handleCreateResponse(request, response) {
     model,
     cwd: workspaceCwd,
     previousResponseId,
-    history: [...(previous?.history ?? []), { role: "user", text: parsed.text }, { role: "assistant", text: output }],
-    createdAt: new Date().toISOString()
+    history: [
+      ...(previous?.history ?? []),
+      { role: "user", text: parsed.text },
+      { role: "assistant", text: output },
+    ],
+    createdAt: new Date().toISOString(),
   });
   writeJson(response, responsePayload);
 }
 
-async function runSdkAgent({ apiKey, model, previous, message, response, responseId }) {
+async function runSdkAgent({
+  apiKey,
+  model,
+  previous,
+  message,
+  response,
+  responseId,
+}) {
   const agent = await getAgent({ apiKey, model, previous });
   const run = await agent.send(message, {
     model: { id: model },
-    idempotencyKey: crypto.randomUUID()
+    idempotencyKey: crypto.randomUUID(),
   });
   let text = "";
 
@@ -230,7 +293,12 @@ async function runSdkAgent({ apiKey, model, previous, message, response, respons
       for (const block of event.message.content ?? []) {
         if (block.type === "text" && block.text) {
           text += block.text;
-          if (response) writeSse(response, "response.output_text.delta", outputTextDelta(responseId, block.text));
+          if (response)
+            writeSse(
+              response,
+              "response.output_text.delta",
+              outputTextDelta(responseId, block.text),
+            );
         }
       }
     }
@@ -239,25 +307,35 @@ async function runSdkAgent({ apiKey, model, previous, message, response, respons
   const result = await run.wait();
   if (!text && result.result) {
     text = result.result;
-    if (response) writeSse(response, "response.output_text.delta", outputTextDelta(responseId, text));
+    if (response)
+      writeSse(
+        response,
+        "response.output_text.delta",
+        outputTextDelta(responseId, text),
+      );
   }
   if (result.status === "error") {
     throw new HttpError("Cursor SDK run failed", 502, "cursor_sdk_error");
   }
 
-  return { text: stripFinalMarker(text), agentId: agent.agentId, runId: run.id };
+  return {
+    text: stripFinalMarker(text),
+    agentId: agent.agentId,
+    runId: run.id,
+  };
 }
 
 async function getAgent({ apiKey, model, previous }) {
   const previousAgentId = previous?.agentId;
-  if (previousAgentId && agentCache.has(previousAgentId)) return agentCache.get(previousAgentId);
+  if (previousAgentId && agentCache.has(previousAgentId))
+    return agentCache.get(previousAgentId);
 
   if (previousAgentId) {
     try {
       const resumed = await Agent.resume(previousAgentId, {
         apiKey,
         model: { id: model },
-        local: { cwd: workspaceCwd }
+        local: { cwd: workspaceCwd },
       });
       agentCache.set(resumed.agentId, resumed);
       return resumed;
@@ -271,7 +349,7 @@ async function getAgent({ apiKey, model, previous }) {
     apiKey,
     model: { id: model },
     name: "Standard Agents Responses proxy",
-    local: { cwd: workspaceCwd }
+    local: { cwd: workspaceCwd },
   });
   agentCache.set(created.agentId, created);
   return created;
@@ -282,7 +360,7 @@ function buildPrompt({ instructions, inputText, previous, cwd }) {
     "You are running in agent mode through the Cursor SDK local runtime.",
     `Project directory: ${cwd}`,
     "When the request asks for project work, inspect, create, edit, and run files directly in that project.",
-    "Do not tell the user to switch modes. Do not ask the user to paste files manually."
+    "Do not tell the user to switch modes. Do not ask the user to paste files manually.",
   ];
 
   if (instructions.trim()) {
@@ -291,7 +369,9 @@ function buildPrompt({ instructions, inputText, previous, cwd }) {
 
   const history = previous?.history ?? [];
   if (history.length) {
-    const recent = history.slice(-16).map((item) => `${item.role.toUpperCase()}: ${item.text || "[empty]"}`);
+    const recent = history
+      .slice(-16)
+      .map((item) => `${item.role.toUpperCase()}: ${item.text || "[empty]"}`);
     parts.push(`Prior conversation:\n${recent.join("\n")}`);
   }
 
@@ -320,14 +400,23 @@ function parseResponseInput(body) {
 
 function parseInputItem(item, lines, images) {
   if (!item || typeof item !== "object") return;
-  const role = typeof item.role === "string" ? item.role : typeof item.type === "string" ? item.type : "input";
+  const role =
+    typeof item.role === "string"
+      ? item.role
+      : typeof item.type === "string"
+        ? item.type
+        : "input";
 
   if (item.type === "function_call_output") {
-    lines.push(`TOOL RESULT ${item.call_id || ""}: ${stringifyContent(item.output)}`);
+    lines.push(
+      `TOOL RESULT ${item.call_id || ""}: ${stringifyContent(item.output)}`,
+    );
     return;
   }
   if (item.type === "function_call") {
-    lines.push(`TOOL CALL ${item.name || ""}: ${stringifyContent(item.arguments)}`);
+    lines.push(
+      `TOOL CALL ${item.name || ""}: ${stringifyContent(item.arguments)}`,
+    );
     return;
   }
   if (item.type === "message" && item.content !== undefined) {
@@ -357,8 +446,10 @@ function appendContent(role, content, lines, images) {
   for (const part of content) {
     if (!part || typeof part !== "object") continue;
     if (typeof part.text === "string") text.push(part.text);
-    if (part.type === "input_text" && typeof part.text === "string") text.push(part.text);
-    if (part.type === "output_text" && typeof part.text === "string") text.push(part.text);
+    if (part.type === "input_text" && typeof part.text === "string")
+      text.push(part.text);
+    if (part.type === "output_text" && typeof part.text === "string")
+      text.push(part.text);
     if (part.type === "input_image") {
       const image = parseImage(part.image_url ?? part);
       if (image) images.push(image);
@@ -368,17 +459,29 @@ function appendContent(role, content, lines, images) {
 }
 
 function parseImage(value) {
-  const source = typeof value === "string" ? value : value && typeof value === "object" ? value.url : undefined;
+  const source =
+    typeof value === "string"
+      ? value
+      : value && typeof value === "object"
+        ? value.url
+        : undefined;
   if (!source || typeof source !== "string") return null;
   const dimension =
-    value && typeof value === "object" && Number.isFinite(value.width) && Number.isFinite(value.height)
+    value &&
+    typeof value === "object" &&
+    Number.isFinite(value.width) &&
+    Number.isFinite(value.height)
       ? { width: value.width, height: value.height }
       : undefined;
 
   if (source.startsWith("data:")) {
     const match = /^data:([^;,]+);base64,(.*)$/s.exec(source);
     if (!match) return null;
-    return { mimeType: match[1], data: match[2], ...(dimension ? { dimension } : {}) };
+    return {
+      mimeType: match[1],
+      data: match[2],
+      ...(dimension ? { dimension } : {}),
+    };
   }
   return { url: source, ...(dimension ? { dimension } : {}) };
 }
@@ -398,7 +501,7 @@ async function modelList(apiKey) {
           created: 1779148800,
           owned_by: "cursor",
           name: model.displayName || model.id,
-          aliases: model.aliases || []
+          aliases: model.aliases || [],
         }));
       }
     } catch {
@@ -420,7 +523,7 @@ function fallbackModels() {
     modelItem("gpt-5.3-codex", "Codex 5.3"),
     modelItem("gpt-5.2-codex", "Codex 5.2"),
     modelItem("gpt-5.1", "GPT-5.1"),
-    modelItem("gpt-5-mini", "GPT-5 Mini")
+    modelItem("gpt-5-mini", "GPT-5 Mini"),
   ];
 }
 
@@ -429,19 +532,30 @@ function modelItem(id, name) {
 }
 
 function responseStartedEvents({ id, created, model, previousResponseId }) {
-  const response = responseObject({ id, created, model, text: "", previousResponseId, status: "in_progress" });
+  const response = responseObject({
+    id,
+    created,
+    model,
+    text: "",
+    previousResponseId,
+    status: "in_progress",
+  });
   const item = messageItem(id, "", "in_progress");
   return [
     sse("response.created", { type: "response.created", response }),
     sse("response.in_progress", { type: "response.in_progress", response }),
-    sse("response.output_item.added", { type: "response.output_item.added", output_index: 0, item }),
+    sse("response.output_item.added", {
+      type: "response.output_item.added",
+      output_index: 0,
+      item,
+    }),
     sse("response.content_part.added", {
       type: "response.content_part.added",
       item_id: item.id,
       output_index: 0,
       content_index: 0,
-      part: { type: "output_text", text: "", annotations: [] }
-    })
+      part: { type: "output_text", text: "", annotations: [] },
+    }),
   ];
 }
 
@@ -451,7 +565,7 @@ function outputTextDelta(responseId, delta) {
     item_id: messageItem(responseId, "", "in_progress").id,
     output_index: 0,
     content_index: 0,
-    delta
+    delta,
   };
 }
 
@@ -463,17 +577,21 @@ function responseCompletedEvents(response, text) {
       item_id: item.id,
       output_index: 0,
       content_index: 0,
-      text
+      text,
     }),
     sse("response.content_part.done", {
       type: "response.content_part.done",
       item_id: item.id,
       output_index: 0,
       content_index: 0,
-      part: item.content[0]
+      part: item.content[0],
     }),
-    sse("response.output_item.done", { type: "response.output_item.done", output_index: 0, item }),
-    sse("response.completed", { type: "response.completed", response })
+    sse("response.output_item.done", {
+      type: "response.output_item.done",
+      output_index: 0,
+      item,
+    }),
+    sse("response.completed", { type: "response.completed", response }),
   ];
 }
 
@@ -486,18 +604,28 @@ function responseObject({
   agentId,
   runId,
   status = "completed",
-  error = null
+  error = null,
 }) {
   return {
     id,
     object: "response",
     created_at: created,
     status,
-    completed_at: status === "completed" ? Math.max(created, nowSeconds()) : null,
+    completed_at:
+      status === "completed" ? Math.max(created, nowSeconds()) : null,
     error,
     incomplete_details: null,
     model,
-    output: status === "failed" ? [] : [messageItem(id, text, status === "completed" ? "completed" : "in_progress")],
+    output:
+      status === "failed"
+        ? []
+        : [
+            messageItem(
+              id,
+              text,
+              status === "completed" ? "completed" : "in_progress",
+            ),
+          ],
     output_text: text,
     parallel_tool_calls: true,
     previous_response_id: previousResponseId,
@@ -511,13 +639,13 @@ function responseObject({
       output_tokens: approximateTokens(text),
       total_tokens: approximateTokens(text),
       input_tokens_details: { cached_tokens: 0 },
-      output_tokens_details: { reasoning_tokens: 0 }
+      output_tokens_details: { reasoning_tokens: 0 },
     },
     user: null,
     metadata: {
       ...(agentId ? { cursor_agent_id: agentId } : {}),
-      ...(runId ? { cursor_run_id: runId } : {})
-    }
+      ...(runId ? { cursor_run_id: runId } : {}),
+    },
   };
 }
 
@@ -528,7 +656,7 @@ function messageItem(responseId, text, status) {
     type: "message",
     status,
     role: "assistant",
-    content: [{ type: "output_text", text, annotations: [] }]
+    content: [{ type: "output_text", text, annotations: [] }],
   };
 }
 
@@ -537,8 +665,8 @@ async function saveResponseRecord(id, record) {
     version: 1,
     responses: {
       ...(state.responses ?? {}),
-      [id]: record
-    }
+      [id]: record,
+    },
   };
   await writeFile(statePath, JSON.stringify(state, null, 2));
 }
@@ -580,7 +708,9 @@ function normalizeModel(model) {
 }
 
 function writeJson(response, payload, status = 200) {
-  writeCors(response, status, { "Content-Type": "application/json; charset=utf-8" });
+  writeCors(response, status, {
+    "Content-Type": "application/json; charset=utf-8",
+  });
   response.end(JSON.stringify(payload, null, 2));
 }
 
@@ -589,7 +719,7 @@ function writeCors(response, status, headers = {}) {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "authorization, content-type, openai-beta",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    ...headers
+    ...headers,
   });
 }
 
@@ -598,7 +728,7 @@ function writeSseHeaders(response) {
     "Content-Type": "text/event-stream; charset=utf-8",
     "Cache-Control": "no-cache, no-transform",
     Connection: "keep-alive",
-    "X-Accel-Buffering": "no"
+    "X-Accel-Buffering": "no",
   });
 }
 
@@ -616,17 +746,24 @@ function openAiError(error) {
     error: {
       message: normalized.message,
       type: "cursor_sdk_error",
-      code: normalized.code || "cursor_sdk_error"
-    }
+      code: normalized.code || "cursor_sdk_error",
+    },
   };
 }
 
 function normalizeError(error) {
-  if (error instanceof HttpError) return { message: error.message, code: error.code };
+  if (error instanceof HttpError)
+    return { message: error.message, code: error.code };
   if (error && typeof error === "object" && "message" in error) {
-    return { message: String(error.message), code: typeof error.code === "string" ? error.code : "cursor_sdk_error" };
+    return {
+      message: String(error.message),
+      code: typeof error.code === "string" ? error.code : "cursor_sdk_error",
+    };
   }
-  return { message: String(error || "Cursor SDK request failed"), code: "cursor_sdk_error" };
+  return {
+    message: String(error || "Cursor SDK request failed"),
+    code: "cursor_sdk_error",
+  };
 }
 
 function statusFromError(error) {

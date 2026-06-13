@@ -22,7 +22,11 @@ export function assistantDisplayContent(content: string): string {
 }
 
 function looksLikeOnlyComposerControl(content: string): boolean {
-  const compact = content.trim().replace(/\s+/g, "").replaceAll("｜", "|").toLowerCase();
+  const compact = content
+    .trim()
+    .replace(/\s+/g, "")
+    .replaceAll("｜", "|")
+    .toLowerCase();
   if (!compact) return true;
   return "<|final|>".startsWith(compact) || "</think>".startsWith(compact);
 }

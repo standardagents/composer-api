@@ -1,0 +1,14 @@
+node_modules
+dist
+.wrangler
+.git
+.dev.vars
+.env
+.env.*
+!docker/env.example
+!.env.example
+*.log
+.DS_Store
+macos
+sample-projects
+agent-transcripts

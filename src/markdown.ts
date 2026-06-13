@@ -21,7 +21,10 @@ interface MarkdownOptions {
   headingIds?: boolean;
 }
 
-export function renderMarkdown(markdown: string, options: MarkdownOptions = {}): MarkdownResult {
+export function renderMarkdown(
+  markdown: string,
+  options: MarkdownOptions = {},
+): MarkdownResult {
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const html: string[] = [];
   const headings: MarkdownHeading[] = [];
@@ -42,7 +45,9 @@ export function renderMarkdown(markdown: string, options: MarkdownOptions = {}):
 
   const flushList = () => {
     if (!list.length || !listType) return;
-    html.push(`<${listType}>${list.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${listType}>`);
+    html.push(
+      `<${listType}>${list.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${listType}>`,
+    );
     list = [];
     listType = null;
   };
@@ -68,8 +73,13 @@ export function renderMarkdown(markdown: string, options: MarkdownOptions = {}):
 
   const flushDetails = () => {
     if (!detailsLines) return;
-    const rendered = renderMarkdown(detailsLines.join("\n"), { ...options, headingIds: false });
-    html.push(`<details class="md-details"><summary>${renderInline(detailsSummary)}</summary>${rendered.html}</details>`);
+    const rendered = renderMarkdown(detailsLines.join("\n"), {
+      ...options,
+      headingIds: false,
+    });
+    html.push(
+      `<details class="md-details"><summary>${renderInline(detailsSummary)}</summary>${rendered.html}</details>`,
+    );
     detailsSummary = "";
     detailsLines = null;
   };
@@ -88,7 +98,10 @@ export function renderMarkdown(markdown: string, options: MarkdownOptions = {}):
     if (codeTabs) {
       if (fence) {
         if (codeLines) {
-          codeTabs.push({ lang: codeLang || "text", code: codeLines.join("\n") });
+          codeTabs.push({
+            lang: codeLang || "text",
+            code: codeLines.join("\n"),
+          });
           codeLines = null;
           codeLang = "";
         } else {
@@ -148,17 +161,20 @@ export function renderMarkdown(markdown: string, options: MarkdownOptions = {}):
       const text = stripInline(heading[2]);
       const id = slugify(text);
       headings.push({ id, level, text });
-      const idAttr = options.headingIds !== false ? ` id="${escapeAttr(id)}"` : "";
+      const idAttr =
+        options.headingIds !== false ? ` id="${escapeAttr(id)}"` : "";
       html.push(`<h${level}${idAttr}>${renderInline(heading[2])}</h${level}>`);
       continue;
     }
 
-    const image = /^!\[([^\]]*)\]\(((?:\/|https?:\/\/)[^)\s]+)\)$/.exec(line.trim());
+    const image = /^!\[([^\]]*)\]\(((?:\/|https?:\/\/)[^)\s]+)\)$/.exec(
+      line.trim(),
+    );
     if (image) {
       flushParagraph();
       flushList();
       html.push(
-        `<figure class="md-image"><img src="${escapeAttr(image[2])}" alt="${escapeAttr(image[1])}" loading="lazy" /></figure>`
+        `<figure class="md-image"><img src="${escapeAttr(image[2])}" alt="${escapeAttr(image[1])}" loading="lazy" /></figure>`,
       );
       continue;
     }
@@ -191,27 +207,39 @@ export function renderMarkdown(markdown: string, options: MarkdownOptions = {}):
   return { html: html.join("\n"), headings };
 }
 
-function renderCodeTabs(samples: CodeSample[], options: MarkdownOptions): string {
+function renderCodeTabs(
+  samples: CodeSample[],
+  options: MarkdownOptions,
+): string {
   const valid = samples.filter((sample) => sample.code.trim());
   if (!valid.length) return "";
   const buttons = valid
     .map(
       (sample, index) =>
-        `<button class="md-code-tab${index === 0 ? " is-active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-code-tab="${index}">${languageLabel(sample.lang)}</button>`
+        `<button class="md-code-tab${index === 0 ? " is-active" : ""}" type="button" role="tab" aria-selected="${index === 0 ? "true" : "false"}" data-code-tab="${index}">${languageLabel(sample.lang)}</button>`,
     )
     .join("");
   const panels = valid
-    .map((sample, index) => codeBlockHtml(sample.code, sample.lang, options, index === 0, index))
+    .map((sample, index) =>
+      codeBlockHtml(sample.code, sample.lang, options, index === 0, index),
+    )
     .join("");
   return `<div class="md-code-tabs" data-code-tabs><div class="md-code-tab-list" role="tablist">${buttons}</div>${panels}</div>`;
 }
 
-function codeBlockHtml(code: string, lang: string, options: MarkdownOptions, active = true, index?: number): string {
+function codeBlockHtml(
+  code: string,
+  lang: string,
+  options: MarkdownOptions,
+  active = true,
+  index?: number,
+): string {
   const highlighted = highlightCode(code, lang);
   const copy = options.copyButtons
     ? `<button class="code-copy" type="button" data-copy="${escapeAttr(code)}">Copy</button>`
     : "";
-  const className = index === undefined ? "md-code" : `md-code${active ? " is-active" : ""}`;
+  const className =
+    index === undefined ? "md-code" : `md-code${active ? " is-active" : ""}`;
   const panelAttrs =
     index === undefined
       ? ""
@@ -242,33 +270,41 @@ function renderInline(value: string): string {
   text = text.replace(
     /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
     (_match, label: string, href: string) =>
-      `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`
+      `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer">${label}</a>`,
   );
   text = text.replace(
     /\[([^\]]+)\]((?:\((?:\/|#)[^)\s]*\)))/g,
     (_match, label: string, wrappedHref: string) => {
       const href = wrappedHref.slice(1, -1);
       return `<a href="${escapeAttr(href)}">${label}</a>`;
-    }
+    },
   );
   return text;
 }
 
 function stripInline(value: string): string {
-  return value.replace(/`([^`]+)`/g, "$1").replace(/\*\*([^*]+)\*\*/g, "$1").replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  return value
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
 }
 
 function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "section";
+  return (
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "section"
+  );
 }
 
 function highlightCode(code: string, lang: string): string {
   const normalized = lang.toLowerCase();
   if (normalized === "json") return highlightJson(code);
-  if (["js", "jsx", "ts", "tsx", "typescript", "javascript"].includes(normalized)) return highlightTs(code);
+  if (
+    ["js", "jsx", "ts", "tsx", "typescript", "javascript"].includes(normalized)
+  )
+    return highlightTs(code);
   if (["py", "python"].includes(normalized)) return highlightPython(code);
   if (["bash", "sh", "shell"].includes(normalized)) return highlightShell(code);
   if (normalized === "http") return highlightHttp(code);
@@ -278,22 +314,40 @@ function highlightCode(code: string, lang: string): string {
 function highlightTs(code: string): string {
   return escapeHtml(code)
     .replace(/(&quot;[^&]*?&quot;|'[^']*')/g, '<span class="tok-str">$1</span>')
-    .replace(/\b(import|from|const|let|var|await|async|for|of|return|new|process|console)\b/g, '<span class="tok-kw">$1</span>')
-    .replace(/\b(true|false|null|undefined)\b/g, '<span class="tok-bool">$1</span>');
+    .replace(
+      /\b(import|from|const|let|var|await|async|for|of|return|new|process|console)\b/g,
+      '<span class="tok-kw">$1</span>',
+    )
+    .replace(
+      /\b(true|false|null|undefined)\b/g,
+      '<span class="tok-bool">$1</span>',
+    );
 }
 
 function highlightShell(code: string): string {
   return escapeHtml(code)
-    .replace(/^(\s*)(curl|npm|npx|pnpm|yarn|export)\b/gm, '$1<span class="tok-kw">$2</span>')
-    .replace(/(&quot;[^&]*?&quot;|'[^']*')/g, '<span class="tok-str">$1</span>');
+    .replace(
+      /^(\s*)(curl|npm|npx|pnpm|yarn|export)\b/gm,
+      '$1<span class="tok-kw">$2</span>',
+    )
+    .replace(
+      /(&quot;[^&]*?&quot;|'[^']*')/g,
+      '<span class="tok-str">$1</span>',
+    );
 }
 
 function highlightPython(code: string): string {
   return escapeHtml(code)
     .replace(/(&quot;[^&]*?&quot;|'[^']*')/g, '<span class="tok-str">$1</span>')
-    .replace(/\b(import|from|as|def|return|for|in|with|print|True|False|None)\b/g, '<span class="tok-kw">$1</span>');
+    .replace(
+      /\b(import|from|as|def|return|for|in|with|print|True|False|None)\b/g,
+      '<span class="tok-kw">$1</span>',
+    );
 }
 
 function highlightHttp(code: string): string {
-  return escapeHtml(code).replace(/^([A-Za-z-]+):/gm, '<span class="j-key">$1</span><span class="j-punc">:</span>');
+  return escapeHtml(code).replace(
+    /^([A-Za-z-]+):/gm,
+    '<span class="j-key">$1</span><span class="j-punc">:</span>',
+  );
 }

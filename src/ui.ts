@@ -26,7 +26,7 @@ import {
   User,
   X,
   Zap,
-  type IconNode
+  type IconNode,
 } from "lucide";
 
 /** Lucide icons referenced by `data-lucide` attributes or by name in code. */
@@ -57,7 +57,7 @@ export const icons = {
   TriangleAlert,
   User,
   X,
-  Zap
+  Zap,
 } satisfies Record<string, IconNode>;
 
 export type IconName = keyof typeof icons;
@@ -76,7 +76,10 @@ export function escapeAttr(value: string): string {
 }
 
 /** Serialize a Lucide icon node to an inline SVG string. */
-export function iconToSvg(icon: IconNode, attrs: Record<string, string | number> = {}): string {
+export function iconToSvg(
+  icon: IconNode,
+  attrs: Record<string, string | number> = {},
+): string {
   const attrText = Object.entries({
     xmlns: "http://www.w3.org/2000/svg",
     viewBox: "0 0 24 24",
@@ -88,7 +91,7 @@ export function iconToSvg(icon: IconNode, attrs: Record<string, string | number>
     width: 18,
     height: 18,
     "aria-hidden": "true",
-    ...attrs
+    ...attrs,
   })
     .map(([key, value]) => `${key}="${escapeAttr(String(value))}"`)
     .join(" ");
@@ -104,12 +107,17 @@ export function iconToSvg(icon: IconNode, attrs: Record<string, string | number>
 }
 
 /** Render an icon by name, falling back to an empty string for unknown names. */
-export function icon(name: IconName, attrs: Record<string, string | number> = {}): string {
+export function icon(
+  name: IconName,
+  attrs: Record<string, string | number> = {},
+): string {
   return iconToSvg(icons[name], attrs);
 }
 
 type QueryRoot = {
-  querySelectorAll<E extends Element = Element>(selectors: string): NodeListOf<E>;
+  querySelectorAll<E extends Element = Element>(
+    selectors: string,
+  ): NodeListOf<E>;
 };
 
 /** Replace every `<i data-lucide="...">` placeholder under `root` with an SVG. */
@@ -127,7 +135,7 @@ export function hydrateIcons(root: QueryRoot = document): void {
       el.outerHTML = iconToSvg(node, {
         width: size,
         height: size,
-        ...(className ? { class: className } : {})
+        ...(className ? { class: className } : {}),
       });
     }
   }
@@ -135,7 +143,9 @@ export function hydrateIcons(root: QueryRoot = document): void {
 
 /** Wire any `[data-copy]` buttons under `root` to the clipboard. */
 export function wireCopyButtons(root: QueryRoot = document): void {
-  for (const button of root.querySelectorAll<HTMLButtonElement>("[data-copy]")) {
+  for (const button of root.querySelectorAll<HTMLButtonElement>(
+    "[data-copy]",
+  )) {
     button.addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText(button.dataset.copy || "");
@@ -155,7 +165,9 @@ export function highlightJson(json: string): string {
     (match, stringToken: string | undefined, keySuffix: string | undefined) => {
       if (stringToken) {
         const className = keySuffix ? "j-key" : "j-str";
-        const suffix = keySuffix ? keySuffix.replace(":", '<span class="j-punc">:</span>') : "";
+        const suffix = keySuffix
+          ? keySuffix.replace(":", '<span class="j-punc">:</span>')
+          : "";
         return `<span class="${className}">${escapeHtml(stringToken)}</span>${suffix}`;
       }
       if (match === "true" || match === "false" || match === "null") {
@@ -163,6 +175,6 @@ export function highlightJson(json: string): string {
       }
       if (/^-?\d/.test(match)) return `<span class="j-num">${match}</span>`;
       return `<span class="j-punc">${escapeHtml(match)}</span>`;
-    }
+    },
   );
 }

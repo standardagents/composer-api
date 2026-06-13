@@ -3,67 +3,171 @@ import { cursorSdkTestExports } from "./cursor-sdk";
 
 describe("Cursor SDK harness", () => {
   it("does not emit incomplete SDK tool-call starts to OpenCode", () => {
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: {} })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: {} })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", oldText: "old" } })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", newText: "new" } })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json" } })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "shell", arguments: {} })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "mcp", arguments: { providerIdentifier: "filesystem" } })).toBe(false);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src" } })).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "glob",
+        arguments: {},
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: {},
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { path: "package.json", oldText: "old" },
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { path: "package.json", newText: "new" },
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "write",
+        arguments: { path: "package.json" },
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "shell",
+        arguments: {},
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "mcp",
+        arguments: { providerIdentifier: "filesystem" },
+      }),
+    ).toBe(false);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "glob",
+        arguments: { targetDirectory: "src" },
+      }),
+    ).toBe(false);
   });
 
   it("allows SDK tool calls once required execution arguments are available", () => {
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { globPattern: "**/*.tsx" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "glob", arguments: { targetDirectory: "src/**/*.tsx" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { path: "package.json", fileText: "" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "write", arguments: { filePath: "empty.txt", content: "" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", oldText: "", newText: "{}" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { filePath: "package.json", old_str: "{}", replacement: "" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "package.json", patch_content: "" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "shell", arguments: { command: "npm test" } })).toBe(true);
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "mcp", arguments: { providerIdentifier: "filesystem", toolName: "write_file" } })).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "glob",
+        arguments: { globPattern: "**/*.tsx" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "glob",
+        arguments: { targetDirectory: "src/**/*.tsx" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "write",
+        arguments: { path: "package.json", fileText: "" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "write",
+        arguments: { filePath: "empty.txt", content: "" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { path: "package.json", oldText: "", newText: "{}" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { filePath: "package.json", old_str: "{}", replacement: "" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { path: "package.json", patch_content: "" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "shell",
+        arguments: { command: "npm test" },
+      }),
+    ).toBe(true);
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "mcp",
+        arguments: { providerIdentifier: "filesystem", toolName: "write_file" },
+      }),
+    ).toBe(true);
   });
 
   it("converts completed SDK streaming edits into OpenCode writes", () => {
     expect(
       cursorSdkTestExports.normalizeSdkToolCallForOpenCode({
         name: "edit",
-        arguments: { path: "scripts/verify.mjs", streamContent: "console.log('ok')\n" }
-      })
+        arguments: {
+          path: "scripts/verify.mjs",
+          streamContent: "console.log('ok')\n",
+        },
+      }),
     ).toEqual({
       name: "write",
-      arguments: { path: "scripts/verify.mjs", fileText: "console.log('ok')\n" }
+      arguments: {
+        path: "scripts/verify.mjs",
+        fileText: "console.log('ok')\n",
+      },
     });
-    expect(cursorSdkTestExports.isEmittableSdkToolCall({ name: "edit", arguments: { path: "scripts/verify.mjs", streamContent: "x" } })).toBe(
-      true
-    );
+    expect(
+      cursorSdkTestExports.isEmittableSdkToolCall({
+        name: "edit",
+        arguments: { path: "scripts/verify.mjs", streamContent: "x" },
+      }),
+    ).toBe(true);
     expect(
       cursorSdkTestExports.normalizeSdkToolCallForOpenCode({
         name: "edit",
-        arguments: { path: "scripts/empty.mjs", stream_content: "" }
-      })
+        arguments: { path: "scripts/empty.mjs", stream_content: "" },
+      }),
     ).toEqual({
       name: "write",
-      arguments: { path: "scripts/empty.mjs", fileText: "" }
+      arguments: { path: "scripts/empty.mjs", fileText: "" },
     });
   });
 
   it("decodes SDK MCP tool args maps", () => {
     const mcpArgs = protoMessage([
       protoStringField(1, "write_file"),
-      protoMessageField(2, protoValueMapEntry("file_path", protoStringValue("src/App.tsx"))),
-      protoMessageField(2, protoValueMapEntry("overwrite", protoBoolValue(true))),
+      protoMessageField(
+        2,
+        protoValueMapEntry("file_path", protoStringValue("src/App.tsx")),
+      ),
+      protoMessageField(
+        2,
+        protoValueMapEntry("overwrite", protoBoolValue(true)),
+      ),
       protoStringField(3, "call-mcp-1"),
       protoStringField(4, "filesystem"),
-      protoStringField(5, "write_file")
+      protoStringField(5, "write_file"),
     ]);
     const mcpTool = protoMessage([protoMessageField(1, mcpArgs)]);
-    const toolCallUpdate = protoMessage([protoMessageField(2, protoMessage([protoMessageField(15, mcpTool)]))]);
+    const toolCallUpdate = protoMessage([
+      protoMessageField(2, protoMessage([protoMessageField(15, mcpTool)])),
+    ]);
     const interaction = protoMessage([protoMessageField(2, toolCallUpdate)]);
     const frame = protoMessage([protoMessageField(1, interaction)]);
 
-    const event = cursorSdkTestExports.decodeLocalAgentServerFrame(frame).find((item) => item.type === "tool_call");
+    const event = cursorSdkTestExports
+      .decodeLocalAgentServerFrame(frame)
+      .find((item) => item.type === "tool_call");
 
     expect(event).toMatchObject({
       type: "tool_call",
@@ -76,17 +180,17 @@ describe("Cursor SDK harness", () => {
           toolCallId: "call-mcp-1",
           args: {
             file_path: "src/App.tsx",
-            overwrite: true
-          }
-        }
-      }
+            overwrite: true,
+          },
+        },
+      },
     });
   });
 
   it("encodes the harness working directory in SDK request context results", () => {
     const context = cursorSdkTestExports.encodeAgentClientRequestContextResult(
       { id: 42, execId: "exec-1" },
-      { workingDirectory: "/tmp/project" }
+      { workingDirectory: "/tmp/project" },
     );
     const execMessage = dataField(decodeFields(context), 2);
     const result = dataField(decodeFields(execMessage), 10);
@@ -101,21 +205,28 @@ describe("Cursor SDK harness", () => {
   });
 
   it("builds a hard retry prompt when a tool-required SDK turn returns prose", () => {
-    const prompt = cursorSdkTestExports.retryPromptAfterMissingTool("Original prompt");
+    const prompt =
+      cursorSdkTestExports.retryPromptAfterMissingTool("Original prompt");
 
     expect(prompt).toContain("Original prompt");
     expect(prompt).toContain("TOOL CALL RETRY");
     expect(prompt).toContain("attempt 2 of 3");
-    expect(prompt).toContain("The next response is invalid unless it contains a tool_call.");
+    expect(prompt).toContain(
+      "The next response is invalid unless it contains a tool_call.",
+    );
     expect(prompt).toContain("Do not answer in prose");
     expect(prompt).toContain("Emit exactly one SDK tool call");
   });
 
   it("builds a retry prompt when the SDK chooses an unmapped tool", () => {
-    const prompt = cursorSdkTestExports.retryPromptAfterUnsupportedTool("Original prompt", {
-      name: "shell",
-      arguments: { command: "pwd" }
-    }, "Required client arguments: command:string, description:string.");
+    const prompt = cursorSdkTestExports.retryPromptAfterUnsupportedTool(
+      "Original prompt",
+      {
+        name: "shell",
+        arguments: { command: "pwd" },
+      },
+      "Required client arguments: command:string, description:string.",
+    );
 
     expect(prompt).toContain("Original prompt");
     expect(prompt).toContain("shell");
@@ -138,7 +249,11 @@ function protoMessage(parts: Uint8Array[]): Uint8Array {
 }
 
 function protoMessageField(fieldNumber: number, value: Uint8Array): Uint8Array {
-  return protoMessage([protoVarint((fieldNumber << 3) | 2), protoVarint(value.length), value]);
+  return protoMessage([
+    protoVarint((fieldNumber << 3) | 2),
+    protoVarint(value.length),
+    value,
+  ]);
 }
 
 function protoStringField(fieldNumber: number, value: string): Uint8Array {
@@ -197,7 +312,10 @@ function decodeFields(bytes: Uint8Array): ProtoField[] {
   return fields;
 }
 
-function readVarint(bytes: Uint8Array, offset: number): { value: number; offset: number } {
+function readVarint(
+  bytes: Uint8Array,
+  offset: number,
+): { value: number; offset: number } {
   let value = 0;
   let shift = 0;
   let cursor = offset;
@@ -218,5 +336,7 @@ function dataField(fields: ProtoField[], no: number): Uint8Array {
 
 function stringField(fields: ProtoField[], no: number): string | undefined {
   const value = fields.find((field) => field.no === no)?.value;
-  return value instanceof Uint8Array ? new TextDecoder().decode(value) : undefined;
+  return value instanceof Uint8Array
+    ? new TextDecoder().decode(value)
+    : undefined;
 }

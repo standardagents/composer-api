@@ -3,9 +3,14 @@ import { renderMarkdown } from "./markdown";
 
 describe("markdown renderer", () => {
   it("renders headings and code fences with escaped highlighted code", () => {
-    const result = renderMarkdown("## Install\n\n```ts\nconst value = \"ok\";\n```", { copyButtons: true });
+    const result = renderMarkdown(
+      '## Install\n\n```ts\nconst value = "ok";\n```',
+      { copyButtons: true },
+    );
 
-    expect(result.headings).toEqual([{ id: "install", level: 2, text: "Install" }]);
+    expect(result.headings).toEqual([
+      { id: "install", level: 2, text: "Install" },
+    ]);
     expect(result.html).toContain('id="install"');
     expect(result.html).toContain('class="md-code"');
     expect(result.html).toContain('data-copy="const value = &quot;ok&quot;;"');
@@ -19,7 +24,9 @@ describe("markdown renderer", () => {
   });
 
   it("renders safe image blocks", () => {
-    const result = renderMarkdown("![Composer 2.5 in OpenCode](/opencode-composer-2-5.webp)");
+    const result = renderMarkdown(
+      "![Composer 2.5 in OpenCode](/opencode-composer-2-5.webp)",
+    );
 
     expect(result.html).toContain('<figure class="md-image">');
     expect(result.html).toContain('src="/opencode-composer-2-5.webp"');
@@ -27,7 +34,9 @@ describe("markdown renderer", () => {
   });
 
   it("renders collapsible details blocks with escaped summaries", () => {
-    const result = renderMarkdown(["::: details Old <route>", "", "Use `v1`.", "", ":::"].join("\n"));
+    const result = renderMarkdown(
+      ["::: details Old <route>", "", "Use `v1`.", "", ":::"].join("\n"),
+    );
 
     expect(result.html).toContain('<details class="md-details">');
     expect(result.html).toContain("<summary>Old &lt;route&gt;</summary>");
@@ -49,9 +58,9 @@ describe("markdown renderer", () => {
         'print("ok")',
         "```",
         "",
-        ":::"
+        ":::",
       ].join("\n"),
-      { copyButtons: true }
+      { copyButtons: true },
     );
 
     expect(result.html).toContain('<a href="/chat">Cursor Chat</a>');

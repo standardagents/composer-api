@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { cursorTestExports, resolveCursorModel, streamCursorText } from "./cursor";
+import {
+  cursorTestExports,
+  resolveCursorModel,
+  streamCursorText,
+} from "./cursor";
 import { encodeSse } from "./sse";
 
 describe("Cursor stream adapter", () => {
@@ -15,13 +19,13 @@ describe("Cursor stream adapter", () => {
         {
           data: new Uint8Array([1, 2, 3]),
           dimension: { width: 640, height: 480 },
-          uuid: "image-test"
-        }
+          uuid: "image-test",
+        },
       ],
       model: "composer-2.5",
       requestId: "request-test",
       conversationId: "conversation-test",
-      messageId: "message-test"
+      messageId: "message-test",
     });
 
     const outer = fields(body);
@@ -30,11 +34,15 @@ describe("Cursor stream adapter", () => {
     const image = fields(bytesField(userMessage, 10));
     const dimension = fields(bytesField(image, 2));
 
-    expect(bytesField(userMessage, 1)).toEqual(new TextEncoder().encode("Describe this image."));
+    expect(bytesField(userMessage, 1)).toEqual(
+      new TextEncoder().encode("Describe this image."),
+    );
     expect(bytesField(image, 1)).toEqual(new Uint8Array([1, 2, 3]));
     expect(numberField(dimension, 1)).toBe(640);
     expect(numberField(dimension, 2)).toBe(480);
-    expect(bytesField(image, 3)).toEqual(new TextEncoder().encode("image-test"));
+    expect(bytesField(image, 3)).toEqual(
+      new TextEncoder().encode("image-test"),
+    );
   });
 
   it("encodes Agent mode for tool-capable requests", () => {
@@ -43,7 +51,7 @@ describe("Cursor stream adapter", () => {
       model: "composer-2.5",
       requestId: "request-test",
       conversationId: "conversation-test",
-      messageId: "message-test"
+      messageId: "message-test",
     });
 
     const outer = fields(body);
@@ -58,7 +66,7 @@ describe("Cursor stream adapter", () => {
       model: "composer-2.5",
       requestId: "request-test",
       conversationId: "conversation-test",
-      messageId: "message-test"
+      messageId: "message-test",
     });
 
     const outer = fields(body);
@@ -75,16 +83,16 @@ describe("Cursor stream adapter", () => {
           controller.enqueue(connectFrame(chatResponseText(" from Composer")));
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "Hello" },
       { type: "text", text: " from Composer" },
-      { type: "done", finalText: "Hello from Composer", toolCalls: [] }
+      { type: "done", finalText: "Hello from Composer", toolCalls: [] },
     ]);
   });
 
@@ -92,19 +100,23 @@ describe("Cursor stream adapter", () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(connectFrame(chatResponseThinking('The user asked for OK.')));
-          controller.enqueue(connectFrame(chatResponseThinking("\n</think>\nOK")));
+          controller.enqueue(
+            connectFrame(chatResponseThinking("The user asked for OK.")),
+          );
+          controller.enqueue(
+            connectFrame(chatResponseThinking("\n</think>\nOK")),
+          );
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "OK" },
-      { type: "done", finalText: "OK", toolCalls: [] }
+      { type: "done", finalText: "OK", toolCalls: [] },
     ]);
   });
 
@@ -112,18 +124,24 @@ describe("Cursor stream adapter", () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(connectFrame(chatResponseThinking("Hidden reasoning <｜final｜>Visible answer")));
+          controller.enqueue(
+            connectFrame(
+              chatResponseThinking(
+                "Hidden reasoning <｜final｜>Visible answer",
+              ),
+            ),
+          );
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "Visible answer" },
-      { type: "done", finalText: "Visible answer", toolCalls: [] }
+      { type: "done", finalText: "Visible answer", toolCalls: [] },
     ]);
   });
 
@@ -131,20 +149,26 @@ describe("Cursor stream adapter", () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(connectFrame(chatResponseText("Hidden reasoning <｜final｜>\nVisible answer")));
-          controller.enqueue(connectFrame(chatResponseText("< | final | >Second answer")));
+          controller.enqueue(
+            connectFrame(
+              chatResponseText("Hidden reasoning <｜final｜>\nVisible answer"),
+            ),
+          );
+          controller.enqueue(
+            connectFrame(chatResponseText("< | final | >Second answer")),
+          );
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "Visible answer" },
       { type: "text", text: "Second answer" },
-      { type: "done", finalText: "Visible answerSecond answer", toolCalls: [] }
+      { type: "done", finalText: "Visible answerSecond answer", toolCalls: [] },
     ]);
   });
 
@@ -155,18 +179,20 @@ describe("Cursor stream adapter", () => {
           controller.enqueue(connectFrame(chatResponseText("<")));
           controller.enqueue(connectFrame(chatResponseText("｜fina")));
           controller.enqueue(connectFrame(chatResponseText("l｜")));
-          controller.enqueue(connectFrame(chatResponseText(">\n\nVisible answer")));
+          controller.enqueue(
+            connectFrame(chatResponseText(">\n\nVisible answer")),
+          );
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "Visible answer" },
-      { type: "done", finalText: "Visible answer", toolCalls: [] }
+      { type: "done", finalText: "Visible answer", toolCalls: [] },
     ]);
   });
 
@@ -179,18 +205,20 @@ describe("Cursor stream adapter", () => {
       "/Users/example/project/**\n",
       "<|tool_sep|>glob_pattern\n",
       "*\n",
-      "<|tool_call_end|><|tool_calls_end|>"
+      "<|tool_call_end|><|tool_calls_end|>",
     ].join("");
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(connectFrame(chatResponseText(marker.slice(0, 45))));
+          controller.enqueue(
+            connectFrame(chatResponseText(marker.slice(0, 45))),
+          );
           controller.enqueue(connectFrame(chatResponseText(marker.slice(45))));
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
@@ -202,61 +230,82 @@ describe("Cursor stream adapter", () => {
           name: "Glob",
           arguments: {
             targeting: "/Users/example/project/**",
-            glob_pattern: "*"
-          }
-        }
+            glob_pattern: "*",
+          },
+        },
       },
       {
         type: "done",
         finalText: "Checking the workspace.\n",
-        toolCalls: [{ name: "Glob", arguments: { targeting: "/Users/example/project/**", glob_pattern: "*" } }]
-      }
+        toolCalls: [
+          {
+            name: "Glob",
+            arguments: {
+              targeting: "/Users/example/project/**",
+              glob_pattern: "*",
+            },
+          },
+        ],
+      },
     ]);
   });
 
   it("parses Composer tool-call markers with direct parser", () => {
     expect(
       cursorTestExports.parseComposerToolCalls(
-        "< | tool_calls_begin | >< | tool_call_begin | >\nRead< | tool_sep | >path\nREADME.md< | tool_call_end | >< | tool_calls_end | >"
-      )
+        "< | tool_calls_begin | >< | tool_call_begin | >\nRead< | tool_sep | >path\nREADME.md< | tool_call_end | >< | tool_calls_end | >",
+      ),
     ).toEqual([{ name: "Read", arguments: { path: "README.md" } }]);
   });
 
   it("parses full-width Composer tool-call markers", () => {
     expect(
       cursorTestExports.parseComposerToolCalls(
-        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>\nglob\n<｜tool▁sep｜>glob_pattern\n*\n<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
-      )
+        "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>\nglob\n<｜tool▁sep｜>glob_pattern\n*\n<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+      ),
     ).toEqual([{ name: "glob", arguments: { glob_pattern: "*" } }]);
   });
 
   it("parses inline Composer tool-call arguments", () => {
     expect(
       cursorTestExports.parseComposerToolCalls(
-        "<|tool_calls_begin|><|tool_call_begin|>\nGlob [targeting=/Users/example/project/**, glob_pattern=*]\n<|tool_call_end|><|tool_calls_end|>"
-      )
-    ).toEqual([{ name: "Glob", arguments: { targeting: "/Users/example/project/**", glob_pattern: "*" } }]);
+        "<|tool_calls_begin|><|tool_call_begin|>\nGlob [targeting=/Users/example/project/**, glob_pattern=*]\n<|tool_call_end|><|tool_calls_end|>",
+      ),
+    ).toEqual([
+      {
+        name: "Glob",
+        arguments: {
+          targeting: "/Users/example/project/**",
+          glob_pattern: "*",
+        },
+      },
+    ]);
   });
 
   it("parses JSON Composer tool-call bodies", () => {
     expect(
       cursorTestExports.parseComposerToolCalls(
-        '<|tool_calls_begin|><|tool_call_begin|>{"name":"read","arguments":{"filePath":"README.md"}}<|tool_call_end|><|tool_calls_end|>'
-      )
+        '<|tool_calls_begin|><|tool_call_begin|>{"name":"read","arguments":{"filePath":"README.md"}}<|tool_call_end|><|tool_calls_end|>',
+      ),
     ).toEqual([{ name: "read", arguments: { filePath: "README.md" } }]);
   });
 
   it("parses alternate JSON tool-call body shapes", () => {
     expect(
       cursorTestExports.parseComposerToolCalls(
-        '<|tool_calls_begin|><|tool_call_begin|>{"tool_name":"write_file","args":{"target_file":"index.html","new_contents":"hi"}}<|tool_call_end|><|tool_calls_end|>'
-      )
-    ).toEqual([{ name: "write_file", arguments: { target_file: "index.html", new_contents: "hi" } }]);
+        '<|tool_calls_begin|><|tool_call_begin|>{"tool_name":"write_file","args":{"target_file":"index.html","new_contents":"hi"}}<|tool_call_end|><|tool_calls_end|>',
+      ),
+    ).toEqual([
+      {
+        name: "write_file",
+        arguments: { target_file: "index.html", new_contents: "hi" },
+      },
+    ]);
 
     expect(
       cursorTestExports.parseComposerToolCalls(
-        '<|tool_calls_begin|><|tool_call_begin|>{"function":{"name":"bash","arguments":"{\\"cmd\\":\\"npm test\\"}"}}<|tool_call_end|><|tool_calls_end|>'
-      )
+        '<|tool_calls_begin|><|tool_call_begin|>{"function":{"name":"bash","arguments":"{\\"cmd\\":\\"npm test\\"}"}}<|tool_call_end|><|tool_calls_end|>',
+      ),
     ).toEqual([{ name: "bash", arguments: { cmd: "npm test" } }]);
   });
 
@@ -268,21 +317,28 @@ describe("Cursor stream adapter", () => {
           controller.enqueue(
             connectFrame(
               chatResponseText(
-                "▁calls▁begin｜><｜tool▁call▁begin｜>\nglob\n<｜tool▁sep｜>glob_pattern\n*\n<｜tool▁call▁end｜><｜tool▁calls▁end｜>"
-              )
-            )
+                "▁calls▁begin｜><｜tool▁call▁begin｜>\nglob\n<｜tool▁sep｜>glob_pattern\n*\n<｜tool▁call▁end｜><｜tool▁calls▁end｜>",
+              ),
+            ),
           );
           controller.enqueue(connectFrame(new TextEncoder().encode("{}"), 2));
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
-      { type: "tool_call", toolCall: { name: "glob", arguments: { glob_pattern: "*" } } },
-      { type: "done", finalText: "", toolCalls: [{ name: "glob", arguments: { glob_pattern: "*" } }] }
+      {
+        type: "tool_call",
+        toolCall: { name: "glob", arguments: { glob_pattern: "*" } },
+      },
+      {
+        type: "done",
+        finalText: "",
+        toolCalls: [{ name: "glob", arguments: { glob_pattern: "*" } }],
+      },
     ]);
   });
 
@@ -290,11 +346,19 @@ describe("Cursor stream adapter", () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(connectFrame(cursorError("Too many computers.", "Too many computers used within the last 24 hours."), 2));
+          controller.enqueue(
+            connectFrame(
+              cursorError(
+                "Too many computers.",
+                "Too many computers used within the last 24 hours.",
+              ),
+              2,
+            ),
+          );
           controller.close();
-        }
+        },
       }),
-      { headers: { "Content-Type": "application/connect+proto" } }
+      { headers: { "Content-Type": "application/connect+proto" } },
     );
     await expect(async () => {
       for await (const _event of streamCursorText(response)) {
@@ -307,19 +371,31 @@ describe("Cursor stream adapter", () => {
     const response = new Response(
       new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(encodeSse({ type: "text-delta", text: "Hello" }, "interaction_update"));
-          controller.enqueue(encodeSse({ type: "text-delta", text: " world" }, "interaction_update"));
-          controller.enqueue(encodeSse({ status: "FINISHED", result: "Hello world" }, "result"));
+          controller.enqueue(
+            encodeSse(
+              { type: "text-delta", text: "Hello" },
+              "interaction_update",
+            ),
+          );
+          controller.enqueue(
+            encodeSse(
+              { type: "text-delta", text: " world" },
+              "interaction_update",
+            ),
+          );
+          controller.enqueue(
+            encodeSse({ status: "FINISHED", result: "Hello world" }, "result"),
+          );
           controller.close();
-        }
-      })
+        },
+      }),
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
     expect(events).toEqual([
       { type: "text", text: "Hello" },
       { type: "text", text: " world" },
-      { type: "done", finalText: "Hello world", toolCalls: [] }
+      { type: "done", finalText: "Hello world", toolCalls: [] },
     ]);
   });
 
@@ -330,12 +406,16 @@ describe("Cursor stream adapter", () => {
           controller.enqueue(encodeSse({ text: "Legacy text" }, "assistant"));
           controller.enqueue(encodeSse({ status: "FINISHED" }, "result"));
           controller.close();
-        }
-      })
+        },
+      }),
     );
     const events = [];
     for await (const event of streamCursorText(response)) events.push(event);
-    expect(events.at(-1)).toEqual({ type: "done", finalText: "Legacy text", toolCalls: [] });
+    expect(events.at(-1)).toEqual({
+      type: "done",
+      finalText: "Legacy text",
+      toolCalls: [],
+    });
   });
 });
 
@@ -344,7 +424,12 @@ function chatResponseText(text: string): Uint8Array {
 }
 
 function chatResponseThinking(text: string): Uint8Array {
-  return protoMessage([protoField(2, protoMessage([protoField(25, protoMessage([protoField(1, text)]))]))]);
+  return protoMessage([
+    protoField(
+      2,
+      protoMessage([protoField(25, protoMessage([protoField(1, text)]))]),
+    ),
+  ]);
 }
 
 function connectFrame(payload: Uint8Array, flags = 0): Uint8Array {
@@ -361,9 +446,9 @@ function cursorError(title: string, detail: string): Uint8Array {
       error: {
         code: "resource_exhausted",
         message: "Error",
-        details: [{ debug: { details: { title, detail } } }]
-      }
-    })
+        details: [{ debug: { details: { title, detail } } }],
+      },
+    }),
   );
 }
 
@@ -378,9 +463,17 @@ function protoMessage(parts: Uint8Array[]): Uint8Array {
   return output;
 }
 
-function protoField(fieldNumber: number, value: string | Uint8Array): Uint8Array {
-  const data = typeof value === "string" ? new TextEncoder().encode(value) : value;
-  return protoMessage([varint((fieldNumber << 3) | 2), varint(data.length), data]);
+function protoField(
+  fieldNumber: number,
+  value: string | Uint8Array,
+): Uint8Array {
+  const data =
+    typeof value === "string" ? new TextEncoder().encode(value) : value;
+  return protoMessage([
+    varint((fieldNumber << 3) | 2),
+    varint(data.length),
+    data,
+  ]);
 }
 
 function varint(value: number): Uint8Array {
@@ -422,17 +515,22 @@ function fields(data: Uint8Array): TestField[] {
 
 function bytesField(fieldList: TestField[], no: number): Uint8Array {
   const field = fieldList.find((item) => item.no === no);
-  if (!field || !(field.value instanceof Uint8Array)) throw new Error(`Missing bytes field ${no}`);
+  if (!field || !(field.value instanceof Uint8Array))
+    throw new Error(`Missing bytes field ${no}`);
   return field.value;
 }
 
 function numberField(fieldList: TestField[], no: number): number {
   const field = fieldList.find((item) => item.no === no);
-  if (!field || typeof field.value !== "number") throw new Error(`Missing number field ${no}`);
+  if (!field || typeof field.value !== "number")
+    throw new Error(`Missing number field ${no}`);
   return field.value;
 }
 
-function readVarint(data: Uint8Array, offset: number): { value: number; offset: number } {
+function readVarint(
+  data: Uint8Array,
+  offset: number,
+): { value: number; offset: number } {
   let value = 0;
   let shift = 0;
   while (offset < data.length) {

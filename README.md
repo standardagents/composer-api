@@ -31,12 +31,12 @@ import OpenAI from "openai";
 
 const client = new OpenAI({
   apiKey: "local",
-  baseURL: "http://127.0.0.1:8787/v1"
+  baseURL: "http://127.0.0.1:8787/v1",
 });
 
 const completion = await client.chat.completions.create({
   model: "composer-2.5",
-  messages: [{ role: "user", content: "Write a TypeScript debounce." }]
+  messages: [{ role: "user", content: "Write a TypeScript debounce." }],
 });
 ```
 
@@ -119,6 +119,20 @@ The bridge process also accepts `CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS`; the default 
 
 Release packages prefer a bundled Bun runtime for the local SDK bridge and fall
 back to Node when Bun is unavailable.
+
+## Self-hosted Docker (Linux)
+
+For a headless Linux host, use Docker Compose to run a plain Node API server plus the SDK bridge (no Cloudflare runtime in the container):
+
+```bash
+cp docker/env.example .env
+docker compose up --build
+```
+
+For development, use `docker compose up --watch` to sync `worker/` and bridge
+scripts into the running containers. See [docs/deploy-self-hosted.md](docs/deploy-self-hosted.md).
+
+The API listens on `http://127.0.0.1:8787/v1` by default. See [docs/deploy-self-hosted.md](docs/deploy-self-hosted.md) for configuration, security notes, and limitations compared to the macOS app.
 
 ## Cloudflare
 
