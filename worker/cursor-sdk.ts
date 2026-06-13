@@ -611,20 +611,13 @@ async function cursorLocalSdkBridgeJson(
     runId: string;
     sessionKey: string;
     prompt: string;
+    incrementalPrompt?: string;
     modelId: string;
     workingDirectory?: string;
     clientTools?: ClientToolSpec[];
   },
 ): Promise<CursorSdkBridgeOutput> {
-  const body = JSON.stringify({
-    apiKey,
-    requestId: input.runId,
-    model: input.modelId,
-    prompt: input.prompt,
-    sessionKey: input.sessionKey || input.agentId,
-    workingDirectory: sdkWorkingDirectory(input.workingDirectory),
-    tools: bridgeClientTools(input.clientTools),
-  });
+  const body = cursorLocalSdkBridgeRequestBody(apiKey, input);
   const bridgeBinding = env.CURSOR_SDK_BRIDGE_CONTAINER;
   const bridgeUrl = env.CURSOR_SDK_BRIDGE_URL?.trim();
   const response = await withCursorLocalSdkBridgeTimeout(env, (signal) =>
@@ -640,7 +633,115 @@ async function cursorLocalSdkBridgeJson(
       500,
       "cursor_sdk_bridge_missing",
     );
+  const contentType = response.headers.get("content-type") || "";
+  if (contentType.includes("ndjson")) {
+    return parseCursorLocalSdkBridgeStreamResponse(response);
+  }
   return parseCursorLocalSdkBridgeJsonResponse(response);
+}
+
+function cursorLocalSdkBridgeRequestBody(
+  apiKey: string,
+  input: {
+    agentId: string;
+    runId: string;
+    sessionKey: string;
+    prompt: string;
+    incrementalPrompt?: string;
+    modelId: string;
+    workingDirectory?: string;
+    clientTools?: ClientToolSpec[];
+  },
+): string {
+  const prepared = extractVisionForBridgePrompt(input.prompt);
+  const incrementalSource = input.incrementalPrompt ?? input.prompt;
+  const incremental =
+    incrementalSource === input.prompt
+      ? prepared
+      : extractVisionForBridgePrompt(incrementalSource);
+  return JSON.stringify({
+    apiKey,
+    requestId: input.runId,
+    model: input.modelId,
+    prompt: prepared.prompt,
+    incrementalPrompt: incremental.prompt,
+    promptAlreadyPrepared: true,
+    sessionKey: input.sessionKey || input.agentId,
+    workingDirectory: sdkWorkingDirectory(input.workingDirectory),
+    tools: bridgeClientTools(input.clientTools),
+    streamEvents: true,
+    ...(prepared.images.length ? { images: prepared.images } : {}),
+  });
+}
+
+type BridgeSdkImage =
+  | { url: string }
+  | { data: string; mimeType: string };
+
+function extractVisionForBridgePrompt(prompt: string): {
+  prompt: string;
+  images: BridgeSdkImage[];
+} {
+  if (!prompt.includes('"type":"file"')) {
+    return { prompt, images: [] };
+  }
+  const images: BridgeSdkImage[] = [];
+  const keptLines: string[] = [];
+  for (const line of prompt.split("\n")) {
+    const roleMatch =
+      /^(USER|ASSISTANT|SYSTEM|TOOL RESULT(?: \([^)]*\))?): (.*)$/.exec(line);
+    if (roleMatch) {
+      const prefix = `${roleMatch[1]}: `;
+      const keptBody: string[] = [];
+      for (const part of roleMatch[2].split("\n")) {
+        const image = bridgeImageFromEmbeddedFilePart(part);
+        if (image) {
+          images.push(image);
+          continue;
+        }
+        keptBody.push(part);
+      }
+      keptLines.push(prefix + keptBody.join("\n"));
+      continue;
+    }
+    const image = bridgeImageFromEmbeddedFilePart(line);
+    if (image) {
+      images.push(image);
+      continue;
+    }
+    keptLines.push(line);
+  }
+  return { prompt: keptLines.join("\n"), images };
+}
+
+function bridgeImageFromEmbeddedFilePart(
+  value: string,
+): BridgeSdkImage | undefined {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") || !trimmed.includes('"type"')) return undefined;
+  try {
+    const part = JSON.parse(trimmed) as unknown;
+    if (!isRecord(part) || part.type !== "file" || !isRecord(part.file)) {
+      return undefined;
+    }
+    const fileData =
+      typeof part.file.file_data === "string"
+        ? part.file.file_data
+        : typeof part.file.fileData === "string"
+          ? part.file.fileData
+          : "";
+    if (!fileData) return undefined;
+    const dataMatch = /^data:([^;,]+);base64,(.+)$/i.exec(fileData);
+    if (dataMatch) {
+      return { data: dataMatch[2], mimeType: dataMatch[1].toLowerCase() };
+    }
+    if (/^https?:\/\//i.test(fileData)) {
+      return { url: fileData };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function cursorLocalSdkUrlBridgeJson(
@@ -708,6 +809,99 @@ function cursorLocalSdkBridgeTimeoutMs(env: Env): number {
     : DEFAULT_SDK_BRIDGE_REQUEST_TIMEOUT_MS;
 }
 
+async function parseCursorLocalSdkBridgeStreamResponse(
+  response: Response,
+): Promise<CursorSdkBridgeOutput> {
+  if (!response.ok) {
+    return parseCursorLocalSdkBridgeJsonResponse(response);
+  }
+  const reader = response.body?.getReader();
+  if (!reader) {
+    throw new HttpError(
+      "Cursor SDK bridge stream did not start.",
+      502,
+      "cursor_sdk_bridge_stream_missing",
+    );
+  }
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let text = "";
+  let finalOutput: CursorSdkBridgeOutput | undefined;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        throw new HttpError(
+          "Cursor SDK bridge returned invalid NDJSON",
+          502,
+          "cursor_sdk_bridge_invalid_json",
+        );
+      }
+      if (!isRecord(event)) continue;
+      if (event.type === "text" && typeof event.text === "string") {
+        text += event.text;
+        continue;
+      }
+      if (event.type === "error" && isRecord(event.error)) {
+        const message =
+          typeof event.error.message === "string" && event.error.message
+            ? event.error.message
+            : "Cursor SDK bridge run failed.";
+        const code =
+          typeof event.error.code === "string" && event.error.code
+            ? event.error.code
+            : "cursor_sdk_bridge_error";
+        throw new HttpError(message, 502, code);
+      }
+      if (event.type === "done" && isRecord(event.output)) {
+        finalOutput = cursorSdkBridgeOutputFromJson(event.output, text);
+      }
+    }
+  }
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer) as unknown;
+      if (isRecord(event) && event.type === "done" && isRecord(event.output)) {
+        finalOutput = cursorSdkBridgeOutputFromJson(event.output, text);
+      }
+    } catch {
+      // Ignore trailing partial frames.
+    }
+  }
+  if (finalOutput) return finalOutput;
+  return {
+    text,
+    toolCalls: [],
+    status: "completed",
+  };
+}
+
+function cursorSdkBridgeOutputFromJson(
+  object: Record<string, unknown>,
+  streamedText: string,
+): CursorSdkBridgeOutput {
+  return {
+    text:
+      typeof object.text === "string" && object.text
+        ? object.text
+        : streamedText,
+    toolCalls: Array.isArray(object.toolCalls)
+      ? object.toolCalls.flatMap(cursorToolCallFromJson)
+      : [],
+    agentID: typeof object.agentID === "string" ? object.agentID : undefined,
+    runID: typeof object.runID === "string" ? object.runID : undefined,
+    status: typeof object.status === "string" ? object.status : undefined,
+  };
+}
+
 async function parseCursorLocalSdkBridgeJsonResponse(
   response: Response,
 ): Promise<CursorSdkBridgeOutput> {
@@ -754,15 +948,7 @@ async function parseCursorLocalSdkBridgeJsonResponse(
       "cursor_sdk_bridge_invalid_json",
     );
   }
-  return {
-    text: typeof object.text === "string" ? object.text : "",
-    toolCalls: Array.isArray(object.toolCalls)
-      ? object.toolCalls.flatMap(cursorToolCallFromJson)
-      : [],
-    agentID: typeof object.agentID === "string" ? object.agentID : undefined,
-    runID: typeof object.runID === "string" ? object.runID : undefined,
-    status: typeof object.status === "string" ? object.status : undefined,
-  };
+  return cursorSdkBridgeOutputFromJson(object, "");
 }
 
 function cursorToolCallFromJson(value: unknown): CursorToolCall[] {

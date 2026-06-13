@@ -39,12 +39,9 @@ describe("OpenAI compatibility adapter", () => {
     expect(prepared.prompt.text).toContain("SYSTEM: Be terse.");
     expect(prepared.prompt.text).toContain("USER: What is this?");
     expect(prepared.prompt.text).toContain("within about 50 output tokens");
-    expect(prepared.prompt.images).toEqual([
-      {
-        url: "https://example.com/image.png",
-        dimension: { width: 640, height: 480 },
-      },
-    ]);
+    expect(prepared.prompt.text).toContain('"type":"file"');
+    expect(prepared.prompt.text).toContain("https://example.com/image.png");
+    expect(prepared.prompt.images).toBeUndefined();
   });
 
   it("converts Responses input images into Cursor prompts", () => {
@@ -72,13 +69,9 @@ describe("OpenAI compatibility adapter", () => {
     );
 
     expect(prepared.prompt.text).toContain("USER: What is in this image?");
-    expect(prepared.prompt.images).toEqual([
-      {
-        mimeType: "image/jpeg",
-        data: "AQID",
-        dimension: { width: 320, height: 240 },
-      },
-    ]);
+    expect(prepared.prompt.text).toContain('"type":"file"');
+    expect(prepared.prompt.text).toContain("data:image/jpeg;base64,AQID");
+    expect(prepared.prompt.images).toBeUndefined();
   });
 
   it("accepts OpenAI function tools and includes them in the Cursor prompt", () => {

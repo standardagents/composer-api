@@ -43,6 +43,10 @@ export function createSelfHostedEnv(
     CURSOR_SDK_BRIDGE_URL: bridgeUrl,
     CURSOR_SDK_BRIDGE_TOKEN: process.env.CURSOR_SDK_BRIDGE_TOKEN,
     CURSOR_SDK_BRIDGE_TIMEOUT_MS: process.env.CURSOR_SDK_BRIDGE_TIMEOUT_MS,
+    CURSOR_BACKEND_BASE_URL: process.env.CURSOR_BACKEND_BASE_URL?.trim(),
+    CURSOR_CHAT_ENDPOINT: process.env.CURSOR_CHAT_ENDPOINT?.trim(),
+    CURSOR_LOCAL_AGENT_ENDPOINT:
+      process.env.CURSOR_LOCAL_AGENT_ENDPOINT?.trim(),
   };
 }
 

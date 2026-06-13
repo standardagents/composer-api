@@ -3,6 +3,9 @@ import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import {
+  extractVisionFromPrompt,
+  sdkMessageFromPrompt,
+  sdkImageFromFilePart,
   bridgePrompt,
   clientForwardingMcpServerSource,
   clientMcpToolDefinitions,
@@ -30,6 +33,49 @@ const bridgeScriptPath = fileURLToPath(
 );
 
 describe("Cursor SDK local-agent bridge", () => {
+  it("extracts embedded vision file parts into SDK user messages", () => {
+    const filePart = JSON.stringify({
+      type: "file",
+      file: {
+        filename: "image.png",
+        file_data: "data:image/png;base64,QUJD",
+      },
+    });
+    const prompt = [
+      "SYSTEM: answer directly",
+      "",
+      "Conversation:",
+      `USER: What exact text appears?\n${filePart}`,
+    ].join("\n");
+    const extracted = extractVisionFromPrompt(prompt);
+    expect(extracted.images).toEqual([
+      { data: "QUJD", mimeType: "image/png" },
+    ]);
+    expect(extracted.text).toContain("USER: What exact text appears?");
+    expect(extracted.text).not.toContain('"type":"file"');
+    expect(sdkMessageFromPrompt(prompt)).toEqual({
+      text: extracted.text,
+      images: extracted.images,
+    });
+    expect(sdkImageFromFilePart(JSON.parse(filePart))).toEqual({
+      data: "QUJD",
+      mimeType: "image/png",
+    });
+  });
+
+  it("prefers explicit bridge images over embedded file parts", () => {
+    const filePart = JSON.stringify({
+      type: "file",
+      file: { filename: "image.png", file_data: "data:image/png;base64,QUJD" },
+    });
+    const prompt = `USER: What is this?\n${filePart}`;
+    const external = [{ data: "QUJD", mimeType: "image/png" }];
+    expect(sdkMessageFromPrompt(prompt, external)).toEqual({
+      text: "USER: What is this?",
+      images: external,
+    });
+  });
+
   it("classifies retryable Cursor SDK upstream capacity errors", () => {
     expect(isRetryableSDKRunError(new Error("Server at capacity"))).toBe(true);
     expect(isRetryableSDKRunError({ cause: { isRetryable: true } })).toBe(true);
