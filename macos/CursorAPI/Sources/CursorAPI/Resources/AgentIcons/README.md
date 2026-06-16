@@ -9,4 +9,5 @@ Integration icons are bundled so API for Cursor can render them offline.
 - `continue.png`: Continue extension icon from `continuedev/continue`
 - `aider.png`: Aider web app icon from `Aider-AI/aider`
 - `roo.png`: Roo Code extension icon from `RooCodeInc/Roo-Code`
+- `factory.png`: Factory.ai mark, rendered from the logo bundled in DroidProxy (`anand-92/droidproxy`). The one-click Factory setup is adapted from DroidProxy.
 - `../cursor-logo.png`: Standard Agents mark rendered white on black for the app chrome

@@ -1,6 +1,6 @@
 # API for Cursor
 
-API for Cursor is now distributed as a local macOS app. The local app starts an OpenAI-compatible server on your machine, stores your Cursor API key locally, and configures agent tools like OpenCode, Codex, VS Code, Cline, Kilo Code, Continue, Aider, and Roo.
+API for Cursor is now distributed as a local macOS app. The local app starts an OpenAI-compatible server on your machine, stores your Cursor API key locally, and configures agent tools like OpenCode, Codex, VS Code, Cline, Kilo Code, Factory, Continue, Aider, and Roo.
 
 Download the latest DMG:
 
@@ -47,6 +47,44 @@ wire_api = "chat"
 model = "composer-2.5"
 model_provider = "cursor-composer"
 ```
+
+## Factory
+
+Use the app's Factory installer from **Agent Setup**. It adds Composer models as
+Factory.ai Droid custom models in `~/.factory/settings.json` (the file is backed
+up first), or configure them manually by adding entries to the `customModels`
+array:
+
+```json
+{
+  "customModels": [
+    {
+      "model": "composer-2.5",
+      "id": "custom:cursorapi:composer-2.5",
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "apiKey": "cursor-local",
+      "displayName": "API for Cursor: Composer 2.5",
+      "maxOutputTokens": 65536,
+      "noImageSupport": false,
+      "provider": "generic-chat-completion-api"
+    },
+    {
+      "model": "composer-2.5-fast",
+      "id": "custom:cursorapi:composer-2.5-fast",
+      "baseUrl": "http://127.0.0.1:8787/v1",
+      "apiKey": "cursor-local",
+      "displayName": "API for Cursor: Composer 2.5 Fast",
+      "maxOutputTokens": 65536,
+      "noImageSupport": false,
+      "provider": "generic-chat-completion-api"
+    }
+  ]
+}
+```
+
+Restart Factory or open a new session to see the models in the picker. The
+one-click Factory flow is adapted from
+[DroidProxy](https://github.com/anand-92/droidproxy).
 
 ## Hosted Endpoint Status
 

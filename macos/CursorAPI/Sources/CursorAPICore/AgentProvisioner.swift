@@ -18,8 +18,13 @@ public final class AgentProvisioner: @unchecked Sendable {
         .vscode,
         .cline,
         .kilo,
-        .pi
+        .pi,
+        .factory
     ]
+
+    /// Factory custom-model ids written by this app. Used to strip stale entries
+    /// during install/re-install so users don't accumulate duplicates.
+    private static let factoryModelIDPrefix = "custom:cursorapi:"
 
     private let homeDirectory: URL
     private let fileManager: FileManager
@@ -53,6 +58,8 @@ public final class AgentProvisioner: @unchecked Sendable {
             return extensionStatus(id: .kilo, settings: settings)
         case .pi:
             return piStatus(settings: settings)
+        case .factory:
+            return factoryStatus(settings: settings)
         case .continueDev:
             return continueStatus(settings: settings)
         case .aider:
@@ -76,6 +83,8 @@ public final class AgentProvisioner: @unchecked Sendable {
             try installKilo(settings: settings)
         case .pi:
             try installPi(settings: settings)
+        case .factory:
+            try installFactory(settings: settings)
         case .continueDev:
             try installContinue(settings: settings)
         case .aider:
@@ -234,6 +243,71 @@ public final class AgentProvisioner: @unchecked Sendable {
         let installed = piConfigMatches(settings: settings)
         let detail = installed ? "Custom models installed" : providerStatusDetail(text: fileText(url), settings: settings)
         return AgentIntegrationStatus(id: .pi, installed: installed, configPath: url.path, detail: detail)
+    }
+
+    private func factoryStatus(settings: CursorAPISettings) -> AgentIntegrationStatus {
+        let url = factorySettingsURL()
+        guard fileManager.fileExists(atPath: url.path) else {
+            return AgentIntegrationStatus(id: .factory, installed: false, configPath: url.path, detail: "Factory settings not found")
+        }
+        let installed = factoryConfigMatches(settings: settings)
+        let detail = installed ? "Custom models installed" : providerStatusDetail(text: fileText(url), settings: settings)
+        return AgentIntegrationStatus(id: .factory, installed: installed, configPath: url.path, detail: detail)
+    }
+
+    private func installFactory(settings: CursorAPISettings) throws {
+        let url = factorySettingsURL()
+        var root = try readJSONObject(url, defaultValue: [:])
+        var models = (root["customModels"] as? [[String: Any]]) ?? []
+        models.removeAll { item in
+            guard let id = item["id"] as? String else { return false }
+            return id.hasPrefix(Self.factoryModelIDPrefix)
+        }
+        for entry in factoryModelEntries(settings: settings) {
+            var entry = entry
+            entry["index"] = models.count
+            models.append(entry)
+        }
+        root["customModels"] = models
+        try writeJSONObject(root, to: url)
+    }
+
+    private func factoryConfigMatches(settings: CursorAPISettings) -> Bool {
+        let url = factorySettingsURL()
+        guard fileManager.fileExists(atPath: url.path),
+              let root = try? readJSONObject(url, defaultValue: [:]),
+              let models = root["customModels"] as? [[String: Any]] else {
+            return false
+        }
+        return ComposerModels.all.allSatisfy { model in
+            models.contains { factoryModelEntryMatches($0, model: model, settings: settings) }
+        }
+    }
+
+    private func factoryModelEntryMatches(_ entry: [String: Any], model: ComposerModel, settings: CursorAPISettings) -> Bool {
+        stringValue(entry["id"]) == "\(Self.factoryModelIDPrefix)\(model.id)"
+            && stringValue(entry["model"]) == model.id
+            && stringValue(entry["baseUrl"]) == settings.baseURL.absoluteString
+            && stringValue(entry["apiKey"]) == "cursor-local"
+            && stringValue(entry["provider"]) == "generic-chat-completion-api"
+            && stringValue(entry["displayName"]) == "\(CursorAPIBrand.displayName): \(model.name)"
+            && intValue(entry["maxOutputTokens"]) == model.outputLimit
+            && boolValue(entry["noImageSupport"]) == false
+    }
+
+    private func factoryModelEntries(settings: CursorAPISettings) -> [[String: Any]] {
+        ComposerModels.all.map { model in
+            [
+                "model": model.id,
+                "id": "\(Self.factoryModelIDPrefix)\(model.id)",
+                "baseUrl": settings.baseURL.absoluteString,
+                "apiKey": "cursor-local",
+                "displayName": "\(CursorAPIBrand.displayName): \(model.name)",
+                "maxOutputTokens": model.outputLimit,
+                "noImageSupport": false,
+                "provider": "generic-chat-completion-api"
+            ]
+        }
     }
 
     private func continueStatus(settings: CursorAPISettings) -> AgentIntegrationStatus {
@@ -723,6 +797,10 @@ public final class AgentProvisioner: @unchecked Sendable {
 
     private func piModelsURL() -> URL {
         homeDirectory.appending(path: ".pi/agent/models.json")
+    }
+
+    private func factorySettingsURL() -> URL {
+        homeDirectory.appending(path: ".factory/settings.json")
     }
 
     private func continueConfigURL() -> URL {

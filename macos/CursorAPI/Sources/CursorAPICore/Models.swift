@@ -252,6 +252,7 @@ public enum AgentIntegrationID: String, CaseIterable, Codable, Sendable {
     case cline
     case kilo
     case pi
+    case factory
     case continueDev = "continue"
     case aider
     case roo
@@ -270,6 +271,8 @@ public enum AgentIntegrationID: String, CaseIterable, Codable, Sendable {
             return "Kilo Code"
         case .pi:
             return "pi"
+        case .factory:
+            return "Factory"
         case .continueDev:
             return "Continue"
         case .aider:

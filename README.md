@@ -88,6 +88,18 @@ Token usage is estimated from character counts because Cursor's stream does not 
 
 Use the app's **Agent Setup** pane to install the local OpenCode provider. The configured provider points at the local base URL, not the hosted Worker.
 
+## Factory
+
+Use the app's **Agent Setup** pane to add Composer 2.5 and Composer 2.5 Fast as
+Factory.ai Droid custom models. The installer writes `customModels` entries into
+`~/.factory/settings.json` (backing the file up first) that point Droid at the
+local OpenAI-compatible base URL. Restart Factory or open a new session to see
+them in the model picker.
+
+The one-click Factory flow is adapted from
+[DroidProxy](https://github.com/anand-92/droidproxy) — thanks to DroidProxy for
+the approach of writing Factory custom models from a local proxy app.
+
 ## Local development
 
 ```bash

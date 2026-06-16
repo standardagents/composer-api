@@ -197,6 +197,72 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(provisioner.status(for: .pi, settings: settings).installed)
     }
 
+    func testInstallsFactoryCustomModels() throws {
+        let home = try temporaryHome()
+        let provisioner = AgentProvisioner(homeDirectory: home)
+        let settings = CursorAPISettings(port: 8787)
+        try provisioner.install(.factory, settings: settings)
+
+        let config = home.appending(path: ".factory/settings.json")
+        let root = try readJSONObject(config)
+        let models = try XCTUnwrap(root["customModels"] as? [[String: Any]])
+        XCTAssertEqual(models.count, 2)
+
+        let primary = try XCTUnwrap(models.first { $0["id"] as? String == "custom:cursorapi:composer-2.5" })
+        XCTAssertEqual(primary["model"] as? String, "composer-2.5")
+        XCTAssertEqual(primary["baseUrl"] as? String, "http://127.0.0.1:8787/v1")
+        XCTAssertEqual(primary["apiKey"] as? String, "cursor-local")
+        XCTAssertEqual(primary["provider"] as? String, "generic-chat-completion-api")
+        XCTAssertEqual(primary["displayName"] as? String, "\(CursorAPIBrand.displayName): Composer 2.5")
+        XCTAssertEqual((primary["maxOutputTokens"] as? NSNumber)?.intValue, 65_536)
+        XCTAssertEqual(primary["noImageSupport"] as? Bool, false)
+        XCTAssertEqual((primary["index"] as? NSNumber)?.intValue, 0)
+
+        let fast = try XCTUnwrap(models.first { $0["id"] as? String == "custom:cursorapi:composer-2.5-fast" })
+        XCTAssertEqual(fast["model"] as? String, "composer-2.5-fast")
+        XCTAssertEqual(fast["displayName"] as? String, "\(CursorAPIBrand.displayName): Composer 2.5 Fast")
+        XCTAssertEqual((fast["index"] as? NSNumber)?.intValue, 1)
+
+        XCTAssertTrue(provisioner.status(for: .factory, settings: settings).installed)
+    }
+
+    func testInstallFactoryPreservesExistingEntriesAndAvoidsDuplicates() throws {
+        let home = try temporaryHome()
+        let provisioner = AgentProvisioner(homeDirectory: home)
+        let settings = CursorAPISettings(port: 8787)
+        let config = home.appending(path: ".factory/settings.json")
+        try FileManager.default.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try """
+        {
+          "customModels": [
+            {
+              "model": "my-other-model",
+              "id": "custom:other:model",
+              "index": 0,
+              "baseUrl": "http://localhost:1234/v1",
+              "apiKey": "other",
+              "displayName": "Other Model",
+              "maxOutputTokens": 4096,
+              "noImageSupport": false,
+              "provider": "openai"
+            }
+          ],
+          "someOtherSetting": true
+        }
+        """.write(to: config, atomically: true, encoding: .utf8)
+
+        try provisioner.install(.factory, settings: settings)
+        try provisioner.install(.factory, settings: settings)
+
+        let root = try readJSONObject(config)
+        XCTAssertEqual(root["someOtherSetting"] as? Bool, true)
+        let models = try XCTUnwrap(root["customModels"] as? [[String: Any]])
+        XCTAssertEqual(models.count, 3, "Existing entry plus the two Composer entries, with no duplicates after re-install")
+        XCTAssertEqual(models.filter { ($0["id"] as? String)?.hasPrefix("custom:cursorapi:") == true }.count, 2)
+        XCTAssertNotNil(models.first { $0["id"] as? String == "custom:other:model" })
+        XCTAssertTrue(provisioner.status(for: .factory, settings: settings).installed)
+    }
+
     func testInstallsContinueModelsInExistingConfig() throws {
         let home = try temporaryHome()
         let provisioner = AgentProvisioner(homeDirectory: home)
@@ -606,6 +672,7 @@ final class AgentProvisionerTests: XCTestCase {
         try provisioner.install(.continueDev, settings: original)
         try provisioner.install(.aider, settings: original)
         try provisioner.install(.roo, settings: original)
+        try provisioner.install(.factory, settings: original)
 
         for id in AgentIntegrationID.allCases {
             let status = provisioner.status(for: id, settings: moved)
