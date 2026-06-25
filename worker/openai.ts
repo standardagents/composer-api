@@ -649,6 +649,15 @@ export function modelList(options: { opencode?: boolean; sdk?: boolean } = {}): 
   };
 }
 
+export function modelListForAuth(
+  _env: unknown,
+  _deps: unknown,
+  _cursorApiKey: string,
+  options: { opencode?: boolean; sdk?: boolean } = {},
+): Record<string, unknown> {
+  return modelList(options);
+}
+
 export function toOpenAiToolCalls(input: {
   toolCalls: CursorToolCall[];
   tools?: OpenAiToolSpec[];
