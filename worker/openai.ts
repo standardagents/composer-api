@@ -73,31 +73,31 @@ const CURSOR_MODEL_PRICING: Record<string, CursorModelPricing> = {
 };
 
 const SYSTEM_DIRECTIVE = [
-  "You are serving an OpenAI-compatible API request through Cursor Composer.",
+  "You are serving an OpenAI-compatible API request.",
   "Answer the user directly in chat style.",
   "Do not modify files, run terminal commands, open pull requests, or use coding-agent workflow unless the user explicitly asks for code as text.",
   "Return only the final answer content."
 ].join("\n");
 
 const TOOL_SYSTEM_DIRECTIVE = [
-  "You are serving an OpenAI-compatible API request through Cursor Composer.",
+  "You are serving an OpenAI-compatible API request.",
   "This request is already in Agent mode because the client provided executable tools.",
   "The client tool inventory below is executable. You can inspect files, run shell commands, and edit through those tools when the user asks for project work.",
   "Answer directly only when no tool is needed.",
-  "When a provided tool is needed, call it using Cursor Composer's tool-call marker protocol and do not describe the marker as prose.",
+  "When a provided tool is needed, call it using the tool-call marker protocol and do not describe the marker as prose.",
   "Do not emit duplicate tool calls. Call each required operation once, then continue after the client returns the tool result.",
   "Never claim that tools are unavailable. Never tell the user to switch modes."
 ].join("\n");
 
 const AGENT_SYSTEM_DIRECTIVE = [
-  "You are serving an OpenAI-compatible API request through Cursor Composer.",
+  "You are serving an OpenAI-compatible API request.",
   "This request is already in Agent mode.",
   "Answer directly when no tool is needed.",
   "Never tell the user to switch modes."
 ].join("\n");
 
 const RESPONSES_TOOL_SYSTEM_DIRECTIVE = [
-  "You are serving an OpenAI Responses API request through Cursor Composer.",
+  "You are serving an OpenAI Responses API request.",
   "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a function_call and wait for the function_call_output.",
   "When the input includes function_call_output records, treat them as completed local tool results for your previous function_call requests and continue from those results.",
   "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and MCP/server tools should be requested with SDK mcp using providerIdentifier, toolName, and args.",
@@ -647,6 +647,15 @@ export function modelList(options: { opencode?: boolean; sdk?: boolean } = {}): 
       modelItem("kimi-k2.5", "Kimi K2.5")
     ]
   };
+}
+
+export function modelListForAuth(
+  _env: unknown,
+  _deps: unknown,
+  _cursorApiKey: string,
+  options: { opencode?: boolean; sdk?: boolean } = {},
+): Record<string, unknown> {
+  return modelList(options);
 }
 
 export function toOpenAiToolCalls(input: {

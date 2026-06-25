@@ -30,6 +30,8 @@ describe("OpenAI compatibility adapter", () => {
       { id: "composer-2.5" }
     );
     expect(prepared.prompt.text).toContain("SYSTEM: Be terse.");
+    expect(prepared.prompt.text).toContain("You are serving an OpenAI-compatible API request.");
+    expect(prepared.prompt.text).not.toContain("through Cursor Composer");
     expect(prepared.prompt.text).toContain("USER: What is this?");
     expect(prepared.prompt.text).toContain("within about 50 output tokens");
     expect(prepared.prompt.images).toEqual([{ url: "https://example.com/image.png", dimension: { width: 640, height: 480 } }]);
@@ -59,6 +61,8 @@ describe("OpenAI compatibility adapter", () => {
       { id: "composer-2.5" }
     );
 
+    expect(prepared.prompt.text).toContain("You are serving an OpenAI-compatible API request.");
+    expect(prepared.prompt.text).not.toContain("through Cursor Composer");
     expect(prepared.prompt.text).toContain("USER: What is in this image?");
     expect(prepared.prompt.images).toEqual([
       { mimeType: "image/jpeg", data: "AQID", dimension: { width: 320, height: 240 } }
@@ -93,6 +97,7 @@ describe("OpenAI compatibility adapter", () => {
     expect(prepared.prompt.mode).toBe("agent");
     expect(prepared.prompt.text).toContain("already in Agent mode");
     expect(prepared.prompt.text).toContain("Never claim that tools are unavailable");
+    expect(prepared.prompt.text).not.toContain("through Cursor Composer");
     expect(prepared.prompt.text).toContain("CLIENT TOOL INVENTORY:");
     expect(prepared.prompt.text).toContain("Allowed tool names: glob");
     expect(prepared.prompt.text).toContain("Switched to agent mode successfully");
