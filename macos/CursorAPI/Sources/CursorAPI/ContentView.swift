@@ -5,6 +5,7 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var model: CursorAPIAppModel
     @State private var showingAPIKeyDialog = false
+    @State private var page: TopPage = .connection
 
     var body: some View {
         ZStack {
@@ -25,7 +26,11 @@ struct ContentView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
-                        guidedContent
+                        if page == .settings {
+                            SettingsPage(model: model, apiKeyReplacementRequestID: 0)
+                        } else {
+                            guidedContent
+                        }
                     }
                     .padding(24)
                 }
@@ -43,6 +48,8 @@ struct ContentView: View {
         }
     }
 
+    /// Tabs shown in the window header that switch between the guided connection page and the
+    /// full settings page where the bind interface and port can be changed.
     enum TopPage: String, CaseIterable, Identifiable {
         case connection = "Connection"
         case settings = "Settings"
@@ -55,6 +62,8 @@ struct ContentView: View {
             UsageSummaryHeader(activity: model.apiActivity)
 
             Spacer()
+
+            HeaderPageTabs(selection: $page)
 
             MenuBarModeToggle(
                 isOn: Binding(
@@ -1280,10 +1289,21 @@ struct SettingsPage: View {
             }
 
             SettingsGroup(title: "Local Server", icon: "server.rack") {
-                SettingsFieldRow(title: "Port", subtitle: "Loopback listener port") {
+                SettingsFieldRow(title: "Port", subtitle: "Listener port") {
                     TextField("8787", value: $model.settings.port, format: .number.grouping(.never))
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 110)
+                }
+                /// Allows the user to choose between loopback-only (default) and LAN mode. LAN mode
+                /// binds the server on `0.0.0.0` and shows the primary Wi-Fi IP in the endpoint URL.
+                SettingsFieldRow(title: "Bind Interface", subtitle: "Network interface to accept connections on") {
+                    Picker("", selection: $model.settings.bindHost) {
+                        Text("Localhost").tag("127.0.0.1")
+                        Text("LAN (all interfaces)").tag("0.0.0.0")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 180)
                 }
                 SettingsFieldRow(title: "Launch at Login", subtitle: "Start \(CursorAPIBrand.displayName) when macOS signs in") {
                     Toggle("", isOn: $model.settings.launchAtLogin)

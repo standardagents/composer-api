@@ -1,5 +1,6 @@
 import Combine
 import CursorAPICore
+import Darwin
 import Foundation
 import ServiceManagement
 
@@ -61,8 +62,36 @@ final class CursorAPIAppModel: ObservableObject {
         updateStatusText()
     }
 
+    /// The URL shown to the user and copied into agent configs. When the server is bound to
+    /// all interfaces (`0.0.0.0`), replace the host with the LAN IP of `en0` so remote clients
+    /// on the same network can reach the local API without editing the endpoint manually.
     var baseURL: String {
-        settings.baseURL.absoluteString
+        if settings.bindHost == "0.0.0.0" {
+            let ip = lanIPAddress() ?? "0.0.0.0"
+            return "http://\(ip):\(settings.port)/v1"
+        }
+        return settings.baseURL.absoluteString
+    }
+
+    /// Looks up the IPv4 address assigned to the primary Wi-Fi interface (`en0`).
+    /// Falls back to `nil` when the interface is unavailable or the device is offline.
+    private func lanIPAddress() -> String? {
+        var ifaddr: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&ifaddr) == 0 else { return nil }
+        defer { freeifaddrs(ifaddr) }
+        var ptr = ifaddr
+        while let ifa = ptr?.pointee {
+            let name = String(cString: ifa.ifa_name)
+            if name == "en0", ifa.ifa_addr.pointee.sa_family == UInt8(AF_INET) {
+                var addr = ifa.ifa_addr.pointee
+                var hostname = [UInt8](repeating: 0, count: Int(NI_MAXHOST))
+                getnameinfo(&addr, socklen_t(ifa.ifa_addr.pointee.sa_len), &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
+                let end = hostname.firstIndex(of: 0) ?? hostname.endIndex
+                return String(decoding: hostname[..<end], as: UTF8.self)
+            }
+            ptr = ifa.ifa_next
+        }
+        return nil
     }
 
     var chatCompletionsURL: String {
@@ -215,7 +244,7 @@ final class CursorAPIAppModel: ObservableObject {
                 needsKeychainPermission = settings.keychainCursorAPIKeyAvailable && !settings.hasInlineCursorAPIKey
             }
             let requestedPort = settings.port
-            let activePort = try server.start(preferredPort: requestedPort, fallbackLimit: Self.portFallbackLimit)
+            let activePort = try server.start(preferredPort: requestedPort, fallbackLimit: Self.portFallbackLimit, host: settings.bindHost)
             settings.port = activePort
             isRunning = true
             updateStatusText()

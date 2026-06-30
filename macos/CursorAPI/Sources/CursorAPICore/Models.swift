@@ -8,6 +8,9 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
     public static let legacyCursorAPIBaseURL = "https://api.cursor.com"
 
     public var port: UInt16
+    /// Network interface the local server binds to. Defaults to loopback only (`127.0.0.1`);
+    /// may be set to `0.0.0.0` to accept connections from the local network.
+    public var bindHost: String
     public var cursorAPIKey: String
     public var keychainCursorAPIKeyAvailable: Bool
     public var cursorAPIBaseURL: String
@@ -19,6 +22,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
 
     public init(
         port: UInt16 = 8787,
+        bindHost: String = "127.0.0.1",
         cursorAPIKey: String = "",
         keychainCursorAPIKeyAvailable: Bool = false,
         cursorAPIBaseURL: String = "",
@@ -29,6 +33,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
         menuBarOnly: Bool = false
     ) {
         self.port = port
+        self.bindHost = bindHost
         self.cursorAPIKey = cursorAPIKey
         self.keychainCursorAPIKeyAvailable = keychainCursorAPIKeyAvailable
         self.cursorAPIBaseURL = cursorAPIBaseURL
@@ -62,6 +67,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case port
+        case bindHost
         case cursorAPIKey
         case cursorAPIBaseURL
         case backendBaseURL
@@ -74,6 +80,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         port = try container.decodeIfPresent(UInt16.self, forKey: .port) ?? 8787
+        bindHost = try container.decodeIfPresent(String.self, forKey: .bindHost) ?? "127.0.0.1"
         cursorAPIKey = try container.decodeIfPresent(String.self, forKey: .cursorAPIKey) ?? ""
         keychainCursorAPIKeyAvailable = false
         cursorAPIBaseURL = try container.decodeIfPresent(String.self, forKey: .cursorAPIBaseURL) ?? ""
@@ -87,6 +94,7 @@ public struct CursorAPISettings: Codable, Equatable, Sendable {
     public func encode(to encoder: any Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(port, forKey: .port)
+        try container.encode(bindHost, forKey: .bindHost)
         try container.encode(cursorAPIKey, forKey: .cursorAPIKey)
         try container.encode(cursorAPIBaseURL, forKey: .cursorAPIBaseURL)
         try container.encode(backendBaseURL, forKey: .backendBaseURL)

@@ -113,13 +113,15 @@ public final class LocalAPIServer: @unchecked Sendable {
         self.requestObserver = requestObserver
     }
 
-    public func start(port: UInt16) throws {
+    /// Starts the local API on a specific port and host. Defaults to loopback; pass `0.0.0.0`
+    /// to listen on all interfaces for LAN access.
+    public func start(port: UInt16, host: String = "127.0.0.1") throws {
         stop()
         let endpointPort = NWEndpoint.Port(rawValue: port)!
         let parameters = NWParameters.tcp
-        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: endpointPort)
+        parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: endpointPort)
         let listener = try NWListener(using: parameters)
-        let startResult = ListenerStartResult(port: port)
+        let startResult = ListenerStartResult(port: port, host: host)
         listener.newConnectionHandler = { [weak self] connection in
             self?.accept(connection)
         }
@@ -150,7 +152,9 @@ public final class LocalAPIServer: @unchecked Sendable {
     }
 
     @discardableResult
-    public func start(preferredPort: UInt16, fallbackLimit: Int) throws -> UInt16 {
+    /// Tries to bind the server on the preferred port, falling back to the next available ports.
+    /// The host parameter is forwarded to each attempt so LAN binding is applied consistently.
+    public func start(preferredPort: UInt16, fallbackLimit: Int, host: String = "127.0.0.1") throws -> UInt16 {
         var lastError: (any Error)?
         let maxAttempts = max(1, fallbackLimit)
         for offset in 0..<maxAttempts {
@@ -159,7 +163,7 @@ public final class LocalAPIServer: @unchecked Sendable {
                 break
             }
             do {
-                try start(port: candidate)
+                try start(port: candidate, host: host)
                 return candidate
             } catch {
                 lastError = error
@@ -1078,7 +1082,7 @@ public final class LocalAPIServer: @unchecked Sendable {
             "status": status,
             "service": CursorAPIBrand.displayName,
             "baseUrl": settings.baseURL.absoluteString,
-            "host": "127.0.0.1",
+            "host": settings.bindHost,
             "routingConfigured": sdkBridgeConfigured,
             "sdkConfigured": sdkBridgeConfigured,
             "apiKeyConfigured": apiKeyConfigured,
@@ -1248,12 +1252,14 @@ private extension String {
 
 private final class ListenerStartResult: @unchecked Sendable {
     private let port: UInt16
+    private let host: String
     private let semaphore = DispatchSemaphore(value: 0)
     private let lock = NSLock()
     private var result: Result<Void, any Error>?
 
-    init(port: UInt16) {
+    init(port: UInt16, host: String) {
         self.port = port
+        self.host = host
     }
 
     func succeed() {
@@ -1261,13 +1267,13 @@ private final class ListenerStartResult: @unchecked Sendable {
     }
 
     func fail(_ error: any Error) {
-        complete(.failure(CursorAPIError.transport("Could not listen on 127.0.0.1:\(port): \(error.localizedDescription)")))
+        complete(.failure(CursorAPIError.transport("Could not listen on \(host):\(port): \(error.localizedDescription)")))
     }
 
     func wait(timeout: TimeInterval = 2.0) throws {
         let deadline = DispatchTime.now() + timeout
         if semaphore.wait(timeout: deadline) == .timedOut {
-            throw CursorAPIError.transport("Timed out starting local API on 127.0.0.1:\(port).")
+            throw CursorAPIError.transport("Timed out starting local API on \(host):\(port).")
         }
         let completed = lock.withLock { result }
         if case .failure(let error) = completed {
