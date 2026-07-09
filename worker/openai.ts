@@ -69,7 +69,11 @@ const CURSOR_MODEL_PRICING: Record<string, CursorModelPricing> = {
   "composer-2.5-sdk": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
   "composer-2-5": { input: 0.5, output: 2.5, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
   "composer-2.5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
-  "composer-2-5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE }
+  "composer-2-5-fast": { input: 3, output: 15, source: CURSOR_COMPOSER_2_5_PRICING_SOURCE },
+  "grok-4.5": { input: 2, output: 6, source: "https://cursor.com/blog/grok-4-5" },
+  "grok-4-5": { input: 2, output: 6, source: "https://cursor.com/blog/grok-4-5" },
+  "grok-4.5-fast": { input: 4, output: 18, source: "https://cursor.com/blog/grok-4-5" },
+  "grok-4-5-fast": { input: 4, output: 18, source: "https://cursor.com/blog/grok-4-5" }
 };
 
 const SYSTEM_DIRECTIVE = [
@@ -644,6 +648,8 @@ export function modelList(options: { opencode?: boolean; sdk?: boolean } = {}): 
       modelItem("gemini-2.5-flash", "Gemini 2.5 Flash"),
       modelItem("grok-build-0.1", "Grok Build 0.1"),
       modelItem("grok-4.3", "Grok 4.3"),
+      modelItem("grok-4.5", "Grok 4.5"),
+      modelItem("grok-4.5-fast", "Grok 4.5 Fast"),
       modelItem("kimi-k2.5", "Kimi K2.5")
     ]
   };

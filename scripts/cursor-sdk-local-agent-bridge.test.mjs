@@ -75,6 +75,20 @@ describe("Cursor SDK local-agent bridge", () => {
     expect(normalizeModel("composer-latest")).toBe("composer-2.5");
     expect(normalizeModel("auto")).toBe("default");
     expect(normalizeModel("gpt-5.5")).toBe("gpt-5.5");
+    expect(normalizeModel("grok-4.5")).toBe("grok-4.5");
+    expect(normalizeModel("grok-4.5-fast")).toBe("grok-4.5-fast");
+    expect(normalizeModel("cursorapi/grok-4.5-fast")).toBe("grok-4.5-fast");
+  });
+
+  it("maps Grok 4.5 public ids to SDK model params", () => {
+    expect(localAgentCreateOptions({ apiKey: "test", model: "grok-4.5", workingDirectory: process.cwd() }).model).toEqual({
+      id: "grok-4.5",
+      params: [{ id: "fast", value: "false" }]
+    });
+    expect(localAgentCreateOptions({ apiKey: "test", model: "grok-4.5-fast", workingDirectory: process.cwd() }).model).toEqual({
+      id: "grok-4.5",
+      params: [{ id: "fast", value: "true" }]
+    });
   });
 
   it("serializes overlapping runs for the same stateful SDK agent", async () => {

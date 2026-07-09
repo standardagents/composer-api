@@ -202,7 +202,7 @@ public final class AgentProvisioner: @unchecked Sendable {
             "name": CursorAPIBrand.displayName,
             "provider": "openai-compatible",
             "baseUrl": settings.baseURL.absoluteString,
-            "models": ["composer-2.5", "composer-2.5-fast"]
+            "models": ComposerModels.all.map(\.id)
         ])
         try writeJSONValue(array, to: url)
     }
@@ -527,10 +527,7 @@ public final class AgentProvisioner: @unchecked Sendable {
                 "baseURL": settings.baseURL.absoluteString,
                 "apiKey": "cursor-local"
             ],
-            "models": [
-                "composer-2.5": agentModelDefinition(ComposerModels.all[0]),
-                "composer-2.5-fast": agentModelDefinition(ComposerModels.all[1])
-            ]
+            "models": Dictionary(uniqueKeysWithValues: ComposerModels.all.map { ($0.id, agentModelDefinition($0)) })
         ]
         root["provider"] = provider
         if root["model"] == nil {

@@ -2005,6 +2005,8 @@ function normalizeModel(model) {
   }
   if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5";
   if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "composer-2.5-fast";
+  if (normalized === "grok-4.5" || normalized === "grok-4-5") return "grok-4.5";
+  if (normalized === "grok-4.5-fast" || normalized === "grok-4-5-fast") return "grok-4.5-fast";
   return raw;
 }
 
@@ -2012,6 +2014,8 @@ function sdkModelSelection(model) {
   const normalized = normalizeModel(typeof model === "string" ? model : "");
   if (normalized === "composer-2.5") return { id: "composer-2.5", params: [{ id: "fast", value: "false" }] };
   if (normalized === "composer-2.5-fast") return { id: "composer-2.5", params: [{ id: "fast", value: "true" }] };
+  if (normalized === "grok-4.5") return { id: "grok-4.5", params: [{ id: "fast", value: "false" }] };
+  if (normalized === "grok-4.5-fast") return { id: "grok-4.5", params: [{ id: "fast", value: "true" }] };
   return { id: normalized };
 }
 

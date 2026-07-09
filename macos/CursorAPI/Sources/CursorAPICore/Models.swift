@@ -182,7 +182,9 @@ public struct ComposerModel: Codable, Equatable, Sendable {
 public enum ComposerModels {
     public static let all: [ComposerModel] = [
         ComposerModel(id: "composer-2.5", name: "Composer 2.5", inputCost: 0.5, outputCost: 2.5),
-        ComposerModel(id: "composer-2.5-fast", name: "Composer 2.5 Fast", inputCost: 3.0, outputCost: 15.0)
+        ComposerModel(id: "composer-2.5-fast", name: "Composer 2.5 Fast", inputCost: 3.0, outputCost: 15.0),
+        ComposerModel(id: "grok-4.5", name: "Grok 4.5", inputCost: 2.0, outputCost: 6.0),
+        ComposerModel(id: "grok-4.5-fast", name: "Grok 4.5 Fast", inputCost: 4.0, outputCost: 18.0)
     ]
 
     public static func model(for id: String) -> ComposerModel? {

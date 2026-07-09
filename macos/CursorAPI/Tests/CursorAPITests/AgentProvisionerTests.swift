@@ -503,13 +503,14 @@ final class AgentProvisionerTests: XCTestCase {
         let settings = CursorAPISettings(port: 8787)
         let windsurfConfig = home.appending(path: "Library/Application Support/Windsurf/User/chatLanguageModels.json")
         try FileManager.default.createDirectory(at: windsurfConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let modelsJSON = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: ComposerModels.all.map(\.id)), encoding: .utf8))
         try """
         [
           {
             "name": "\(CursorAPIBrand.displayName)",
             "provider": "openai-compatible",
             "baseUrl": "\(settings.baseURL.absoluteString)",
-            "models": ["composer-2.5", "composer-2.5-fast"]
+            "models": \(modelsJSON)
           }
         ]
         """.write(to: windsurfConfig, atomically: true, encoding: .utf8)
@@ -534,6 +535,8 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(generatedText.contains("http://127.0.0.1:8787/v1"))
         XCTAssertTrue(generatedText.contains("composer-2.5"))
         XCTAssertTrue(generatedText.contains("composer-2.5-fast"))
+        XCTAssertTrue(generatedText.contains("grok-4.5"))
+        XCTAssertTrue(generatedText.contains("grok-4.5-fast"))
         XCTAssertTrue(generatedText.contains("cursor-local"))
         XCTAssertFalse(generatedText.contains("cursor-api.standardagents.ai"))
         XCTAssertFalse(generatedText.contains("/opencode"))
@@ -557,6 +560,8 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(generatedText.contains("http://127.0.0.1:8787/v1"))
         XCTAssertTrue(generatedText.contains("composer-2.5"))
         XCTAssertTrue(generatedText.contains("composer-2.5-fast"))
+        XCTAssertTrue(generatedText.contains("grok-4.5"))
+        XCTAssertTrue(generatedText.contains("grok-4.5-fast"))
         XCTAssertTrue(generatedText.contains("cursor-local"))
         XCTAssertFalse(generatedText.contains("cursor-api.standardagents.ai"))
         XCTAssertFalse(generatedText.contains("crsr_"))
