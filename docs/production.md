@@ -49,6 +49,12 @@ recycle the owned bridge once: transport-level failures and known
 has been produced. The recycled bridge handles one final attempt. If that also fails, the
 `CursorAPIError`/OpenAI-compatible error is returned unchanged.
 
+The bridge is shared by all local SDK sessions. Recycling it is therefore process-wide:
+shutdown disposes every cached agent and can interrupt unrelated concurrent requests.
+This is an intentional recovery trade-off for the local macOS service so stale or
+poisoned SDK process state is removed completely; interrupted callers receive the normal
+error contract and can retry.
+
 Auth failures, arbitrary upstream errors, and any failure after output has begun are never
 retried at either layer.
 

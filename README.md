@@ -143,7 +143,10 @@ per bridge call. At the Swift app layer, `bridgeTransportAttempts = 2` means a r
 pre-output transport failure, 503, or `cursor_sdk_unavailable` error causes the app to
 recycle the owned bridge exactly once and issue one final bridge request. Auth failures,
 arbitrary upstream errors, and any failure after output has begun are never retried at
-either layer. The public OpenAI-compatible response and error contract is unchanged.
+either layer. Recycling is process-wide: because all local SDK sessions share the owned
+bridge process, a recycle disposes every cached agent and may interrupt other concurrent
+requests. This trade-off favors clearing poisoned local SDK state; affected callers can
+retry through the unchanged public OpenAI-compatible response and error contract.
 
 Release packages prefer a bundled Node runtime for the local SDK bridge and fall
 back to Bun when Node is unavailable.

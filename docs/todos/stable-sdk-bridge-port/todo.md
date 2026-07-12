@@ -79,6 +79,8 @@
 - `swift build --package-path macos/CursorAPI --target CursorAPICore` passed.
 - `swift build --package-path macos/CursorAPI` passed.
 - The initial verifier's temporary no-XCTest harness exercised `CursorSDKBridgeServer.start` with 21 passing assertions. The final verifier repeated the current-diff check with 23 passing assertions, including three invalid-value cases. Both scratch harnesses were removed.
+- Parent integration cherry-picked the fix as `febf69b` on top of lifecycle commit `9d71542`, then built and installed app version `0.1.10` build `14`.
+- Two real installed-app start/quit cycles both selected internal bridge port `8792`; the app and bridge processes exited after each cycle.
 - `git diff --check` passed.
 - Simplification pass found no behavior-preserving reduction that improved clarity enough to justify changing the accepted diff.
 

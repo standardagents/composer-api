@@ -138,6 +138,24 @@ Report root cause, changed files, commands, residual uncertainty, and that a cre
 - Commands that must be fresh: `macos/CursorAPI/Scripts/verify-package.sh`, `codesign --verify --deep --strict`, bundle metadata checks, and installed bridge checksum comparison.
 - Expected evidence: version `0.1.10` build `13`, fixed bridge payload matches the worktree, and no old helper process remains.
 
-- [ ] **Step 1: Stop the installed app and orphan helpers**
-- [ ] **Step 2: Build and verify the development package**
-- [ ] **Step 3: Replace and statically verify the installed app**
+- [x] **Step 1: Stop the installed app and orphan helpers**
+- [x] **Step 2: Build and verify the development package**
+- [x] **Step 3: Replace and statically verify the installed app**
+
+### Task 6: Integrate and install the stable bridge-port fix
+
+**Files and paths:**
+- Lifecycle base: commit `9d71542`
+- Stable bridge port: commit `febf69b`
+- Build: `macos/CursorAPI/dist/API for Cursor.app`
+- Replace: `/Applications/API for Cursor.app`
+
+**Verifier:**
+- Commands that must be fresh: full JS tests, TypeScript typecheck, Swift target and package builds, package verification, installed signature and metadata checks, and two clean app start/quit cycles.
+- Expected evidence: version `0.1.10` build `14`, the installed bridge uses the same internal listening port after a clean restart, and no app or bridge process remains after either shutdown.
+
+- [x] **Step 1: Verify the combined lifecycle and bridge-port branch**
+- [x] **Step 2: Build, package, and verify build 14**
+- [x] **Step 3: Atomically replace and verify the installed app**
+- [x] **Step 4: Prove bridge-port reuse across two clean restarts**
+- [x] **Step 5: Run final security checks and prepare the remaining task-owned changes for commit**

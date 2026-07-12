@@ -34,6 +34,7 @@ Eliminate recurring local Responses API failures caused by stale or incompletely
 - The observed `run.wait()` result with `status=error` and no details is retryable only before any response content has been emitted.
 - `@cursor/sdk` 1.0.13 exposes `Symbol.asyncDispose`; its documented `close()` starts asynchronous disposal without waiting.
 - The bridge runtime is a direct child of the macOS app in packaged operation.
+- Bridge recycling is intentionally process-wide because all local SDK sessions share one owned bridge process. A recycle disposes every cached agent and may interrupt unrelated concurrent requests; complete removal of poisoned bridge state takes precedence, and affected callers retain the existing retryable public error contract.
 - Live behavior still requires an explicitly approved credentialed proof after local verification.
 
 ## Stop conditions
@@ -87,8 +88,8 @@ The bridge did not await SDK executor disposal before agent replacement or proce
 - Full Semgrep fallback: 26 pre-existing findings and exit 1.
 - Semgrep baseline diff scan: 0 findings introduced by this task.
 - OSV was not required because dependency and lockfile surfaces did not change.
-- Three scratch XCTest metadata files remain untracked under `macos/CursorAPI`; deletion was not authorized while the user was unavailable.
-- No live credentialed model call, app restart, or termination of an existing process was performed.
+- Three tracked scratch XCTest metadata files under `macos/CursorAPI` were removed during the authorized closure follow-up.
+- No live credentialed model call was performed during the initial implementation verification.
 
 ## Authorized local installation follow-up
 
@@ -98,6 +99,39 @@ On 2026-07-12 the user explicitly authorized terminating the installed app and i
 - Non-goal: no credentialed model request, release signing, notarization, publication, or remote update.
 - Acceptance: old helper PIDs are gone; the package verifier passes; the replacement keeps bundle id `ai.standardagents.cursorapi`, uses version `0.1.10` build `13`, contains the fixed bridge script and rebuilt Swift executable, and passes static code-signature verification.
 - Boundary: do not launch the replacement or make a live API request unless separately requested.
+
+### 2026-07-12 Task 5 execution evidence
+
+- Process pre-check (before replacement): `python3` scan over `ps -axo pid,ppid,command` for `/Applications/API for Cursor.app` returned `matching_processes=none`; no termination was needed.
+- Build command: `TMPDIR="$PWD/macos/CursorAPI/.build/tmp" CURSOR_API_APP_VERSION=0.1.10 CURSOR_API_APP_BUILD=13 macos/CursorAPI/Scripts/package-app.sh --development` → pass, produced `macos/CursorAPI/dist/API for Cursor.app`.
+- Explicit package verifier: `TMPDIR="$PWD/macos/CursorAPI/.build/tmp" macos/CursorAPI/Scripts/verify-package.sh "macos/CursorAPI/dist/API for Cursor.app"` → pass.
+- Dist metadata and signature: `CFBundleDisplayName=API for Cursor`, `CFBundleIdentifier=ai.standardagents.cursorapi`, `CFBundleShortVersionString=0.1.10`, `CFBundleVersion=13`; `codesign --verify --deep --strict` passed.
+- Bridge payload integrity: `shasum -a 256` for `scripts/cursor-sdk-local-agent-bridge.mjs`, dist payload, and installed payload all matched: `b4c49350aba20a2ead1afae38bf660377dd36263297d29b47d224822e14cb033`.
+- Swift executable evidence: `macos/CursorAPI/dist/API for Cursor.app/Contents/MacOS/API for Cursor` exists and is executable (`size=2571216`, `mtime=2026-07-12T12:10:44+0200`), newer than the prior installed executable (`size=2504144`, `mtime=2026-07-09T19:36:25+0200`).
+- Atomic-style replacement: staged copy at `/Applications/API for Cursor.app.__stage_task5_20260712` verified (metadata/signature/checksum), current app moved to rollback sibling `/Applications/API for Cursor.app.__rollback_task5_20260712`, staged app promoted to `/Applications/API for Cursor.app`, installed app re-verified, then rollback sibling removed.
+- Installed verification after promotion: bundle id `ai.standardagents.cursorapi`, version `0.1.10`, build `13`, `codesign --verify --deep --strict` pass, executable present/executable, and post-install process scan returned `post_install_matching_processes=none`.
+- Boundary kept: no app launch and no live API/model request were performed.
+
+### 2026-07-12 closure follow-up
+
+- The installed build launched successfully and reported `ready` on its localhost health endpoint with the saved key unlocked and one SDK bridge child.
+- A live streaming `/v1/responses` request using `composer-2.5` returned `response.created`, `response.in_progress`, output events, `response.completed`, and the expected `LIVE_OK` text.
+- The same request using `composer-2.5-fast` reproducibly returned `response.created`, `response.in_progress`, then `upstream_error` without output.
+- Bridge logs confirmed all four Node SDK-run attempts and one Swift bridge recycle to a fresh bridge before the final fast-model failure. This proves the lifecycle recovery path executes, but does not make the upstream fast variant succeed.
+- Changing `composer-2.5-fast` to fall back to the non-fast variant would alter externally visible model behavior and requires an explicit product decision.
+- The three unintended tracked `xctest-shim` compiler metadata files were removed.
+
+### 2026-07-12 combined lifecycle and stable-port installation
+
+- The stable bridge-port fix was integrated on top of the lifecycle fix: `9d71542` followed by `febf69b`.
+- Combined verification passed: 236/236 JavaScript tests, TypeScript typecheck, `swift build --package-path macos/CursorAPI --target CursorAPICore`, and `swift build --package-path macos/CursorAPI`.
+- Build command: `TMPDIR="$PWD/macos/CursorAPI/.build/tmp" CURSOR_API_APP_VERSION=0.1.10 CURSOR_API_APP_BUILD=14 macos/CursorAPI/Scripts/package-app.sh --development` passed.
+- The package verifier and `codesign --verify --deep --strict` passed; the packaged bridge script matched the worktree checksum `b4c49350aba20a2ead1afae38bf660377dd36263297d29b47d224822e14cb033`.
+- `/Applications/API for Cursor.app` was replaced using a verified staged copy and rollback sibling, then re-verified as version `0.1.10` build `14`.
+- Real restart proof passed: the first clean start used app PID `49390`, bridge PID `49561`, and internal port `8792`; the second used app PID `49695`, bridge PID `49735`, and the same internal port `8792`.
+- Both app exits were requested through the bundle identifier, and both the app and bridge processes exited after each run. No credentialed model request was made during the build 14 restart check.
+- Final combined review found no Critical issue. Its one Important concurrency observation was accepted and documented explicitly: bridge recycling is process-wide and can interrupt unrelated concurrent requests because all SDK sessions share the owned bridge process. The focused follow-up review returned `ACCEPT`.
+- Final Semgrep scanning of all seven changed JavaScript and Swift code/test files reported three blocking findings. All three are unchanged `main` findings at the JSON pointer/schema validation code (`d67dbf54` and `bb0515eb`); none was introduced by this task.
 
 ## Subagent ledger
 
