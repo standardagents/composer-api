@@ -8,6 +8,25 @@ struct CursorSDKBridgeEndpoint: Sendable {
     var token: String
 }
 
+struct CursorSDKBridgeServerDependencies: Sendable {
+    var portIsOpen: (@Sendable (UInt16) async -> Bool)?
+    var launch: (@Sendable (URL, UInt16, CursorAPISettings) throws -> Void)?
+    var healthCheck: (@Sendable (URL) async -> Bool)?
+    var sleep: (@Sendable () async throws -> Void)?
+
+    init(
+        portIsOpen: (@Sendable (UInt16) async -> Bool)? = nil,
+        launch: (@Sendable (URL, UInt16, CursorAPISettings) throws -> Void)? = nil,
+        healthCheck: (@Sendable (URL) async -> Bool)? = nil,
+        sleep: (@Sendable () async throws -> Void)? = nil
+    ) {
+        self.portIsOpen = portIsOpen
+        self.launch = launch
+        self.healthCheck = healthCheck
+        self.sleep = sleep
+    }
+}
+
 actor CursorSDKBridgeServer {
     static let shared = CursorSDKBridgeServer()
     static let bridgeShutdownTimeoutMilliseconds = 15_000
@@ -20,6 +39,16 @@ actor CursorSDKBridgeServer {
     private var isStopping = false
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    private let portPreference: CursorSDKBridgePortPreference
+    private let dependencies: CursorSDKBridgeServerDependencies
+
+    init(
+        portPreference: CursorSDKBridgePortPreference = CursorSDKBridgePortPreference(),
+        dependencies: CursorSDKBridgeServerDependencies = CursorSDKBridgeServerDependencies()
+    ) {
+        self.portPreference = portPreference
+        self.dependencies = dependencies
+    }
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
         await waitForInFlightStop()
@@ -41,20 +70,41 @@ actor CursorSDKBridgeServer {
         return endpoint
     }
 
-    private func start(script: URL, settings: CursorAPISettings) async throws -> UInt16 {
+    func start(script: URL, settings: CursorAPISettings) async throws -> UInt16 {
         var lastError: (any Error)?
-        for port in 8792...8892 {
-            guard let candidate = UInt16(exactly: port), await !tcpPortIsOpen(candidate) else {
+        for candidate in portPreference.candidatePorts() {
+            let isOpen: Bool
+            if let portIsOpen = dependencies.portIsOpen {
+                isOpen = await portIsOpen(candidate)
+            } else {
+                isOpen = await tcpPortIsOpen(candidate)
+            }
+            guard !isOpen else {
                 continue
             }
             do {
-                try launch(script: script, port: candidate, settings: settings)
+                if let launch = dependencies.launch {
+                    try launch(script, candidate, settings)
+                } else {
+                    try launch(script: script, port: candidate, settings: settings)
+                }
                 let health = URL(string: "http://127.0.0.1:\(candidate)/health")!
                 for _ in 0..<40 {
-                    if await isHealthy(health) {
+                    let healthy: Bool
+                    if let healthCheck = dependencies.healthCheck {
+                        healthy = await healthCheck(health)
+                    } else {
+                        healthy = await isHealthy(health)
+                    }
+                    if healthy {
+                        portPreference.recordSuccessfulPort(candidate)
                         return candidate
                     }
-                    try await Task.sleep(nanoseconds: 50_000_000)
+                    if let sleep = dependencies.sleep {
+                        try await sleep()
+                    } else {
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                    }
                 }
                 await stop()
                 lastError = CursorAPIError.transport("Cursor SDK bridge did not become ready.")
