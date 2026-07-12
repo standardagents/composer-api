@@ -130,6 +130,9 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             case .transport:
                 return true
             case .upstream:
+                if normalizedCode == "bridge_shutting_down" {
+                    return false
+                }
                 return status == 503 || normalizedCode == "cursor_sdk_unavailable"
             case .unauthorized:
                 return false

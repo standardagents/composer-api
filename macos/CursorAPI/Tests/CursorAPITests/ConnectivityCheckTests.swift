@@ -195,6 +195,53 @@ final class ConnectivityCheckTests: XCTestCase {
         XCTAssertEqual(snapshot.delayCount, 0)
     }
 
+    func testBridgeRecoveryShutdownErrorDoesNotRecycleOrRetry() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        do {
+            _ = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+                operation: { attempt in
+                    await probe.recordAttempt(attempt)
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .upstream("Bridge is shutting down"),
+                        status: 503,
+                        code: "bridge_shutting_down",
+                        emittedOutput: false
+                    )
+                },
+                recycle: {
+                    await probe.recordRecycle()
+                },
+                delay: {
+                    await probe.recordDelay()
+                }
+            )
+            XCTFail("Expected bridge shutdown error.")
+        } catch {
+            XCTAssertEqual(error as? CursorAPIError, .upstream("Bridge is shutting down"))
+        }
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1])
+        XCTAssertEqual(snapshot.recycleCount, 0)
+        XCTAssertEqual(snapshot.delayCount, 0)
+    }
+
+    func testBridgeServerRefusesEndpointAfterShutdown() async throws {
+        let settings = CursorAPISettings(cursorAPIKey: "crsr_test")
+
+        await CursorSDKBridgeServer.shared.shutdown()
+
+        do {
+            _ = try await CursorSDKBridgeServer.shared.endpoint(settings: settings)
+            XCTFail("Expected shutdown to block bridge launch.")
+        } catch let error as CursorAPIError {
+            XCTAssertEqual(error, .transport("Cursor SDK bridge is shutting down."))
+        }
+
+        await CursorSDKBridgeServer.shared.resetShutdownStateForTesting()
+    }
+
     func testBridgeRecoveryNonRetryableUpstreamDoesNotRecycleOrRetry() async throws {
         let probe = BridgeRecoveryProbe()
 

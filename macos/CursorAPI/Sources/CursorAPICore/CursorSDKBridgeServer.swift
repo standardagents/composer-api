@@ -37,6 +37,7 @@ actor CursorSDKBridgeServer {
     private var endpoint: CursorSDKBridgeEndpoint?
     private var logHandle: FileHandle?
     private var isStopping = false
+    private var shutdownRequested = false
     private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
     private let portPreference: CursorSDKBridgePortPreference
@@ -52,8 +53,8 @@ actor CursorSDKBridgeServer {
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
         await waitForInFlightStop()
-        if let endpoint, process?.isRunning == true {
-            return endpoint
+        if shutdownRequested {
+            throw CursorAPIError.transport("Cursor SDK bridge is shutting down.")
         }
         if let endpoint, await isHealthy(endpoint.healthURL) {
             return endpoint
@@ -179,11 +180,16 @@ actor CursorSDKBridgeServer {
     }
 
     func shutdown() async {
+        shutdownRequested = true
         await stop()
     }
 
     func recycle() async {
         await stop()
+    }
+
+    func resetShutdownStateForTesting() {
+        shutdownRequested = false
     }
 
     static func waitForExitPolling(
