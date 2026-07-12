@@ -123,8 +123,27 @@ Run the optional SDK local-agent bridge in a local Bun or Node environment:
 npm run sdk:opencode-bridge
 ```
 
-The bridge process also accepts `CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS`; the default is
-`180000`.
+The bridge process also accepts optional runtime knobs; defaults shown:
+
+```bash
+CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS=180000              # per-request run timeout (packaged app overrides to 120000)
+CURSOR_SDK_BRIDGE_MAX_RUN_RETRIES=3                  # SDK-run retries per bridge call (4 total attempts)
+CURSOR_SDK_BRIDGE_SHUTDOWN_TIMEOUT_MS=15000          # Node drain bound during shutdown
+CURSOR_SDK_BRIDGE_PARENT_LOSS_POLL_INTERVAL_MS=1000  # parent-PID watchdog cadence (packaged app)
+```
+
+In the packaged macOS app the bridge runs as a child process owned by the app. The bridge
+follows parent lifetime: it stops accepting new requests when the app begins shutdown, then
+awaits in-flight SDK agent asynchronous disposal before exiting.
+
+Two retry layers apply. Inside the bridge, `maxRunRetries` (default 3) controls SDK-run
+retries: `attempt` starts at 0 and increments after each retryable SDK-run error that
+occurs before any event is emitted, allowing up to 3 retries (4 total SDK-run attempts)
+per bridge call. At the Swift app layer, `bridgeTransportAttempts = 2` means a retryable
+pre-output transport failure, 503, or `cursor_sdk_unavailable` error causes the app to
+recycle the owned bridge exactly once and issue one final bridge request. Auth failures,
+arbitrary upstream errors, and any failure after output has begun are never retried at
+either layer. The public OpenAI-compatible response and error contract is unchanged.
 
 Release packages prefer a bundled Node runtime for the local SDK bridge and fall
 back to Bun when Node is unavailable.

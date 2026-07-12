@@ -10,20 +10,26 @@ struct CursorSDKBridgeEndpoint: Sendable {
 
 actor CursorSDKBridgeServer {
     static let shared = CursorSDKBridgeServer()
+    static let bridgeShutdownTimeoutMilliseconds = 15_000
+    static let forceTerminationExtraGraceMilliseconds = 1_000
+    static let forceTerminationGraceMilliseconds = bridgeShutdownTimeoutMilliseconds + forceTerminationExtraGraceMilliseconds
 
     private var process: Process?
     private var endpoint: CursorSDKBridgeEndpoint?
     private var logHandle: FileHandle?
+    private var isStopping = false
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
+        await waitForInFlightStop()
         if let endpoint, process?.isRunning == true {
             return endpoint
         }
         if let endpoint, await isHealthy(endpoint.healthURL) {
             return endpoint
         }
-        stop()
+        await stop()
         let script = try bridgeScriptURL()
         let port = try await start(script: script, settings: settings)
         let endpoint = CursorSDKBridgeEndpoint(
@@ -50,10 +56,10 @@ actor CursorSDKBridgeServer {
                     }
                     try await Task.sleep(nanoseconds: 50_000_000)
                 }
-                stop()
+                await stop()
                 lastError = CursorAPIError.transport("Cursor SDK bridge did not become ready.")
             } catch {
-                stop()
+                await stop()
                 lastError = error
             }
         }
@@ -70,6 +76,7 @@ actor CursorSDKBridgeServer {
         environment["CURSOR_SDK_BRIDGE_PORT"] = String(port)
         environment["CURSOR_SDK_BRIDGE_TOKEN"] = token
         environment["CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS"] = "120000"
+        environment["CURSOR_SDK_BRIDGE_SHUTDOWN_TIMEOUT_MS"] = String(Self.bridgeShutdownTimeoutMilliseconds)
         process.environment = environment
         process.currentDirectoryURL = script.deletingLastPathComponent()
         let logHandle = try bridgeLogHandle()
@@ -121,27 +128,84 @@ actor CursorSDKBridgeServer {
         return URL(fileURLWithPath: path)
     }
 
-    func shutdown() {
-        stop()
+    func shutdown() async {
+        await stop()
     }
 
-    private func stop() {
+    func recycle() async {
+        await stop()
+    }
+
+    static func waitForExitPolling(
+        timeoutNanoseconds: UInt64,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        isRunning: () -> Bool,
+        sleep: (_ durationNanoseconds: UInt64) async -> Void
+    ) async -> Bool {
+        let pollInterval = max(1, pollIntervalNanoseconds)
+        var elapsed: UInt64 = 0
+        while isRunning() {
+            guard elapsed < timeoutNanoseconds else {
+                return false
+            }
+            let remaining = timeoutNanoseconds - elapsed
+            let delay = min(pollInterval, remaining)
+            await sleep(delay)
+            elapsed += delay
+        }
+        return true
+    }
+
+    private func stop() async {
+        if isStopping {
+            await waitForInFlightStop()
+            return
+        }
+        isStopping = true
         let process = self.process
+        let logHandle = self.logHandle
         self.process = nil
-        endpoint = nil
+        self.endpoint = nil
+        self.logHandle = nil
+        defer { finishStop() }
+
         if let process, process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(1)
-            while process.isRunning, Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-            if process.isRunning {
+            let timeoutNanoseconds = UInt64(Self.forceTerminationGraceMilliseconds) * 1_000_000
+            let exited = await Self.waitForExitPolling(
+                timeoutNanoseconds: timeoutNanoseconds,
+                isRunning: { process.isRunning },
+                sleep: Self.cooperativeSleep
+            )
+            if !exited && process.isRunning {
                 Darwin.kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
             }
         }
+
         try? logHandle?.close()
-        logHandle = nil
+    }
+
+    private func waitForInFlightStop() async {
+        guard isStopping else { return }
+        await withCheckedContinuation { continuation in
+            stopWaiters.append(continuation)
+        }
+    }
+
+    private func finishStop() {
+        isStopping = false
+        let waiters = stopWaiters
+        stopWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private static func cooperativeSleep(_ durationNanoseconds: UInt64) async {
+        do {
+            try await Task.sleep(nanoseconds: durationNanoseconds)
+        } catch {}
     }
 
     private func bridgeLogHandle() throws -> FileHandle {

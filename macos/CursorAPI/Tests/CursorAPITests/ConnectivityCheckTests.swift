@@ -1,4 +1,5 @@
 @testable import CursorAPICore
+import Foundation
 import XCTest
 
 final class ConnectivityCheckTests: XCTestCase {
@@ -98,6 +99,240 @@ final class ConnectivityCheckTests: XCTestCase {
             .unauthorized
         )
     }
+
+    func testBridgeRecoveryRetriesAndRecyclesForRetryablePreOutputFailure() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        let value = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+            operation: { attempt in
+                await probe.recordAttempt(attempt)
+                if attempt == 1 {
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .upstream("stale bridge"),
+                        status: nil,
+                        code: "  CURSOR_SDK_UNAVAILABLE ",
+                        emittedOutput: false
+                    )
+                }
+                return "ok"
+            },
+            recycle: {
+                await probe.recordRecycle()
+            },
+            delay: {
+                await probe.recordDelay()
+            }
+        )
+
+        XCTAssertEqual(value, "ok")
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1, 2])
+        XCTAssertEqual(snapshot.recycleCount, 1)
+        XCTAssertEqual(snapshot.delayCount, 1)
+    }
+
+    func testBridgeRecoveryDoesNotRetryAfterOutputEmission() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        do {
+            _ = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+                operation: { attempt in
+                    await probe.recordAttempt(attempt)
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .upstream("stream failed after output"),
+                        status: 503,
+                        code: "cursor_sdk_unavailable",
+                        emittedOutput: true
+                    )
+                },
+                recycle: {
+                    await probe.recordRecycle()
+                },
+                delay: {
+                    await probe.recordDelay()
+                }
+            )
+            XCTFail("Expected bridge recovery to fail after emitted output.")
+        } catch {
+            XCTAssertEqual(error as? CursorAPIError, .upstream("stream failed after output"))
+        }
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1])
+        XCTAssertEqual(snapshot.recycleCount, 0)
+        XCTAssertEqual(snapshot.delayCount, 0)
+    }
+
+    func testBridgeRecoveryUnauthorizedDoesNotRecycleOrRetry() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        do {
+            _ = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+                operation: { attempt in
+                    await probe.recordAttempt(attempt)
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .unauthorized,
+                        status: 401,
+                        code: "unauthorized",
+                        emittedOutput: false
+                    )
+                },
+                recycle: {
+                    await probe.recordRecycle()
+                },
+                delay: {
+                    await probe.recordDelay()
+                }
+            )
+            XCTFail("Expected unauthorized bridge error.")
+        } catch {
+            XCTAssertEqual(error as? CursorAPIError, .unauthorized)
+        }
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1])
+        XCTAssertEqual(snapshot.recycleCount, 0)
+        XCTAssertEqual(snapshot.delayCount, 0)
+    }
+
+    func testBridgeRecoveryNonRetryableUpstreamDoesNotRecycleOrRetry() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        do {
+            _ = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+                operation: { attempt in
+                    await probe.recordAttempt(attempt)
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .upstream("internal failure"),
+                        status: 500,
+                        code: "internal",
+                        emittedOutput: false
+                    )
+                },
+                recycle: {
+                    await probe.recordRecycle()
+                },
+                delay: {
+                    await probe.recordDelay()
+                }
+            )
+            XCTFail("Expected non-retryable upstream bridge error.")
+        } catch {
+            XCTAssertEqual(error as? CursorAPIError, .upstream("internal failure"))
+        }
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1])
+        XCTAssertEqual(snapshot.recycleCount, 0)
+        XCTAssertEqual(snapshot.delayCount, 0)
+    }
+
+    func testBridgeRecoveryTwoRetryableFailuresRecyclesOnceAndPreservesFinalUpstream() async throws {
+        let probe = BridgeRecoveryProbe()
+
+        do {
+            _ = try await LocalCursorSDKHarness.executeBridgeRecoveryRetry(
+                operation: { attempt in
+                    await probe.recordAttempt(attempt)
+                    throw LocalCursorSDKHarness.BridgeRecoveryError(
+                        outwardError: .upstream("retryable failure \(attempt)"),
+                        status: 503,
+                        code: nil,
+                        emittedOutput: false
+                    )
+                },
+                recycle: {
+                    await probe.recordRecycle()
+                },
+                delay: {
+                    await probe.recordDelay()
+                }
+            )
+            XCTFail("Expected retryable bridge recovery to fail after final attempt.")
+        } catch {
+            XCTAssertEqual(error as? CursorAPIError, .upstream("retryable failure 2"))
+        }
+
+        let snapshot = await probe.snapshot()
+        XCTAssertEqual(snapshot.attempts, [1, 2])
+        XCTAssertEqual(snapshot.recycleCount, 1)
+        XCTAssertEqual(snapshot.delayCount, 1)
+    }
+
+    func testBridgeStopWaitForExitPollingSleepsUntilProcessStops() async {
+        var runningStates = [true, true, false]
+        var sleepDurations: [UInt64] = []
+
+        let stopped = await CursorSDKBridgeServer.waitForExitPolling(
+            timeoutNanoseconds: 1_000,
+            pollIntervalNanoseconds: 100,
+            isRunning: {
+                guard !runningStates.isEmpty else { return false }
+                return runningStates.removeFirst()
+            },
+            sleep: { duration in
+                sleepDurations.append(duration)
+            }
+        )
+
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(sleepDurations, [100, 100])
+    }
+
+    func testBridgeStopWaitForExitPollingTimesOutWhenProcessKeepsRunning() async {
+        var sleepDurations: [UInt64] = []
+
+        let stopped = await CursorSDKBridgeServer.waitForExitPolling(
+            timeoutNanoseconds: 250,
+            pollIntervalNanoseconds: 100,
+            isRunning: { true },
+            sleep: { duration in
+                sleepDurations.append(duration)
+            }
+        )
+
+        XCTAssertFalse(stopped)
+        XCTAssertEqual(sleepDurations, [100, 100, 50])
+    }
+
+    func testBridgeStreamReadFailureMapsURLErrorToRetryableTransport() {
+        let source = URLError(.networkConnectionLost)
+
+        let mapped = LocalCursorSDKHarness.bridgeStreamReadFailure(from: source)
+
+        let failure = mapped as? LocalCursorSDKHarness.BridgeRecoveryError
+        XCTAssertEqual(
+            failure?.outwardError,
+            .transport("Cursor SDK bridge stream failed: \(source.localizedDescription)")
+        )
+        XCTAssertTrue(failure?.isRetryableBeforeOutput == true)
+    }
+
+    func testBridgeStreamReadFailurePreservesWrappedBridgeRecoveryError() {
+        let wrapped = LocalCursorSDKHarness.BridgeRecoveryError(
+            outwardError: .upstream("already wrapped"),
+            status: 503,
+            code: "cursor_sdk_unavailable",
+            emittedOutput: true
+        )
+
+        let mapped = LocalCursorSDKHarness.bridgeStreamReadFailure(from: wrapped)
+
+        XCTAssertEqual(mapped as? LocalCursorSDKHarness.BridgeRecoveryError, wrapped)
+    }
+
+    func testBridgeStreamReadFailurePreservesCancellation() {
+        let mapped = LocalCursorSDKHarness.bridgeStreamReadFailure(from: CancellationError())
+
+        XCTAssertTrue(mapped is CancellationError)
+    }
+
+    func testBridgeForceTerminationGraceExceedsNodeShutdownTimeout() {
+        XCTAssertGreaterThan(
+            CursorSDKBridgeServer.forceTerminationGraceMilliseconds,
+            CursorSDKBridgeServer.bridgeShutdownTimeoutMilliseconds
+        )
+    }
 }
 
 private actor ConnectivityRecorder {
@@ -124,5 +359,27 @@ private struct ConnectivityHarness: CursorSDKHarness {
                 continuation.finish()
             }
         }
+    }
+}
+
+private actor BridgeRecoveryProbe {
+    private var attempts: [Int] = []
+    private var recycleCount = 0
+    private var delayCount = 0
+
+    func recordAttempt(_ attempt: Int) {
+        attempts.append(attempt)
+    }
+
+    func recordRecycle() {
+        recycleCount += 1
+    }
+
+    func recordDelay() {
+        delayCount += 1
+    }
+
+    func snapshot() -> (attempts: [Int], recycleCount: Int, delayCount: Int) {
+        (attempts, recycleCount, delayCount)
     }
 }

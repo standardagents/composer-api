@@ -21,6 +21,8 @@ const maxAgents = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS, 128);
 const runTimeoutMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS, 180 * 1000);
 const maxRunRetries = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_RUN_RETRIES, 3);
 const retryBaseDelayMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_RETRY_BASE_DELAY_MS, 500);
+const bridgeShutdownTimeoutMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_SHUTDOWN_TIMEOUT_MS, 15 * 1000);
+const parentLossPollIntervalMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_PARENT_LOSS_POLL_INTERVAL_MS, 1000);
 const defaultCwd = process.env.CURSOR_SDK_WORKING_DIRECTORY || process.cwd();
 const clientMcpServerName = "client";
 const clientMcpServerMode = "--client-mcp-server";
@@ -30,7 +32,14 @@ const agentCache = new Map();
 const agentRunQueues = new Map();
 const activeClientToolCaptures = new Map();
 const forceNextRunAgentKeys = new Set();
+const pendingAgentDisposals = new Map();
+const pendingAgentCreations = new Set();
+const agentDisposals = new WeakMap();
+const initialParentPid = process.ppid;
 let server = null;
+let parentLossWatchdog = null;
+let isShuttingDown = false;
+let closeAndExitPromise = null;
 
 if (isMainModule()) {
   installBridgeProcessHandlers();
@@ -38,15 +47,23 @@ if (isMainModule()) {
     await runClientForwardingMcpServerFromEnvironment();
   } else {
     startServer();
-    process.on("SIGINT", () => closeAndExit(0));
-    process.on("SIGTERM", () => closeAndExit(0));
+    parentLossWatchdog = startParentLossWatchdog({
+      initialParentPid,
+      intervalMs: parentLossPollIntervalMs,
+      onParentLost: () => requestBridgeShutdown(0)
+    });
   }
 }
 
 export {
   bridgePrompt,
+  closeAndExit,
+  cleanupBridgeResources,
   clientMcpToolDefinitions,
   clientForwardingMcpServerSource,
+  evictAgent,
+  evictCachedAgent,
+  getAgent,
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
@@ -56,6 +73,7 @@ export {
   openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  startParentLossWatchdog,
   statusFromError,
   startServer,
   validateClientMcpToolCall,
@@ -76,6 +94,10 @@ function startServer() {
 }
 
 async function handleRequest(request, response) {
+  if (isShuttingDown) {
+    writeJson(response, openAiError(bridgeShuttingDownError()), 503);
+    return;
+  }
   const url = new URL(request.url || "/", `http://${request.headers.host || `${host}:${port}`}`);
 
   if (request.method === "GET" && url.pathname === "/health") {
@@ -216,7 +238,7 @@ async function runLocalAgentUnlocked(input, onEvent) {
       const shouldRetry = attempt < maxRunRetries && !emittedEvent && isRetryableSDKRunError(error);
       if (!shouldRetry) throw error;
       if (activeRun) activeRun.cancel().catch(() => {});
-      evictCachedAgent(input);
+      await evictCachedAgent(input);
       console.warn(`Retrying Cursor SDK run after retryable upstream error (${attempt + 1}/${maxRunRetries}).`);
       await sleep(retryDelayMs(attempt));
     } finally {
@@ -335,7 +357,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
 
   const result = await run.wait();
   if (result.status === "error") {
-    if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
+    if (agentEntry) await evictAgent(agentEntry.cacheKey, agentEntry.agent);
     throw sdkRunFailureError(result);
   }
   if (!text && typeof result.result === "string") text = result.result;
@@ -350,33 +372,88 @@ async function runLocalAgentBody(input, onRun, onEvent) {
 
 async function getAgent(input) {
   const cacheKey = agentCacheKey(input);
+  await waitForPendingAgentDisposal(cacheKey);
   const cached = agentCache.get(cacheKey);
   if (cached) {
     cached.touchedAt = Date.now();
     return { agent: cached.agent, cacheKey, cached: true };
   }
 
-  const agent = await Agent.create(localAgentCreateOptions(input));
-  agentCache.set(cacheKey, { agent, touchedAt: Date.now() });
-  evictAgents();
-  return { agent, cacheKey, cached: false };
+  if (isShuttingDown) throw bridgeShuttingDownError();
+
+  const creation = (async () => {
+    const agent = await Agent.create(localAgentCreateOptions(input));
+    agentCache.set(cacheKey, { agent, touchedAt: Date.now() });
+    await evictAgents();
+    return { agent, cacheKey, cached: false };
+  })();
+  pendingAgentCreations.add(creation);
+  try {
+    return await creation;
+  } finally {
+    pendingAgentCreations.delete(creation);
+  }
 }
 
-function evictAgent(cacheKey, agent) {
+async function evictAgent(cacheKey, agent) {
   const cached = agentCache.get(cacheKey);
   if (cached?.agent === agent) {
     agentCache.delete(cacheKey);
   }
   forceNextRunAgentKeys.delete(cacheKey);
-  try {
-    agent.close();
-  } catch {}
+  await scheduleAgentDisposal(cacheKey, () => disposeAgent(agent));
 }
 
-function evictCachedAgent(input) {
+async function evictCachedAgent(input) {
   const cacheKey = agentCacheKey(input);
   const cached = agentCache.get(cacheKey);
-  if (cached) evictAgent(cacheKey, cached.agent);
+  if (cached) {
+    await evictAgent(cacheKey, cached.agent);
+    return;
+  }
+  await waitForPendingAgentDisposal(cacheKey);
+}
+
+function scheduleAgentDisposal(cacheKey, disposalWork) {
+  const previous = pendingAgentDisposals.get(cacheKey) ?? Promise.resolve();
+  const scheduled = previous
+    .catch(() => {})
+    .then(() => disposalWork())
+    .catch(() => {})
+    .finally(() => {
+      if (pendingAgentDisposals.get(cacheKey) === scheduled) {
+        pendingAgentDisposals.delete(cacheKey);
+      }
+    });
+  pendingAgentDisposals.set(cacheKey, scheduled);
+  return scheduled;
+}
+
+async function waitForPendingAgentDisposal(cacheKey) {
+  const pending = pendingAgentDisposals.get(cacheKey);
+  if (pending) await pending.catch(() => {});
+}
+
+async function disposeAgent(agent) {
+  if (!agent || (typeof agent !== "object" && typeof agent !== "function")) return;
+  const existing = agentDisposals.get(agent);
+  if (existing) {
+    await existing;
+    return;
+  }
+
+  const disposal = (async () => {
+    if (typeof agent[Symbol.asyncDispose] === "function") {
+      await agent[Symbol.asyncDispose]();
+      return;
+    }
+    if (typeof agent.close === "function") {
+      await agent.close();
+    }
+  })().catch(() => {});
+
+  agentDisposals.set(agent, disposal);
+  await disposal;
 }
 
 function registerActiveClientToolCapture(cacheKey, handler) {
@@ -1984,15 +2061,14 @@ function agentCacheKey(input) {
   return digest;
 }
 
-function evictAgents() {
+async function evictAgents() {
   while (agentCache.size > maxAgents) {
     const oldest = [...agentCache.entries()].sort((a, b) => a[1].touchedAt - b[1].touchedAt)[0];
     if (!oldest) return;
-    agentCache.delete(oldest[0]);
-    forceNextRunAgentKeys.delete(oldest[0]);
-    try {
-      oldest[1].agent.close();
-    } catch {}
+    const [cacheKey, { agent }] = oldest;
+    agentCache.delete(cacheKey);
+    forceNextRunAgentKeys.delete(cacheKey);
+    scheduleAgentDisposal(cacheKey, () => disposeAgent(agent));
   }
 }
 
@@ -2089,6 +2165,8 @@ function writeNdjson(response, body) {
 }
 
 function installBridgeProcessHandlers() {
+  process.on("SIGINT", () => requestBridgeShutdown(0));
+  process.on("SIGTERM", () => requestBridgeShutdown(0));
   process.on("unhandledRejection", (reason) => {
     if (isBenignCancellationError(reason) || isBenignPipeError(reason)) return;
     if (isRetryableSDKRunError(reason)) {
@@ -2096,7 +2174,7 @@ function installBridgeProcessHandlers() {
       return;
     }
     console.error(reason);
-    closeAndExit(1);
+    requestBridgeShutdown(1);
   });
   process.on("uncaughtException", (error) => {
     if (isBenignCancellationError(error) || isBenignPipeError(error)) return;
@@ -2105,7 +2183,51 @@ function installBridgeProcessHandlers() {
       return;
     }
     console.error(error);
-    closeAndExit(1);
+    requestBridgeShutdown(1);
+  });
+}
+
+function startParentLossWatchdog({
+  initialParentPid: parentPid = process.ppid,
+  getParentPid = () => process.ppid,
+  onParentLost = () => requestBridgeShutdown(0),
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+  intervalMs = parentLossPollIntervalMs
+} = {}) {
+  if (!(Number.isFinite(parentPid) && parentPid > 1)) {
+    return { stop() {}, active: false, initialParentPid: parentPid };
+  }
+
+  let stopped = false;
+  let shutdownRequested = false;
+  let timer = null;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer) clearIntervalFn(timer);
+  };
+
+  timer = setIntervalFn(() => {
+    if (stopped || shutdownRequested) return;
+    const observedParentPid = Number(getParentPid());
+    if (!Number.isFinite(observedParentPid) || observedParentPid <= 0) return;
+    if (observedParentPid === parentPid) return;
+    shutdownRequested = true;
+    stop();
+    onParentLost();
+  }, intervalMs);
+  if (timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+
+  return { stop, active: true, initialParentPid: parentPid };
+}
+
+function requestBridgeShutdown(code) {
+  closeAndExit(code).catch((error) => {
+    console.error(error);
+    process.exit(code);
   });
 }
 
@@ -2329,13 +2451,116 @@ function loadEnvFile(filePath) {
 }
 
 async function closeAndExit(code) {
-  for (const entry of agentCache.values()) {
-    try {
-      entry.agent.close();
-    } catch {}
+  if (closeAndExitPromise) return closeAndExitPromise;
+
+  const exitCode = Number.isInteger(code) ? code : 0;
+  isShuttingDown = true;
+  if (parentLossWatchdog) {
+    parentLossWatchdog.stop();
+    parentLossWatchdog = null;
   }
-  server?.close(() => process.exit(code));
-  setTimeout(() => process.exit(code), 500).unref();
+
+  const forceExitTimer = setTimeout(() => process.exit(exitCode), bridgeShutdownTimeoutMs);
+  if (forceExitTimer && typeof forceExitTimer.unref === "function") {
+    forceExitTimer.unref();
+  }
+
+  closeAndExitPromise = (async () => {
+    try {
+      await cleanupBridgeResources({
+        closeServer: (onClose) => {
+          const activeServer = server;
+          server = null;
+          if (!activeServer) {
+            if (typeof onClose === "function") onClose();
+            return;
+          }
+          activeServer.close(() => {
+            if (typeof onClose === "function") onClose();
+          });
+          if (typeof activeServer.closeIdleConnections === "function") {
+            activeServer.closeIdleConnections();
+          }
+        }
+      });
+    } catch (error) {
+      console.error(error);
+    } finally {
+      clearTimeout(forceExitTimer);
+    }
+
+    process.exit(exitCode);
+  })();
+
+  return closeAndExitPromise;
+}
+
+async function cleanupBridgeResources({ agentEntries, closeServer } = {}) {
+  const serverClosePromise = closeServerWithPromise(closeServer);
+  forceNextRunAgentKeys.clear();
+  activeClientToolCaptures.clear();
+  agentRunQueues.clear();
+  await waitForPendingAgentCreations();
+
+  if (agentEntries !== undefined) {
+    agentCache.clear();
+    await disposeAgentEntries(agentEntries);
+  } else {
+    while (true) {
+      const entries = [...agentCache.values()];
+      if (entries.length === 0) break;
+      agentCache.clear();
+      await disposeAgentEntries(entries);
+      await waitForPendingAgentCreations();
+    }
+  }
+
+  const disposalPromises = [...pendingAgentDisposals.values()];
+  for (const pending of disposalPromises) await pending.catch(() => {});
+  pendingAgentDisposals.clear();
+
+  await serverClosePromise;
+}
+
+async function waitForPendingAgentCreations() {
+  while (pendingAgentCreations.size > 0) {
+    const pending = [...pendingAgentCreations];
+    await Promise.allSettled(pending);
+  }
+}
+
+async function disposeAgentEntries(agentEntries) {
+  const entries = [...agentEntries];
+  for (const entry of entries) {
+    await disposeAgent(entry?.agent ?? entry);
+  }
+}
+
+function closeServerWithPromise(closeServer) {
+  if (typeof closeServer !== "function") return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    try {
+      if (closeServer.length > 0) {
+        closeServer(() => finish());
+      } else {
+        closeServer();
+        finish();
+      }
+    } catch {
+      finish();
+    }
+  });
+}
+
+function bridgeShuttingDownError() {
+  return new HttpError("Bridge is shutting down", 503, "bridge_shutting_down");
 }
 
 function isMainModule() {
