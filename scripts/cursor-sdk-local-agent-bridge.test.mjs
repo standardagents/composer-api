@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { Agent } from "@cursor/sdk";
 import { spawn, spawnSync } from "node:child_process";
 import http from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   bridgePrompt,
+  cleanupBridgeResources,
   clientForwardingMcpServerSource,
   clientMcpToolDefinitions,
+  evictAgent,
+  evictCachedAgent,
+  getAgent,
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
@@ -15,6 +20,7 @@ import {
   openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  startParentLossWatchdog,
   statusFromError,
   toolCallFromDelta,
   validateClientMcpToolCall
@@ -154,6 +160,401 @@ describe("Cursor SDK local-agent bridge", () => {
     releaseFirst();
     await expect(first).resolves.toBe("first");
     await expect(second).resolves.toBe("second");
+  });
+
+  it("keeps bridge cleanup pending until SDK async disposal settles", async () => {
+    let releaseAsyncDispose;
+    const asyncDisposeGate = new Promise((resolve) => {
+      releaseAsyncDispose = resolve;
+    });
+    let asyncDisposeCalls = 0;
+    let serverClosed = false;
+    const fakeAgent = {
+      close() {
+        throw new Error("close should not be used when Symbol.asyncDispose is available");
+      },
+      async [Symbol.asyncDispose]() {
+        asyncDisposeCalls += 1;
+        await asyncDisposeGate;
+      }
+    };
+
+    let cleanupResolved = false;
+    const cleanupPromise = cleanupBridgeResources({
+      agentEntries: [{ agent: fakeAgent }],
+      closeServer: () => {
+        serverClosed = true;
+      }
+    }).then(() => {
+      cleanupResolved = true;
+    });
+
+    try {
+      await Promise.resolve();
+      expect(serverClosed).toBe(true);
+      expect(asyncDisposeCalls).toBe(1);
+      expect(cleanupResolved).toBe(false);
+    } finally {
+      releaseAsyncDispose();
+      await cleanupPromise;
+    }
+  });
+
+  it("serializes per-key SDK async disposals before starting the next disposal", async () => {
+    const cacheKey = `serial-dispose-${Date.now()}`;
+    let releaseFirstDispose;
+    const firstDisposeGate = new Promise((resolve) => {
+      releaseFirstDispose = resolve;
+    });
+    let firstDisposeStarts = 0;
+    let secondDisposeStarts = 0;
+    const firstAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        firstDisposeStarts += 1;
+        await firstDisposeGate;
+      }
+    };
+    const secondAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        secondDisposeStarts += 1;
+      }
+    };
+
+    const firstEviction = evictAgent(cacheKey, firstAgent);
+    const secondEviction = evictAgent(cacheKey, secondAgent);
+
+    try {
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(firstDisposeStarts).toBe(1);
+      expect(secondDisposeStarts).toBe(0);
+
+      releaseFirstDispose();
+      await firstEviction;
+      await secondEviction;
+      expect(secondDisposeStarts).toBe(1);
+    } finally {
+      releaseFirstDispose?.();
+      await firstEviction.catch(() => {});
+      await secondEviction.catch(() => {});
+    }
+  });
+
+  it("waits for in-flight SDK agent creation and disposal before bridge cleanup resolves", async () => {
+    const input = {
+      apiKey: "test-key",
+      model: "default",
+      workingDirectory: "/project",
+      sessionKey: `cleanup-create-race-${Date.now()}`,
+      clientTools: []
+    };
+    let releaseCreate;
+    const createGate = new Promise((resolve) => {
+      releaseCreate = resolve;
+    });
+    let releaseAsyncDispose;
+    const asyncDisposeGate = new Promise((resolve) => {
+      releaseAsyncDispose = resolve;
+    });
+    let asyncDisposeCalls = 0;
+    const createdAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        asyncDisposeCalls += 1;
+        await asyncDisposeGate;
+      }
+    };
+    const originalCreate = Agent.create;
+    let createCalls = 0;
+    Agent.create = async () => {
+      createCalls += 1;
+      await createGate;
+      return createdAgent;
+    };
+
+    let agentPromise;
+    let cleanupPromise;
+    let cleanupResolved = false;
+    try {
+      agentPromise = getAgent(input);
+      await Promise.resolve();
+      expect(createCalls).toBe(1);
+
+      cleanupPromise = cleanupBridgeResources({
+        closeServer: () => {}
+      }).then(() => {
+        cleanupResolved = true;
+      });
+
+      await Promise.resolve();
+      expect(cleanupResolved).toBe(false);
+
+      releaseCreate();
+      const entry = await agentPromise;
+      expect(entry.agent).toBe(createdAgent);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(asyncDisposeCalls).toBe(1);
+      expect(cleanupResolved).toBe(false);
+
+      releaseAsyncDispose();
+      await cleanupPromise;
+      expect(cleanupResolved).toBe(true);
+    } finally {
+      releaseCreate?.();
+      releaseAsyncDispose?.();
+      await agentPromise?.catch(() => {});
+      await cleanupPromise?.catch(() => {});
+      await evictCachedAgent(input);
+      Agent.create = originalCreate;
+    }
+  });
+
+  it("blocks replacement creation until cached SDK async disposal completes", async () => {
+    const input = {
+      apiKey: "test-key",
+      model: "default",
+      workingDirectory: "/project",
+      sessionKey: `replacement-gate-${Date.now()}`,
+      clientTools: []
+    };
+    let releaseAsyncDispose;
+    const asyncDisposeGate = new Promise((resolve) => {
+      releaseAsyncDispose = resolve;
+    });
+    const oldAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        await asyncDisposeGate;
+      }
+    };
+    const replacementAgent = {
+      close() {}
+    };
+    const originalCreate = Agent.create;
+    let createCount = 0;
+    Agent.create = async () => {
+      createCount += 1;
+      return createCount === 1 ? oldAgent : replacementAgent;
+    };
+
+    try {
+      await getAgent(input);
+      const evictionPromise = evictCachedAgent(input);
+      const replacementPromise = getAgent(input);
+
+      await Promise.resolve();
+      expect(createCount).toBe(1);
+
+      releaseAsyncDispose();
+      await evictionPromise;
+
+      const replacement = await replacementPromise;
+      expect(replacement.agent).toBe(replacementAgent);
+      expect(createCount).toBe(2);
+    } finally {
+      releaseAsyncDispose?.();
+      await evictCachedAgent(input);
+      Agent.create = originalCreate;
+    }
+  });
+
+  it("does not block new-key agent creation on unrelated LRU async disposal", async () => {
+    const moduleUrl = new URL(`./cursor-sdk-local-agent-bridge.mjs?lru-eviction-latency=${Date.now()}`, import.meta.url);
+    const previousMaxAgents = process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS;
+    process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS = "1";
+    const bridge = await import(moduleUrl.href);
+    const oldInput = {
+      apiKey: "test-key",
+      model: "default",
+      workingDirectory: "/project",
+      sessionKey: `lru-old-${Date.now()}`,
+      clientTools: []
+    };
+    const newInput = {
+      ...oldInput,
+      sessionKey: `${oldInput.sessionKey}-new`
+    };
+    let releaseOldDispose;
+    const oldDisposeGate = new Promise((resolve) => {
+      releaseOldDispose = resolve;
+    });
+    let signalOldDisposeStart;
+    const oldDisposeStarted = new Promise((resolve) => {
+      signalOldDisposeStart = resolve;
+    });
+    const oldAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        signalOldDisposeStart?.();
+        await oldDisposeGate;
+      }
+    };
+    const newAgent = {
+      close() {}
+    };
+    const originalCreate = Agent.create;
+    let createCount = 0;
+    Agent.create = async () => {
+      createCount += 1;
+      return createCount === 1 ? oldAgent : newAgent;
+    };
+
+    let newKeySettled = false;
+    let newKeyPromise;
+    try {
+      await bridge.getAgent(oldInput);
+      newKeyPromise = bridge.getAgent(newInput).then((entry) => {
+        newKeySettled = true;
+        return entry;
+      });
+
+      await oldDisposeStarted;
+      await Promise.resolve();
+
+      expect(newKeySettled).toBe(true);
+      const newKeyEntry = await newKeyPromise;
+      expect(newKeyEntry.agent).toBe(newAgent);
+      expect(createCount).toBe(2);
+    } finally {
+      releaseOldDispose?.();
+      await newKeyPromise?.catch(() => {});
+      await bridge.evictCachedAgent(oldInput).catch(() => {});
+      await bridge.evictCachedAgent(newInput).catch(() => {});
+      await bridge.cleanupBridgeResources({ closeServer: () => {} }).catch(() => {});
+      Agent.create = originalCreate;
+      if (previousMaxAgents === undefined) {
+        delete process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS;
+      } else {
+        process.env.CURSOR_SDK_BRIDGE_MAX_AGENTS = previousMaxAgents;
+      }
+    }
+  });
+
+  it("requests graceful shutdown once when parent ownership is lost", () => {
+    let tick;
+    let clearedHandle = null;
+    let shutdownRequests = 0;
+    let parentPid = 100;
+    const scheduledHandle = {
+      unrefCalls: 0,
+      unref() {
+        this.unrefCalls += 1;
+      }
+    };
+
+    const watchdog = startParentLossWatchdog({
+      initialParentPid: 100,
+      getParentPid: () => parentPid,
+      setIntervalFn: (callback) => {
+        tick = callback;
+        return scheduledHandle;
+      },
+      clearIntervalFn: (handle) => {
+        clearedHandle = handle;
+      },
+      onParentLost: () => {
+        shutdownRequests += 1;
+      }
+    });
+
+    expect(typeof tick).toBe("function");
+    expect(scheduledHandle.unrefCalls).toBe(1);
+
+    tick();
+    parentPid = 200;
+    tick();
+    tick();
+
+    expect(shutdownRequests).toBe(1);
+    expect(clearedHandle).toBe(scheduledHandle);
+
+    watchdog.stop();
+    expect(clearedHandle).toBe(scheduledHandle);
+  });
+
+  it("disables parent-loss watchdog when started as pid1 child", () => {
+    let scheduled = false;
+    let shutdownRequests = 0;
+    const watchdog = startParentLossWatchdog({
+      initialParentPid: 1,
+      setIntervalFn: () => {
+        scheduled = true;
+        return {
+          unref() {}
+        };
+      },
+      onParentLost: () => {
+        shutdownRequests += 1;
+      }
+    });
+
+    expect(scheduled).toBe(false);
+    expect(shutdownRequests).toBe(0);
+    watchdog.stop();
+  });
+
+  it("shares shutdown work across repeated closeAndExit requests and keeps the first exit code", async () => {
+    const moduleUrl = new URL(`./cursor-sdk-local-agent-bridge.mjs?shutdown-idempotency=${Date.now()}`, import.meta.url);
+    const bridge = await import(moduleUrl.href);
+    const input = {
+      apiKey: "test-key",
+      model: "default",
+      workingDirectory: "/project",
+      sessionKey: `close-and-exit-${Date.now()}`,
+      clientTools: []
+    };
+    let releaseAsyncDispose;
+    const asyncDisposeGate = new Promise((resolve) => {
+      releaseAsyncDispose = resolve;
+    });
+    let asyncDisposeCalls = 0;
+    const fakeAgent = {
+      close() {
+        return this[Symbol.asyncDispose]();
+      },
+      async [Symbol.asyncDispose]() {
+        asyncDisposeCalls += 1;
+        await asyncDisposeGate;
+      }
+    };
+    const originalCreate = Agent.create;
+    const exitCodes = [];
+    Agent.create = async () => fakeAgent;
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation((code) => {
+      exitCodes.push(code);
+    });
+
+    try {
+      await bridge.getAgent(input);
+      const firstShutdown = bridge.closeAndExit(9);
+      const secondShutdown = bridge.closeAndExit(2);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(asyncDisposeCalls).toBe(1);
+
+      releaseAsyncDispose();
+      await firstShutdown;
+      await secondShutdown;
+
+      expect(asyncDisposeCalls).toBe(1);
+      expect(exitCodes).toEqual([9]);
+    } finally {
+      releaseAsyncDispose?.();
+      Agent.create = originalCreate;
+      exitSpy.mockRestore();
+    }
   });
 
   it("does not cancel SDK glob calls on directory-only partial arguments", () => {
