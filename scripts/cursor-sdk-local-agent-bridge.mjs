@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import { Agent } from "@cursor/sdk";
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -23,30 +23,28 @@ const maxRunRetries = parseInteger(process.env.CURSOR_SDK_BRIDGE_MAX_RUN_RETRIES
 const retryBaseDelayMs = parseInteger(process.env.CURSOR_SDK_BRIDGE_RETRY_BASE_DELAY_MS, 500);
 const defaultCwd = process.env.CURSOR_SDK_WORKING_DIRECTORY || process.cwd();
 const clientMcpServerName = "client";
-const clientMcpServerMode = "--client-mcp-server";
-const clientToolCallbackPath = "/client-tool-call";
+// The SDK surfaces `local.customTools` under this synthetic MCP server name, so
+// tool calls can arrive tagged with either identifier.
+const sdkCustomToolsServerName = "custom-user-tools";
+const clientToolHandoffText = "FORWARDED_TO_OUTER_CLIENT";
+const scratchWorkspaceRoot = path.join(os.tmpdir(), "api-for-cursor", "workspaces");
 
 const agentCache = new Map();
 const agentRunQueues = new Map();
-const activeClientToolCaptures = new Map();
 const forceNextRunAgentKeys = new Set();
 let server = null;
 
 if (isMainModule()) {
   installBridgeProcessHandlers();
-  if (process.argv.includes(clientMcpServerMode)) {
-    await runClientForwardingMcpServerFromEnvironment();
-  } else {
-    startServer();
-    process.on("SIGINT", () => closeAndExit(0));
-    process.on("SIGTERM", () => closeAndExit(0));
-  }
+  startServer();
+  process.on("SIGINT", () => closeAndExit(0));
+  process.on("SIGTERM", () => closeAndExit(0));
 }
 
 export {
   bridgePrompt,
+  clientCustomTools,
   clientMcpToolDefinitions,
-  clientForwardingMcpServerSource,
   localAgentCreateOptions,
   localAgentSendOptions,
   isForwardableSDKToolCall,
@@ -56,6 +54,7 @@ export {
   openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  sdkScratchWorkspace,
   statusFromError,
   startServer,
   validateClientMcpToolCall,
@@ -64,6 +63,9 @@ export {
 
 function startServer() {
   if (server) return server;
+  // No agents exist yet, so any scratch directories on disk are leftovers from
+  // a previous process and would otherwise accumulate one per agent forever.
+  removeDirectory(scratchWorkspaceRoot);
   server = http.createServer((request, response) => {
     handleRequest(request, response).catch((error) => {
       writeJson(response, openAiError(error), statusFromError(error));
@@ -80,11 +82,6 @@ async function handleRequest(request, response) {
 
   if (request.method === "GET" && url.pathname === "/health") {
     writeJson(response, { ok: true, agents: agentCache.size });
-    return;
-  }
-
-  if (request.method === "POST" && url.pathname === clientToolCallbackPath) {
-    await handleClientToolCallback(request, response);
     return;
   }
 
@@ -111,6 +108,9 @@ async function handleRequest(request, response) {
   const requestId = typeof body.requestId === "string" && body.requestId ? body.requestId : crypto.randomUUID();
   const clientTools = parseClientTools(body.tools);
   const streamEvents = body.streamEvents === true;
+  // The caller filters which tools are worth attaching per turn, so an empty
+  // list does not mean the caller stopped owning tool execution.
+  const clientOwnsToolExecution = body.clientOwnsToolExecution === true || clientTools.length > 0;
 
   const input = {
     apiKey,
@@ -120,8 +120,11 @@ async function handleRequest(request, response) {
     sessionKey,
     workingDirectory,
     requestId,
-    clientTools
+    clientTools,
+    clientOwnsToolExecution
   };
+
+  logClientToolInventory(input);
 
   if (streamEvents) {
     await streamLocalAgent(input, response);
@@ -130,20 +133,6 @@ async function handleRequest(request, response) {
 
   const output = await runLocalAgent(input);
   writeJson(response, output);
-}
-
-async function handleClientToolCallback(request, response) {
-  if (bridgeToken && bearerToken(request) !== bridgeToken) {
-    writeJson(response, openAiError(new HttpError("Invalid bridge token", 401, "unauthorized")), 401);
-    return;
-  }
-
-  const body = await readJsonBody(request);
-  const cacheKey = requiredString(body.cacheKey, "cacheKey");
-  const toolName = requiredString(body.toolName, "toolName");
-  const args = isRecord(body.arguments) ? body.arguments : {};
-  const accepted = await captureActiveClientToolCall(cacheKey, { type: toolName, args });
-  writeJson(response, { ok: true, accepted });
 }
 
 async function streamLocalAgent(input, response) {
@@ -253,12 +242,17 @@ async function runLocalAgentBody(input, onRun, onEvent) {
   let capturedToolCall = null;
   let cancelRequested = false;
   let text = "";
+  let narration = "";
 
   const captureToolCall = async (toolCall, options = {}) => {
-    if (capturedToolCall || !toolCall) return;
+    if (capturedToolCall || !toolCall) return false;
     const normalized = normalizeSDKToolCall(toolCall, input.clientTools);
-    if (!normalized || !isForwardableSDKToolCall(normalized, input.clientTools)) return;
+    if (!normalized || !isForwardableSDKToolCall(normalized, input.clientTools)) {
+      logDroppedToolCall(toolCall, normalized, input.clientTools);
+      return false;
+    }
     capturedToolCall = normalized;
+    logCapturedToolCall(normalized, options.source);
     if (onEvent) onEvent({ type: "tool_call", toolCall: capturedToolCall });
     cancelRequested = true;
     if (run) {
@@ -270,12 +264,9 @@ async function runLocalAgentBody(input, onRun, onEvent) {
         await cancellation;
       }
     }
+    return true;
   };
 
-  const unregisterCapture = registerActiveClientToolCapture(cacheKey, async (toolCall) => {
-    await captureToolCall(toolCall, { waitForCancel: false });
-    return capturedToolCall !== null;
-  });
   try {
     agentEntry = await getAgent(input);
     const agent = agentEntry.agent;
@@ -283,11 +274,24 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     const force = forceNextRunAgentKeys.delete(cacheKey);
 
     run = await agent.send(prompt, {
-      ...localAgentSendOptions(input, { force }),
+      ...localAgentSendOptions(input, {
+        force,
+        // In-process custom tools are the primary capture path: the SDK invokes
+        // this callback directly instead of routing through a subprocess.
+        onClientToolCall: (toolCall) => captureToolCall(toolCall, { source: "custom_tool", waitForCancel: false })
+      }),
       idempotencyKey: input.requestId,
       onDelta: async ({ update }) => {
         const toolCall = toolCallFromDelta(update);
-        if (toolCall) await captureToolCall(toolCall);
+        if (toolCall) {
+          await captureToolCall(toolCall, { source: "delta" });
+          return;
+        }
+        // Keep narration so a tool call that cannot be mapped downstream still
+        // leaves the client with a non-empty assistant turn. Tracked separately
+        // from `text` so the normal path cannot double-count it.
+        const chunk = assistantTextFromDelta(update);
+        if (chunk) narration += chunk;
       }
     });
     onRun(run);
@@ -318,14 +322,12 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     if (!capturedToolCall && !(cancelRequested && isBenignCancellationError(error))) {
       throw error;
     }
-  } finally {
-    unregisterCapture();
   }
 
   if (capturedToolCall) {
     if (agentEntry) forceNextRunAgentKeys.add(agentEntry.cacheKey);
     return {
-      text: "",
+      text: stripFinalMarker(narration),
       toolCalls: [capturedToolCall],
       agentID: agentEntry?.agent.agentId || "",
       runID: run?.id || input.requestId,
@@ -338,7 +340,7 @@ async function runLocalAgentBody(input, onRun, onEvent) {
     if (agentEntry) evictAgent(agentEntry.cacheKey, agentEntry.agent);
     throw sdkRunFailureError(result);
   }
-  if (!text && typeof result.result === "string") text = result.result;
+  if (!text) text = typeof result.result === "string" ? result.result : narration;
   return {
     text: stripFinalMarker(text),
     toolCalls: [],
@@ -356,7 +358,9 @@ async function getAgent(input) {
     return { agent: cached.agent, cacheKey, cached: true };
   }
 
-  const agent = await Agent.create(localAgentCreateOptions(input));
+  const options = localAgentCreateOptions(input);
+  ensureDirectory(options.local?.cwd);
+  const agent = await Agent.create(options);
   agentCache.set(cacheKey, { agent, touchedAt: Date.now() });
   evictAgents();
   return { agent, cacheKey, cached: false };
@@ -371,6 +375,7 @@ function evictAgent(cacheKey, agent) {
   try {
     agent.close();
   } catch {}
+  removeDirectory(path.join(scratchWorkspaceRoot, cacheKey));
 }
 
 function evictCachedAgent(input) {
@@ -379,334 +384,91 @@ function evictCachedAgent(input) {
   if (cached) evictAgent(cacheKey, cached.agent);
 }
 
-function registerActiveClientToolCapture(cacheKey, handler) {
-  if (!activeClientToolCaptures.has(cacheKey)) {
-    activeClientToolCaptures.set(cacheKey, new Set());
-  }
-  const handlers = activeClientToolCaptures.get(cacheKey);
-  handlers.add(handler);
-  return () => {
-    handlers.delete(handler);
-    if (handlers.size === 0) activeClientToolCaptures.delete(cacheKey);
-  };
-}
-
-async function captureActiveClientToolCall(cacheKey, toolCall) {
-  const handlers = activeClientToolCaptures.get(cacheKey);
-  if (!handlers || handlers.size === 0) return false;
-  for (const handler of [...handlers]) {
-    if (await handler(toolCall)) return true;
-  }
-  return false;
-}
-
 function localAgentCreateOptions(input) {
   return {
     apiKey: input.apiKey,
     model: sdkModelSelection(input.model),
     name: "API for Cursor local bridge",
     local: {
-      cwd: input.workingDirectory
+      cwd: sdkScratchWorkspace(input)
     }
   };
+}
+
+// When the outer client owns tool execution, the harness must not be able to do
+// the work itself: its built-in read/write/shell would succeed against the real
+// project and the model would never call back through the client. An empty
+// scratch directory makes the client tools the only way to reach the workspace.
+// Clients that execute nothing themselves still get the real directory.
+function sdkScratchWorkspace(input) {
+  if (!clientOwnsToolExecution(input)) return input.workingDirectory;
+  return path.join(scratchWorkspaceRoot, agentCacheKey(input));
+}
+
+function clientOwnsToolExecution(input) {
+  return input.clientOwnsToolExecution === true || (input.clientTools ?? []).length > 0;
 }
 
 function localAgentSendOptions(input, optionsInput = {}) {
   const options = {
     model: sdkModelSelection(input.model)
   };
+  const local = {};
   if (optionsInput.force === true) {
-    options.local = { force: true };
+    local.force = true;
   }
-  if (input.clientTools.length > 0) {
-    options.mcpServers = clientForwardingMcpServers(input.clientTools, agentCacheKey(input));
+  if ((input.clientTools ?? []).length > 0) {
+    local.customTools = clientCustomTools(input.clientTools, optionsInput.onClientToolCall);
+  }
+  if (Object.keys(local).length > 0) {
+    options.local = local;
   }
   return options;
+}
+
+// The client's tools run as in-process SDK callback tools rather than a spawned
+// stdio MCP server. Callback tools never fail closed under approval or sandbox
+// rules, and capture happens directly in this process instead of over an HTTP
+// hop that could time out mid-handoff.
+function clientCustomTools(clientTools = [], onClientToolCall) {
+  const definitions = clientMcpToolDefinitions(clientTools);
+  const customTools = {};
+  for (const definition of definitions) {
+    customTools[definition.name] = {
+      description: definition.description,
+      inputSchema: definition.inputSchema,
+      execute: async (args) => {
+        const payload = isRecord(args) ? args : {};
+        const validationError = validateClientMcpToolCall(definitions, definition.name, payload);
+        if (validationError) return clientToolError(validationError);
+        if (typeof onClientToolCall !== "function") {
+          return clientToolError("Outer client tool capture is unavailable for this run.");
+        }
+        const accepted = await onClientToolCall({ type: definition.name, args: payload });
+        if (!accepted) {
+          return clientToolError("The outer client already accepted a different tool call for this turn.");
+        }
+        return {
+          content: [{ type: "text", text: clientToolHandoffText }],
+          isError: false
+        };
+      }
+    };
+  }
+  return customTools;
+}
+
+function clientToolError(message) {
+  return {
+    content: [{ type: "text", text: message }],
+    isError: true
+  };
 }
 
 function clientToolsNeedingMcp(clientTools = []) {
   return clientTools.filter((tool) => tool?.name);
 }
 
-function clientForwardingMcpServers(clientTools = [], cacheKey = "") {
-  return {
-    [clientMcpServerName]: {
-      type: "stdio",
-      command: process.execPath,
-      args: [fileURLToPath(import.meta.url), clientMcpServerMode],
-      env: {
-        CURSOR_SDK_BRIDGE_CALLBACK_URL: `http://${host}:${port}${clientToolCallbackPath}`,
-        CURSOR_SDK_BRIDGE_CALLBACK_TOKEN: bridgeToken,
-        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: cacheKey,
-        CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON: JSON.stringify(clientMcpToolDefinitions(clientTools))
-      }
-    }
-  };
-}
-
-async function runClientForwardingMcpServerFromEnvironment() {
-  await runClientForwardingMcpServer({
-    tools: parseClientMcpToolsJSON(process.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON),
-    callbackUrl: process.env.CURSOR_SDK_BRIDGE_CALLBACK_URL || "",
-    callbackToken: process.env.CURSOR_SDK_BRIDGE_CALLBACK_TOKEN || "",
-    callbackCacheKey: process.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY || ""
-  });
-}
-
-function parseClientMcpToolsJSON(value) {
-  if (typeof value !== "string" || !value.trim()) return clientMcpToolDefinitions([]);
-  try {
-    const parsed = JSON.parse(value);
-    return Array.isArray(parsed) ? parsed : clientMcpToolDefinitions([]);
-  } catch {
-    return clientMcpToolDefinitions([]);
-  }
-}
-
-async function runClientForwardingMcpServer({
-  tools,
-  callbackUrl,
-  callbackToken,
-  callbackCacheKey,
-  input = process.stdin,
-  output = process.stdout
-}) {
-  const rl = readline.createInterface({ input });
-  let outputClosed = false;
-  const writeOutput = (payload) => {
-    if (outputClosed) return false;
-    try {
-      return output.write(payload);
-    } catch (error) {
-      if (!isBenignPipeError(error)) throw error;
-      outputClosed = true;
-      return false;
-    }
-  };
-  output.on?.("error", (error) => {
-    outputClosed = true;
-    if (!isBenignPipeError(error)) process.exitCode = 1;
-  });
-  const send = (id, result) => {
-    if (id === undefined || id === null) return;
-    writeOutput(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
-  };
-  const sendError = (id, message) => {
-    if (id === undefined || id === null) return;
-    writeOutput(`${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } })}\n`);
-  };
-  const pending = new Set();
-
-  const handleLine = async (line) => {
-    if (!line.trim()) return;
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (!message.id && String(message.method || "").startsWith("notifications/")) return;
-    if (message.method === "initialize") {
-      send(message.id, {
-        protocolVersion: "2024-11-05",
-        capabilities: { tools: {} },
-        serverInfo: { name: "api-for-cursor-client-tools", version: "0.1.0" }
-      });
-      return;
-    }
-    if (message.method === "tools/list") {
-      send(message.id, { tools });
-      return;
-    }
-    if (message.method === "tools/call") {
-      const params = message.params || {};
-      const toolName = params.name || params.toolName;
-      const toolInput = params.arguments || params.input || {};
-      const validationError = validateClientMcpToolCall(tools, toolName, toolInput);
-      if (validationError) {
-        sendError(message.id, validationError);
-        return;
-      }
-      const accepted = await notifyParentToolCall({ callbackUrl, callbackToken, callbackCacheKey, toolName, input: toolInput });
-      if (!accepted) {
-        sendError(message.id, "Outer client callback unavailable for forwarded tool call.");
-        return;
-      }
-      send(message.id, {
-        content: [{ type: "text", text: "FORWARDED_TO_OUTER_CLIENT" }],
-        isError: false
-      });
-      return;
-    }
-    sendError(message.id, `Unsupported MCP method: ${message.method}`);
-  };
-
-  await new Promise((resolve) => {
-    rl.on("line", (line) => {
-      const task = handleLine(line)
-        .catch((error) => {
-          if (!isBenignPipeError(error)) process.exitCode = 1;
-        })
-        .finally(() => {
-          pending.delete(task);
-        });
-      pending.add(task);
-    });
-    rl.on("close", async () => {
-      await Promise.allSettled([...pending]);
-      resolve();
-    });
-  });
-}
-
-async function notifyParentToolCall({ callbackUrl, callbackToken, callbackCacheKey, toolName, input }) {
-  if (!callbackUrl || !callbackCacheKey) return true;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1500);
-  try {
-    const headers = { "Content-Type": "application/json" };
-    if (callbackToken) headers.Authorization = `Bearer ${callbackToken}`;
-    const response = await fetch(callbackUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        cacheKey: callbackCacheKey,
-        toolName,
-        arguments: input && typeof input === "object" && !Array.isArray(input) ? input : {}
-      }),
-      signal: controller.signal
-    });
-    if (!response.ok) return false;
-    const body = await response.json().catch(() => ({}));
-    return body && body.accepted === true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function clientForwardingMcpServerSource(clientTools = []) {
-  const tools = JSON.stringify(clientMcpToolDefinitions(clientTools));
-  return `
-const readline = require("node:readline");
-const tools = ${tools};
-const callbackUrl = process.env.CURSOR_SDK_BRIDGE_CALLBACK_URL || "";
-const callbackToken = process.env.CURSOR_SDK_BRIDGE_CALLBACK_TOKEN || "";
-const callbackCacheKey = process.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY || "";
-const validateClientMcpToolCall = ${validateClientMcpToolCall.toString()};
-const validateJsonSchemaValue = ${validateJsonSchemaValue.toString()};
-const canonicalJsonSchema = ${canonicalJsonSchema.toString()};
-const schemaHasStructuralKeyword = ${schemaHasStructuralKeyword.toString()};
-const schemaReferenceTarget = ${schemaReferenceTarget.toString()};
-const jsonPointerTarget = ${jsonPointerTarget.toString()};
-const decodeJsonPointerSegment = ${decodeJsonPointerSegment.toString()};
-const schemaTypes = ${schemaTypes.toString()};
-const schemaAllowsNull = ${schemaAllowsNull.toString()};
-const validateStringConstraints = ${validateStringConstraints.toString()};
-const validateNumberConstraints = ${validateNumberConstraints.toString()};
-const patternPropertySchemasForKey = ${patternPropertySchemasForKey.toString()};
-const schemaEvaluatesObjectProperty = ${schemaEvaluatesObjectProperty.toString()};
-const jsonValueMatchesType = ${jsonValueMatchesType.toString()};
-const jsonValuesEqual = ${jsonValuesEqual.toString()};
-const isRecord = ${isRecord.toString()};
-const stableJson = ${stableJson.toString()};
-const sortJson = ${sortJson.toString()};
-const rl = readline.createInterface({ input: process.stdin });
-let stdoutClosed = false;
-function isBenignPipeError(error) {
-  return error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED";
-}
-function writeStdout(payload) {
-  if (stdoutClosed) return false;
-  try {
-    return process.stdout.write(payload);
-  } catch (error) {
-    if (!isBenignPipeError(error)) throw error;
-    stdoutClosed = true;
-    return false;
-  }
-}
-process.stdout.on("error", (error) => {
-  stdoutClosed = true;
-  if (isBenignPipeError(error)) process.exit(0);
-  process.exitCode = 1;
-});
-function send(id, result) {
-  if (id === undefined || id === null) return;
-  writeStdout(JSON.stringify({ jsonrpc: "2.0", id, result }) + "\\n");
-}
-function sendError(id, message) {
-  if (id === undefined || id === null) return;
-  writeStdout(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } }) + "\\n");
-}
-async function notifyParentToolCall(toolName, input) {
-  if (!callbackUrl || !callbackCacheKey) return true;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 1500);
-  try {
-    const headers = { "Content-Type": "application/json" };
-    if (callbackToken) headers.Authorization = "Bearer " + callbackToken;
-    const response = await fetch(callbackUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        cacheKey: callbackCacheKey,
-        toolName,
-        arguments: input && typeof input === "object" && !Array.isArray(input) ? input : {}
-      }),
-      signal: controller.signal
-    });
-    if (!response.ok) return false;
-    const body = await response.json().catch(() => ({}));
-    return body && body.accepted === true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-rl.on("line", async (line) => {
-  if (!line.trim()) return;
-  let message;
-  try {
-    message = JSON.parse(line);
-  } catch {
-    return;
-  }
-  if (!message.id && String(message.method || "").startsWith("notifications/")) return;
-  if (message.method === "initialize") {
-    send(message.id, {
-      protocolVersion: "2024-11-05",
-      capabilities: { tools: {} },
-      serverInfo: { name: "api-for-cursor-client-tools", version: "0.1.0" }
-    });
-  } else if (message.method === "tools/list") {
-    send(message.id, { tools });
-  } else if (message.method === "tools/call") {
-    const params = message.params || {};
-    const toolName = params.name || params.toolName;
-    const input = params.arguments || params.input || {};
-    const validationError = validateClientMcpToolCall(tools, toolName, input);
-    if (validationError) {
-      sendError(message.id, validationError);
-      return;
-    }
-    const accepted = await notifyParentToolCall(toolName, input);
-    if (!accepted) {
-      sendError(message.id, "Outer client callback unavailable for forwarded tool call.");
-      return;
-    }
-    send(message.id, {
-      content: [{ type: "text", text: "FORWARDED_TO_OUTER_CLIENT" }],
-      isError: false
-    });
-  } else {
-    sendError(message.id, "Unsupported MCP method: " + message.method);
-  }
-});
-`;
-}
 
 function validateClientMcpToolCall(tools, toolName, input = {}) {
   if (typeof toolName !== "string" || !toolName.trim()) {
@@ -1439,21 +1201,21 @@ function bridgePrompt(prompt, clientTools = []) {
     ? `The outer client tools are: ${exactTools}.`
     : "No outer client tools were provided for this request.";
   const mcpInstruction = exactMcpTools
-    ? `Client-only tools are exposed through the client MCP server by exact name: ${exactMcpTools}.`
-    : "No client MCP forwarding tools are attached for this turn; answer without new local tool calls unless the prompt contains LOCAL TOOL RESULT records to continue from.";
+    ? `Client-only tools are exposed as callable tools by exact name: ${exactMcpTools}.`
+    : "No client forwarding tools are attached for this turn; answer without new local tool calls unless the prompt contains LOCAL TOOL RESULT records to continue from.";
   const localServerInstruction = exactMcpTools
-    ? "A local MCP server named client exposes forwarding tools such as client_shell, client_write, client_read, client_edit, client_delete, client_glob, client_grep, and the exact outer client tool names."
-    : "No local MCP server tools are available on this turn.";
+    ? `Those tools live on the ${sdkCustomToolsServerName} server, reachable with GetMcpTools and CallMcpTool. It also exposes client_shell, client_write, client_read, client_edit, client_delete, client_glob, and client_grep.`
+    : "No client tool server is attached on this turn.";
 
   return [
     "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
-    "The outer client owns local tool execution. The bridge must forward local operations; it must not execute SDK built-in shell/read/write/edit/glob/grep/ls/delete tools inside the bridge runtime.",
+    "The outer client owns local tool execution, and your working directory is an empty scratch directory that does not contain the user's project. Built-in shell/read/write/edit/glob/grep/ls/delete act on that scratch directory, so they cannot see or change the real workspace.",
     toolInstruction,
     mcpInstruction,
     localServerInstruction,
-    "Prefer exact client tools and dedicated client MCP tools such as write, read, edit, glob, grep, ls, delete, client_write, client_read, client_edit, client_glob, client_grep, client_ls, and client_delete before bash/client_shell. Use shell only for commands or when no dedicated client tool fits.",
-    "Use SDK mcp with providerIdentifier \"client\" for every local operation. Do not use SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, todowrite, task, createPlan, generateImage, or recordScreen.",
-    "If the prompt says LOCAL TOOL REQUIRED, emit exactly one client MCP forwarding tool call and no prose.",
+    "Prefer exact client tools and dedicated client tools such as write, read, edit, glob, grep, ls, delete, client_write, client_read, client_edit, client_glob, client_grep, client_ls, and client_delete before bash/client_shell. Use shell only for commands or when no dedicated client tool fits.",
+    `Route every local operation through the client tools on ${sdkCustomToolsServerName}. Do not use SDK built-in shell, write, edit, read, glob, grep, ls, delete, readLints, semSearch, todowrite, task, createPlan, generateImage, or recordScreen.`,
+    "If the prompt says LOCAL TOOL REQUIRED, emit exactly one client tool call and no prose.",
     "If LOCAL TOOL RESULT records are present, treat those tools as already executed by the outer client and continue from the result.",
     "",
     prompt
@@ -1466,6 +1228,30 @@ function toolCallFromDelta(update) {
   const toolCall = update.toolCall;
   if (!toolCall || typeof toolCall !== "object") return null;
   return toolCall;
+}
+
+function assistantTextFromDelta(update) {
+  if (!update || typeof update !== "object") return "";
+  if (update.type !== "text-delta") return "";
+  return typeof update.text === "string" ? update.text : "";
+}
+
+function logClientToolInventory(input) {
+  const names = (input.clientTools ?? []).map((tool) => tool?.name).filter(Boolean);
+  const scope = names.length ? `tools=${names.length} [${names.join(", ")}]` : "tools=0 (none attached this turn)";
+  const owner = clientOwnsToolExecution(input) ? "client" : "harness";
+  console.log(`[client-tools] request=${input.requestId} model=${input.model} ${scope} executor=${owner} cwd=${sdkScratchWorkspace(input)}`);
+}
+
+function logCapturedToolCall(toolCall, source = "unknown") {
+  console.log(`[client-tools] captured via ${source}: ${toolCall.name} args=${Object.keys(toolCall.arguments || {}).join(",") || "none"}`);
+}
+
+function logDroppedToolCall(toolCall, normalized, clientTools = []) {
+  const rawName = typeof toolCall?.type === "string" ? toolCall.type : typeof toolCall?.name === "string" ? toolCall.name : "unknown";
+  const reason = normalized ? "payload incomplete for the client tool schema" : "no client tool matched the SDK tool name";
+  const available = clientTools.map((tool) => tool?.name).filter(Boolean).join(", ") || "none";
+  console.log(`[client-tools] not forwarded: sdk=${rawName} normalized=${normalized?.name || "none"} reason=${reason} clientTools=${available}`);
 }
 
 function normalizeSDKToolCall(toolCall, clientTools = []) {
@@ -1485,7 +1271,7 @@ function normalizeSDKToolCall(toolCall, clientTools = []) {
 function normalizeClientMcpToolCall(name, args) {
   if (canonicalToolName(name) !== "mcp") return null;
   const provider = firstString(args, "providerIdentifier", "provider", "server", "serverName", "server_name");
-  if (provider && provider !== clientMcpServerName) return null;
+  if (provider && !isClientToolProvider(provider)) return null;
   const toolName = firstString(args, "toolName", "tool_name", "tool", "name");
   const sdkName = sdkToolNameFromClientMcpTool(toolName);
   const payload = clientMcpPayloadArguments(args);
@@ -1524,6 +1310,14 @@ function normalizeDirectClientToolCall(name, args, clientTools = []) {
       args: normalizeArguments(args)
     }
   };
+}
+
+// Client tools reach the model through the SDK's synthetic custom-tools server,
+// but older transcripts and prompts still name the forwarding server "client".
+function isClientToolProvider(provider) {
+  const normalized = normalizeToolName(provider);
+  return normalized === normalizeToolName(clientMcpServerName)
+    || normalized === normalizeToolName(sdkCustomToolsServerName);
 }
 
 function sdkToolNameFromClientMcpTool(toolName) {
@@ -1993,30 +1787,78 @@ function evictAgents() {
     try {
       oldest[1].agent.close();
     } catch {}
+    removeDirectory(path.join(scratchWorkspaceRoot, oldest[0]));
   }
 }
 
+// `claude-opus-5:effort=max,context=1m` -> base id plus SDK ModelSelection
+// params. OpenAI's schema has nowhere to carry Cursor's per-model options
+// (effort/thinking/context/fast), so they ride along in the model string.
+function splitModelSpec(model) {
+  const raw = typeof model === "string" ? model.trim() : "";
+  const separator = raw.indexOf(":");
+  if (separator === -1) return { base: raw, params: [] };
+  const params = raw
+    .slice(separator + 1)
+    .split(",")
+    .map((pair) => {
+      const eq = pair.indexOf("=");
+      if (eq === -1) return null;
+      const id = pair.slice(0, eq).trim();
+      const value = pair.slice(eq + 1).trim();
+      return id && value ? { id, value } : null;
+    })
+    .filter(Boolean);
+  return { base: raw.slice(0, separator), params };
+}
+
 function normalizeModel(model) {
-  const raw = model.trim();
-  const normalized = raw.toLowerCase().split("/").filter(Boolean).at(-1) || "";
+  const { base, params } = splitModelSpec(model);
+  const normalized = base.toLowerCase().split("/").filter(Boolean).at(-1) || "";
+  const suffix = params.length ? ":" + params.map((p) => `${p.id}=${p.value}`).join(",") : "";
   if (!normalized || normalized === "default" || normalized === "auto") return "default";
   if (normalized === "composer-latest" || normalized === "composer" || normalized === "composer-2.5" || normalized === "composer-2-5") {
-    return "composer-2.5";
+    return "composer-2.5" + suffix;
   }
-  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5";
-  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "composer-2.5-fast";
-  if (normalized === "grok-4.5" || normalized === "grok-4-5") return "grok-4.5";
-  if (normalized === "grok-4.5-fast" || normalized === "grok-4-5-fast") return "grok-4.5-fast";
-  return raw;
+  if (normalized === "composer-2.5-sdk" || normalized === "composer-2-5-sdk") return "composer-2.5" + suffix;
+  if (normalized === "composer-2.5-fast" || normalized === "composer-2-5-fast") return "composer-2.5-fast" + suffix;
+  if (normalized === "grok-4.5" || normalized === "grok-4-5") return "grok-4.5" + suffix;
+  if (normalized === "grok-4.5-fast" || normalized === "grok-4-5-fast") return "grok-4.5-fast" + suffix;
+  return normalized + suffix;
 }
 
 function sdkModelSelection(model) {
   const normalized = normalizeModel(typeof model === "string" ? model : "");
-  if (normalized === "composer-2.5") return { id: "composer-2.5", params: [{ id: "fast", value: "false" }] };
-  if (normalized === "composer-2.5-fast") return { id: "composer-2.5", params: [{ id: "fast", value: "true" }] };
-  if (normalized === "grok-4.5") return { id: "grok-4.5", params: [{ id: "fast", value: "false" }] };
-  if (normalized === "grok-4.5-fast") return { id: "grok-4.5", params: [{ id: "fast", value: "true" }] };
-  return { id: normalized };
+  const { base, params } = splitModelSpec(normalized);
+  // The `-fast` aliases predate param passthrough; keep them working unless the
+  // caller set `fast` explicitly.
+  const hasFast = params.some((p) => p.id === "fast");
+  if (base === "composer-2.5" || base === "composer-2.5-fast") {
+    const fast = base.endsWith("-fast");
+    return { id: "composer-2.5", params: hasFast ? params : [...params, { id: "fast", value: String(fast) }] };
+  }
+  if (base === "grok-4.5" || base === "grok-4.5-fast") {
+    const fast = base.endsWith("-fast");
+    return { id: "grok-4.5", params: hasFast ? params : [...params, { id: "fast", value: String(fast) }] };
+  }
+  return params.length ? { id: base, params } : { id: base };
+}
+
+function ensureDirectory(directory) {
+  if (typeof directory !== "string" || !directory.trim()) return;
+  try {
+    mkdirSync(directory, { recursive: true });
+  } catch (error) {
+    console.warn(`Could not create SDK working directory ${directory}: ${error?.message || error}`);
+  }
+}
+
+// Only ever called with paths the bridge itself created under its scratch root.
+function removeDirectory(directory) {
+  if (typeof directory !== "string" || !directory.startsWith(scratchWorkspaceRoot)) return;
+  try {
+    rmSync(directory, { recursive: true, force: true });
+  } catch {}
 }
 
 function sdkWorkingDirectory(value) {

@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { spawn, spawnSync } from "node:child_process";
-import http from "node:http";
-import { fileURLToPath } from "node:url";
 import {
   bridgePrompt,
-  clientForwardingMcpServerSource,
+  clientCustomTools,
   clientMcpToolDefinitions,
   localAgentCreateOptions,
   localAgentSendOptions,
@@ -15,12 +12,11 @@ import {
   openAiError,
   runExclusiveForAgent,
   sdkRunFailureSummary,
+  sdkScratchWorkspace,
   statusFromError,
   toolCallFromDelta,
   validateClientMcpToolCall
 } from "./cursor-sdk-local-agent-bridge.mjs";
-
-const bridgeScriptPath = fileURLToPath(new URL("./cursor-sdk-local-agent-bridge.mjs", import.meta.url));
 
 describe("Cursor SDK local-agent bridge", () => {
   it("classifies retryable Cursor SDK upstream capacity errors", () => {
@@ -1477,347 +1473,172 @@ describe("Cursor SDK local-agent bridge", () => {
     })).toBe(null);
   });
 
-  it("bundles nested schema validation into the generated MCP forwarding server", () => {
-    const source = clientForwardingMcpServerSource([
-      {
-        name: "call_mcp_tool",
-        parameters: {
-          type: "object",
-          properties: {
-            serverName: { type: "string" },
-            input: {
-              type: "object",
-              properties: {
-                mode: { type: "string", enum: ["create"] }
-              },
-              required: ["mode"]
-            }
-          },
-          required: ["serverName", "input"]
+  it("validates nested client tool schemas before handing a call to the outer client", async () => {
+    const captured = [];
+    const customTools = clientCustomTools(
+      [
+        {
+          name: "call_mcp_tool",
+          parameters: {
+            type: "object",
+            properties: {
+              serverName: { type: "string" },
+              input: {
+                type: "object",
+                properties: {
+                  mode: { type: "string", enum: ["create"] }
+                },
+                required: ["mode"]
+              }
+            },
+            required: ["serverName", "input"]
+          }
         }
+      ],
+      async (toolCall) => {
+        captured.push(toolCall);
+        return true;
       }
-    ]);
-    const message = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "call_mcp_tool",
-        arguments: {
-          serverName: "filesystem",
-          input: { mode: "append" }
-        }
-      }
-    };
+    );
 
-    const result = spawnSync(process.execPath, ["-e", source], {
-      input: `${JSON.stringify(message)}\n`,
-      encoding: "utf8",
-      timeout: 1000
+    const rejected = await customTools.call_mcp_tool.execute({
+      serverName: "filesystem",
+      input: { mode: "append" }
     });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.content[0].text).toContain("expected one of");
+    expect(captured).toEqual([]);
 
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-    const response = JSON.parse(result.stdout.trim());
-    expect(response.error.message).toContain("expected one of");
+    const accepted = await customTools.call_mcp_tool.execute({
+      serverName: "filesystem",
+      input: { mode: "create" }
+    });
+    expect(accepted.isError).toBe(false);
+    expect(accepted.content[0].text).toBe("FORWARDED_TO_OUTER_CLIENT");
+    expect(captured).toEqual([
+      { type: "call_mcp_tool", args: { serverName: "filesystem", input: { mode: "create" } } }
+    ]);
   });
 
-  it("bundles referenced schema validation into the generated MCP forwarding server", () => {
-    const source = clientForwardingMcpServerSource([
-      {
-        name: "ref_write_file",
-        parameters: {
-          type: "object",
-          properties: {
-            target: { $ref: "#/$defs/fileTarget" }
-          },
-          required: ["target"],
-          $defs: {
-            fileTarget: {
-              type: "object",
-              properties: {
-                mode: { type: "string", enum: ["create"] }
-              },
-              required: ["mode"]
+  it("validates referenced client tool schemas before handing a call to the outer client", async () => {
+    const captured = [];
+    const customTools = clientCustomTools(
+      [
+        {
+          name: "ref_write_file",
+          parameters: {
+            type: "object",
+            properties: {
+              target: { $ref: "#/$defs/fileTarget" }
+            },
+            required: ["target"],
+            $defs: {
+              fileTarget: {
+                type: "object",
+                properties: {
+                  mode: { type: "string", enum: ["create"] }
+                },
+                required: ["mode"]
+              }
             }
           }
         }
+      ],
+      async (toolCall) => {
+        captured.push(toolCall);
+        return true;
       }
+    );
+
+    const rejected = await customTools.ref_write_file.execute({ target: { mode: "append" } });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.content[0].text).toContain("expected one of");
+    expect(captured).toEqual([]);
+  });
+
+  it("does not fake a handoff when the outer client cannot accept the call", async () => {
+    const withoutCapture = clientCustomTools([]);
+    const unavailable = await withoutCapture.client_shell.execute({ command: "printf SHOULD_NOT_RUN" });
+    expect(unavailable.isError).toBe(true);
+    expect(unavailable.content[0].text).toContain("capture is unavailable");
+
+    const alreadyCaptured = clientCustomTools([], async () => false);
+    const refused = await alreadyCaptured.client_shell.execute({ command: "printf SHOULD_NOT_RUN" });
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0].text).toContain("already accepted a different tool call");
+  });
+
+  it("hands client tool calls to the in-process capture callback", async () => {
+    const captured = [];
+    const customTools = clientCustomTools([], async (toolCall) => {
+      captured.push(toolCall);
+      return true;
+    });
+
+    const result = await customTools.client_shell.execute({ command: "printf CALLBACK_OK" });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toBe("FORWARDED_TO_OUTER_CLIENT");
+    expect(captured).toEqual([
+      { type: "client_shell", args: { command: "printf CALLBACK_OK" } }
     ]);
-    const message = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "ref_write_file",
-        arguments: {
-          target: { mode: "append" }
-        }
-      }
-    };
-
-    const result = spawnSync(process.execPath, ["-e", source], {
-      input: `${JSON.stringify(message)}\n`,
-      encoding: "utf8",
-      timeout: 1000
-    });
-
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-    const response = JSON.parse(result.stdout.trim());
-    expect(response.error.message).toContain("expected one of");
   });
 
-  it("does not fake a forwarded MCP result when the bridge callback is unavailable", () => {
-    const source = clientForwardingMcpServerSource([]);
-    const message = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "client_shell",
-        arguments: {
-          command: "printf SHOULD_NOT_RUN"
+  it("keeps exact custom harness tool names callable as custom tools", async () => {
+    const captured = [];
+    const customTools = clientCustomTools(
+      [
+        {
+          name: "mcp__github__create_issue",
+          description: "Create a GitHub issue through the outer harness MCP server.",
+          parameters: {
+            type: "object",
+            properties: {
+              owner: { type: "string" },
+              repo: { type: "string" },
+              title: { type: "string" },
+              body: { type: "string" }
+            },
+            required: ["owner", "repo", "title", "body"],
+            additionalProperties: false
+          }
         }
+      ],
+      async (toolCall) => {
+        captured.push(toolCall);
+        return true;
       }
-    };
+    );
 
-    const result = spawnSync(process.execPath, ["-e", source], {
-      input: `${JSON.stringify(message)}\n`,
-      encoding: "utf8",
-      timeout: 3000,
-      env: {
-        ...process.env,
-        CURSOR_SDK_BRIDGE_CALLBACK_URL: "http://127.0.0.1:1/client-tool-call",
-        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: "cache-key"
-      }
-    });
-
-    expect(result.status).toBe(0);
-    expect(result.stderr).toBe("");
-    const response = JSON.parse(result.stdout.trim());
-    expect(response.error.message).toContain("Outer client callback unavailable");
-  });
-
-  it("posts forwarded MCP tool calls to the bridge callback before returning success", async () => {
-    let observedRequest;
-    const callbackServer = http.createServer((request, response) => {
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk) => {
-        body += chunk;
-      });
-      request.on("end", () => {
-        observedRequest = {
-          url: request.url,
-          authorization: request.headers.authorization,
-          body: JSON.parse(body)
-        };
-        response.writeHead(200, { "Content-Type": "application/json" });
-        response.end(JSON.stringify({ ok: true, accepted: true }));
-      });
-    });
-
-    await new Promise((resolve) => callbackServer.listen(0, "127.0.0.1", resolve));
-    const address = callbackServer.address();
-    const port = typeof address === "object" && address ? address.port : 0;
-    const child = spawn(process.execPath, [bridgeScriptPath, "--client-mcp-server"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CURSOR_SDK_BRIDGE_CALLBACK_URL: `http://127.0.0.1:${port}/client-tool-call`,
-        CURSOR_SDK_BRIDGE_CALLBACK_TOKEN: "bridge-token",
-        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: "cache-key",
-        CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON: JSON.stringify(clientMcpToolDefinitions([]))
-      }
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-
-    const message = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "client_shell",
-        arguments: {
-          command: "printf CALLBACK_OK"
-        }
-      }
-    };
-    child.stdin.end(`${JSON.stringify(message)}\n`);
-
-    const exitCode = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-        reject(new Error("generated MCP server did not exit"));
-      }, 3000);
-      child.on("error", (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-      child.on("exit", (code) => {
-        clearTimeout(timeout);
-        resolve(code);
-      });
-    });
-    callbackServer.close();
-
-    expect(exitCode).toBe(0);
-    expect(stderr).toBe("");
-    const response = JSON.parse(stdout.trim());
-    expect(response.result.content[0].text).toBe("FORWARDED_TO_OUTER_CLIENT");
-    expect(observedRequest).toEqual({
-      url: "/client-tool-call",
-      authorization: "Bearer bridge-token",
-      body: {
-        cacheKey: "cache-key",
-        toolName: "client_shell",
-        arguments: {
-          command: "printf CALLBACK_OK"
-        }
-      }
-    });
-  });
-
-  it("keeps exact custom harness MCP tools available in the subcommand server", async () => {
-    let observedRequest;
-    const callbackServer = http.createServer((request, response) => {
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk) => {
-        body += chunk;
-      });
-      request.on("end", () => {
-        observedRequest = {
-          url: request.url,
-          authorization: request.headers.authorization,
-          body: JSON.parse(body)
-        };
-        setTimeout(() => {
-          response.writeHead(200, { "Content-Type": "application/json" });
-          response.end(JSON.stringify({ ok: true, accepted: true }));
-        }, 50);
-      });
-    });
-
-    await new Promise((resolve) => callbackServer.listen(0, "127.0.0.1", resolve));
-    const address = callbackServer.address();
-    const port = typeof address === "object" && address ? address.port : 0;
-    const tools = clientMcpToolDefinitions([
-      {
-        name: "mcp__github__create_issue",
-        description: "Create a GitHub issue through the outer harness MCP server.",
-        parameters: {
-          type: "object",
-          properties: {
-            owner: { type: "string" },
-            repo: { type: "string" },
-            title: { type: "string" },
-            body: { type: "string" }
-          },
-          required: ["owner", "repo", "title", "body"],
-          additionalProperties: false
-        }
-      }
+    expect(Object.keys(customTools)).toContain("mcp__github__create_issue");
+    expect(customTools.mcp__github__create_issue.description).toContain("GitHub issue");
+    expect(Object.keys(customTools.mcp__github__create_issue.inputSchema.properties)).toEqual([
+      "owner",
+      "repo",
+      "title",
+      "body"
     ]);
-    const child = spawn(process.execPath, [bridgeScriptPath, "--client-mcp-server"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CURSOR_SDK_BRIDGE_CALLBACK_URL: `http://127.0.0.1:${port}/client-tool-call`,
-        CURSOR_SDK_BRIDGE_CALLBACK_TOKEN: "bridge-token",
-        CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY: "cache-key",
-        CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON: JSON.stringify(tools)
-      }
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
 
-    const listMessage = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/list"
-    };
-    const callMessage = {
-      jsonrpc: "2.0",
-      id: 2,
-      method: "tools/call",
-      params: {
-        name: "mcp__github__create_issue",
-        arguments: {
-          owner: "octo",
-          repo: "hello",
-          title: "Smoke",
-          body: "OK"
-        }
-      }
-    };
-    child.stdin.end(`${JSON.stringify(listMessage)}\n${JSON.stringify(callMessage)}\n`);
+    const args = { owner: "octo", repo: "hello", title: "Smoke", body: "OK" };
+    const result = await customTools.mcp__github__create_issue.execute(args);
 
-    const exitCode = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        child.kill("SIGKILL");
-        reject(new Error("custom MCP forwarding server did not exit"));
-      }, 3000);
-      child.on("error", (error) => {
-        clearTimeout(timeout);
-        reject(error);
-      });
-      child.on("exit", (code) => {
-        clearTimeout(timeout);
-        resolve(code);
-      });
-    });
-    callbackServer.close();
-
-    expect(exitCode).toBe(0);
-    expect(stderr).toBe("");
-    const responses = stdout.trim().split(/\n+/).map((line) => JSON.parse(line));
-    const listResponse = responses.find((response) => response.id === 1);
-    const callResponse = responses.find((response) => response.id === 2);
-    expect(listResponse.result.tools.some((tool) => tool.name === "mcp__github__create_issue")).toBe(true);
-    expect(callResponse.result.content[0].text).toBe("FORWARDED_TO_OUTER_CLIENT");
-    expect(observedRequest).toEqual({
-      url: "/client-tool-call",
-      authorization: "Bearer bridge-token",
-      body: {
-        cacheKey: "cache-key",
-        toolName: "mcp__github__create_issue",
-        arguments: {
-          owner: "octo",
-          repo: "hello",
-          title: "Smoke",
-          body: "OK"
-        }
-      }
-    });
+    expect(result.content[0].text).toBe("FORWARDED_TO_OUTER_CLIENT");
+    expect(captured).toEqual([{ type: "mcp__github__create_issue", args }]);
   });
 
-  it("tells the SDK to forward compatible client tools through MCP", () => {
+  it("points the SDK at the client tools instead of its own built-ins", () => {
     const prompt = bridgePrompt("USER: create a file", [
       { name: "bash" },
       { name: "write" }
     ]);
 
     expect(prompt).toContain("outer client tools are: bash, write");
-    expect(prompt).toContain("Use SDK mcp with providerIdentifier \"client\" for every local operation");
+    expect(prompt).toContain("Route every local operation through the client tools on custom-user-tools");
+    expect(prompt).toContain("empty scratch directory");
     expect(prompt).toContain("client_shell");
-    expect(prompt).toContain("Prefer exact client tools and dedicated client MCP tools");
+    expect(prompt).toContain("Prefer exact client tools and dedicated client tools");
     expect(prompt).toContain("LOCAL TOOL RESULT records are present");
-    expect(prompt).toContain("emit exactly one client MCP forwarding tool call and no prose");
+    expect(prompt).toContain("emit exactly one client tool call and no prose");
   });
 
   it("uses SDK-compatible local options that do not wedge local runs", () => {
@@ -1917,11 +1738,34 @@ describe("Cursor SDK local-agent bridge", () => {
     const baseSendOptions = localAgentSendOptions(baseInput);
     const dynamicSendOptions = localAgentSendOptions(dynamicInput);
 
-    expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY).toEqual(
-      baseSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_AGENT_CACHE_KEY
-    );
-    expect(baseSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("webfetch");
-    expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("webfetch");
-    expect(dynamicSendOptions.mcpServers.client.env.CURSOR_SDK_BRIDGE_CLIENT_TOOLS_JSON).toContain("probe_write_file");
+    // Tool sets change between turns, so they must ride on the send and never
+    // on the agent identity, or every new tool would strand the warm agent.
+    expect(localAgentCreateOptions(baseInput).local.cwd).toEqual(localAgentCreateOptions(dynamicInput).local.cwd);
+    expect(baseSendOptions).not.toHaveProperty("mcpServers");
+    expect(Object.keys(baseSendOptions.local.customTools)).toContain("webfetch");
+    expect(Object.keys(dynamicSendOptions.local.customTools)).toContain("webfetch");
+    expect(Object.keys(dynamicSendOptions.local.customTools)).toContain("probe_write_file");
+  });
+
+  it("keeps the harness out of the real workspace once the client owns tool execution", () => {
+    const withClientTools = {
+      apiKey: "test-key",
+      model: "composer-2.5",
+      workingDirectory: "/tmp/project",
+      sessionKey: "shared-session",
+      clientTools: [{ name: "write" }]
+    };
+    const withoutClientTools = { ...withClientTools, clientTools: [] };
+
+    const scratch = sdkScratchWorkspace(withClientTools);
+    expect(scratch).not.toEqual("/tmp/project");
+    expect(scratch).toContain("api-for-cursor");
+    expect(localAgentCreateOptions(withClientTools).local.cwd).toEqual(scratch);
+    // Clients that execute nothing themselves still need the real directory.
+    expect(sdkScratchWorkspace(withoutClientTools)).toEqual("/tmp/project");
+    // The caller trims the attached inventory per turn, so ownership is declared
+    // separately. Without this the harness would regain the real workspace on
+    // any turn that attaches no tools.
+    expect(sdkScratchWorkspace({ ...withoutClientTools, clientOwnsToolExecution: true })).toEqual(scratch);
   });
 });
