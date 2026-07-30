@@ -10465,6 +10465,183 @@ final class LocalAPIServerTests: XCTestCase {
         XCTAssertFalse(text.contains("event: response.content_part.added"))
         XCTAssertFalse(text.contains(#""type":"message""#))
     }
+
+    private func preparedRequestWithReadTool() throws -> PreparedChatRequest {
+        try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {
+          "model":"composer-2.5",
+          "messages":[{"role":"user","content":"read src/App.tsx"}],
+          "tools":[
+            {
+              "type":"function",
+              "function":{
+                "name":"read_file",
+                "parameters":{
+                  "type":"object",
+                  "properties":{"path":{"type":"string"}},
+                  "required":["path"]
+                }
+              }
+            }
+          ]
+        }
+        """#.utf8))
+    }
+
+    func testUnresolvableToolCallNamesReportsOnlyUnmappableCalls() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let mappable = CursorToolCall(name: "read", arguments: ["path": .string("src/App.tsx")])
+        let unmappable = CursorToolCall(name: "recordScreen", arguments: ["mode": .string("START_RECORDING")])
+
+        XCTAssertEqual(OpenAICompatibility.unresolvableToolCallNames([mappable], prepared: prepared), [])
+        XCTAssertEqual(OpenAICompatibility.unresolvableToolCallNames([unmappable], prepared: prepared), ["recordScreen"])
+    }
+
+    func testNeedsToolCallRepairOnlyWhenEveryCallIsUnmappable() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let mappable = CursorToolCall(name: "read", arguments: ["path": .string("src/App.tsx")])
+        let unmappable = CursorToolCall(name: "recordScreen", arguments: ["mode": .string("START_RECORDING")])
+
+        XCTAssertFalse(OpenAICompatibility.needsToolCallRepair(
+            CursorSDKOutput(text: "", toolCalls: [], agentID: "agent-test", runID: "run-test"),
+            prepared: prepared
+        ))
+        XCTAssertFalse(OpenAICompatibility.needsToolCallRepair(
+            CursorSDKOutput(text: "", toolCalls: [mappable], agentID: "agent-test", runID: "run-test"),
+            prepared: prepared
+        ))
+        XCTAssertTrue(OpenAICompatibility.needsToolCallRepair(
+            CursorSDKOutput(text: "", toolCalls: [unmappable], agentID: "agent-test", runID: "run-test"),
+            prepared: prepared
+        ))
+    }
+
+    func testRepairedRequestNamesTheClientToolsInBothPrompts() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let repaired = try XCTUnwrap(OpenAICompatibility.repairedRequest(prepared, attemptedToolNames: ["recordScreen"]))
+
+        XCTAssertTrue(repaired.prompt.contains("TOOL CALL NOT AVAILABLE:"))
+        XCTAssertTrue(repaired.prompt.contains("\"recordScreen\""))
+        XCTAssertTrue(repaired.prompt.contains("read_file"))
+        XCTAssertEqual(repaired.promptCharacters, repaired.prompt.count)
+        // The bridge prefers incrementalPrompt for warm agents, so the hint has
+        // to reach both prompts or the retry repeats the same mistake.
+        let incremental = try XCTUnwrap(repaired.incrementalPrompt)
+        XCTAssertTrue(incremental.contains("TOOL CALL NOT AVAILABLE:"))
+    }
+
+    func testRepairedRequestIsSkippedWithoutClientTools() throws {
+        let prepared = try OpenAICompatibility.prepareChatRequest(Data(#"""
+        {"model":"composer-2.5","messages":[{"role":"user","content":"hello"}]}
+        """#.utf8))
+
+        XCTAssertNil(OpenAICompatibility.repairedRequest(prepared, attemptedToolNames: ["recordScreen"]))
+    }
+
+    func testNonEmptyAssistantTextPrefersModelNarration() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let output = CursorSDKOutput(text: "Reading the file now.", toolCalls: [], agentID: "agent-test", runID: "run-test")
+
+        XCTAssertEqual(
+            OpenAICompatibility.nonEmptyAssistantText(prepared: prepared, output: output),
+            "Reading the file now."
+        )
+    }
+
+    func testNonEmptyAssistantTextExplainsAnUnavailableTool() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let unmappable = CursorToolCall(name: "recordScreen", arguments: ["mode": .string("START_RECORDING")])
+        let output = CursorSDKOutput(text: "", toolCalls: [unmappable], agentID: "agent-test", runID: "run-test")
+
+        let text = OpenAICompatibility.nonEmptyAssistantText(prepared: prepared, output: output)
+        XCTAssertTrue(text.contains("recordScreen"))
+        XCTAssertFalse(text.isEmpty)
+    }
+
+    func testChatCompletionsStreamingNeverEndsWithoutContentOrToolCall() async throws {
+        let port = try unusedTCPPort()
+        // recordScreen has no counterpart among the declared client tools, so it
+        // cannot be forwarded. It used to be dropped silently, leaving a stream
+        // that reported finish_reason tool_calls while carrying nothing at all.
+        let unmappable = CursorToolCall(name: "recordScreen", arguments: ["mode": .string("START_RECORDING")])
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
+            .toolCall(unmappable),
+            .done(CursorSDKOutput(text: "", toolCalls: [unmappable], agentID: "agent-test", runID: "run-test"))
+        ]))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"""
+        {
+          "model":"composer-2.5",
+          "stream":true,
+          "messages":[{"role":"user","content":"read src/App.tsx"}],
+          "tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}]
+        }
+        """#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains("recordScreen"))
+        XCTAssertTrue(text.contains(#""finish_reason":"stop""#))
+        XCTAssertFalse(text.contains(#""finish_reason":"tool_calls""#))
+    }
+
+    func testChatCompletionsStreamingStillForwardsMappableToolCalls() async throws {
+        let port = try unusedTCPPort()
+        let toolCall = CursorToolCall(name: "read", arguments: ["path": .string("src/App.tsx")])
+        let server = LocalAPIServer(settingsProvider: { CursorAPISettings(port: port) }, harness: MockHarness(events: [
+            .toolCall(toolCall),
+            .done(CursorSDKOutput(text: "", toolCalls: [toolCall], agentID: "agent-test", runID: "run-test"))
+        ]))
+        try server.start(port: port)
+        defer { server.stop() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:\(port)/v1/chat/completions")!)
+        request.httpMethod = "POST"
+        request.httpBody = Data(#"""
+        {
+          "model":"composer-2.5",
+          "stream":true,
+          "messages":[{"role":"user","content":"read src/App.tsx"}],
+          "tools":[{"type":"function","function":{"name":"read_file","parameters":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}}]
+        }
+        """#.utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let (data, response) = try await URLSession.shared.data(for: request)
+
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        let text = String(data: data, encoding: .utf8) ?? ""
+        XCTAssertTrue(text.contains(#""name":"read_file""#))
+        XCTAssertTrue(text.contains(#""finish_reason":"tool_calls""#))
+    }
+
+    func testChatCompletionResponseNeverReturnsEmptyContent() throws {
+        let prepared = try preparedRequestWithReadTool()
+        let unmappable = CursorToolCall(name: "recordScreen", arguments: ["mode": .string("START_RECORDING")])
+
+        let object = OpenAICompatibility.chatCompletionResponse(
+            id: "chatcmpl_test",
+            created: 1,
+            prepared: prepared,
+            output: CursorSDKOutput(text: "", toolCalls: [unmappable], agentID: "agent-test", runID: "run-test")
+        )
+
+        let choices = try XCTUnwrap(object["choices"] as? [[String: Any]])
+        let choice = try XCTUnwrap(choices.first)
+        let message = try XCTUnwrap(choice["message"] as? [String: Any])
+        let content = try XCTUnwrap(message["content"] as? String)
+
+        XCTAssertFalse(content.isEmpty)
+        XCTAssertEqual(choice["finish_reason"] as? String, "stop")
+        XCTAssertEqual((message["tool_calls"] as? [[String: Any]])?.isEmpty, true)
+    }
 }
 
 private func sendResponseRequest(port: UInt16, body: String) async throws {
