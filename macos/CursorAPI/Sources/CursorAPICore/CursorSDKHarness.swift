@@ -297,6 +297,11 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             "sessionKey": prepared.sessionKey ?? agentID,
             "workingDirectory": prepared.toolContext?.workingDirectory ?? "",
             "streamEvents": true,
+            // Separate from `tools`, which is filtered down to the subset worth
+            // showing the model on this turn. Any declared tool means the caller
+            // executes locally, so the harness must stay out of the workspace
+            // even on turns where no inventory is attached.
+            "clientOwnsToolExecution": !prepared.tools.isEmpty,
             "tools": Self.bridgeToolObjects(prepared)
         ]
         request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])

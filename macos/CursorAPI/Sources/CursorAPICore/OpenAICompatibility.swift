@@ -80,6 +80,12 @@ public struct PreparedChatRequest: Equatable, Sendable {
 public enum OpenAICompatibility {
     private static let toolResultContinuation = "The above tool calls have been executed. Continue your response based on these results."
     private static let sdkToolCallMemory = SDKToolCallMemoryStore()
+    /// The bridge registers the caller's tools as in-process SDK custom tools,
+    /// which the runtime surfaces under this synthetic MCP server name.
+    static let clientToolProvider = "custom-user-tools"
+    /// `shouldAttachBridgeTools` keys off this prefix, so the hint text and that
+    /// check have to share it.
+    private static let requestedToolHintPrefix = "Call the client tool now"
 
     public static func modelList() -> [String: Any] {
         [
@@ -157,8 +163,8 @@ public enum OpenAICompatibility {
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a tool call and wait for the tool result.",
             "When the conversation includes LOCAL TOOL RESULT records, treat them as completed SDK tool_call results for your previous tool requests and continue from those results.",
-            "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are called through SDK mcp with providerIdentifier, toolName, and args.",
-            "For local file inspection, edits, commands, and project work, use SDK mcp with providerIdentifier \"client\" so the outer client executes the operation.",
+            "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are callable by exact name on the \(clientToolProvider) server.",
+            "For local file inspection, edits, commands, and project work, call the client tools on \(clientToolProvider) so the outer client executes the operation.",
             "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a tool call and received a LOCAL TOOL RESULT confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
@@ -172,12 +178,14 @@ public enum OpenAICompatibility {
         var sawToolResult = false
         var latestUserText = ""
         var mutationToolCallAfterLatestUser = false
+        var toolResultAfterLatestUser = false
 
         for item in messages {
             let role = (item["role"] as? String) ?? "user"
             let text = contentText(item["content"], role: role)
             if role == "tool" {
                 sawToolResult = true
+                toolResultAfterLatestUser = true
                 let toolCallID = (item["tool_call_id"] as? String) ?? ""
                 let toolName = (item["name"] as? String) ?? rememberedToolCalls[toolCallID]?.name ?? ""
                 let label = [toolName.isEmpty ? nil : "name=\(toolName)", toolCallID.isEmpty ? nil : "tool_call_id=\(toolCallID)"]
@@ -193,6 +201,7 @@ public enum OpenAICompatibility {
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     latestUserText = text
                     mutationToolCallAfterLatestUser = false
+                    toolResultAfterLatestUser = false
                 }
             }
 
@@ -216,7 +225,7 @@ public enum OpenAICompatibility {
             transcript.append(toolResultContinuation)
         }
         let localToolRequired = shouldRequireLocalTool(for: latestUserText, tools: tools)
-        if localToolRequired, !mutationToolCallAfterLatestUser {
+        if localToolRequired, !mutationToolCallAfterLatestUser, !toolResultAfterLatestUser {
             appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText)
         }
         appendOptions(&transcript, raw)
@@ -385,7 +394,7 @@ public enum OpenAICompatibility {
             || prepared.prompt.contains("LOCAL TOOL RESULT:")
             || prepared.prompt.contains(toolResultContinuation)
             || prepared.prompt.contains("You must call at least one tool.")
-            || prepared.prompt.contains("Use SDK mcp now with providerIdentifier")
+            || prepared.prompt.contains(requestedToolHintPrefix)
     }
 
     private static func shouldForwardAllBridgeTools(for prepared: PreparedChatRequest) -> Bool {
@@ -470,8 +479,8 @@ public enum OpenAICompatibility {
             "You are running through a local Cursor SDK-compatible harness.",
             "The client owns local tool execution. When local inspection, shell commands, or file changes are needed, request a function_call and wait for the function_call_output.",
             "When the input includes function_call_output records, treat them as completed local tool results for your previous function_call requests and continue from those results.",
-            "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are called through SDK mcp with providerIdentifier, toolName, and args.",
-            "For local file inspection, edits, commands, and project work, use SDK mcp with providerIdentifier \"client\" so the outer client executes the operation.",
+            "If the user explicitly names an allowed client tool, use that tool. Non-builtin client tools and OpenCode MCP/server tools are callable by exact name on the \(clientToolProvider) server.",
+            "For local file inspection, edits, commands, and project work, call the client tools on \(clientToolProvider) so the outer client executes the operation.",
             "Do not claim that you created, edited, inspected, or ran anything locally unless you emitted a function_call and received a function_call_output confirming it.",
             "When starting a dev server or other long-running watcher, start it in the background with output redirected and return immediately.",
             "Do not say that agent mode or tools are unavailable."
@@ -655,7 +664,7 @@ public enum OpenAICompatibility {
             "",
             "TOOL CALL NOT AVAILABLE:",
             "Your last turn called \(attemptedList), which the outer client cannot execute.",
-            "Call one of these client tools instead, by exact name: \(prepared.tools.map(\.name).joined(separator: ", ")).",
+            "Call one of these client tools instead, by exact name on \(clientToolProvider): \(prepared.tools.map(\.name).joined(separator: ", ")).",
             "Emit exactly one client tool call with arguments matching that tool's schema, and no prose."
         ].joined(separator: "\n")
         var repaired = prepared
@@ -667,9 +676,9 @@ public enum OpenAICompatibility {
         return repaired
     }
 
-    /// Assistant text that is never empty. Clients treat a turn with no content
-    /// and no usable tool call as a provider failure, so the model's narration is
-    /// used when present and an explanation otherwise.
+    /// Assistant text that is never empty. Clients such as Cline treat a turn
+    /// with no content and no usable tool call as a provider failure, so the
+    /// model's narration is used when present and an explanation otherwise.
     public static func nonEmptyAssistantText(prepared: PreparedChatRequest, output: CursorSDKOutput) -> String {
         if !output.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return output.text
@@ -1544,13 +1553,13 @@ public enum OpenAICompatibility {
         transcript.append("")
         transcript.append("LOCAL TOOL INVENTORY:")
         transcript.append("Client tool targets: \(tools.map(\.name).joined(separator: ", "))")
-        transcript.append("These are client execution targets. Prefer the SDK mcp route for the exact client tool name and schema.")
-        transcript.append("For local work, emit one SDK mcp tool call with providerIdentifier \"client\" and toolName pointing at the exact client tool or a client_* forwarding tool.")
-        transcript.append("Do not use SDK built-in shell/read/write/edit/glob/grep/ls/delete tools directly; they execute inside the SDK bridge runtime instead of the outer client.")
-        transcript.append("When the user names a specific allowed client tool, use the SDK mcp route for that exact client tool and do not substitute a different tool.")
+        transcript.append("These are client execution targets, callable by exact name on the \(clientToolProvider) server.")
+        transcript.append("For local work, call the exact client tool or a client_* forwarding tool on \(clientToolProvider).")
+        transcript.append("Do not use SDK built-in shell/read/write/edit/glob/grep/ls/delete tools directly. Your working directory is an empty scratch directory, so those tools cannot see or change the user's project.")
+        transcript.append("When the user names a specific allowed client tool, call that exact client tool and do not substitute a different tool.")
         transcript.append("If you need a local tool, emit the tool call before prose. Do not write progress text such as \"creating the file\" instead of calling a tool.")
         if hasDedicatedCompatibleTool(["write", "edit", "read", "grep", "glob", "ls", "delete"], in: tools) {
-            transcript.append("For file reads, writes, edits, search, listing, and deletes, prefer exact client file tools through SDK mcp. Do not use shell/bash for those operations when write/read/edit/glob/grep/ls/delete tools are available.")
+            transcript.append("For file reads, writes, edits, search, listing, and deletes, prefer the exact client file tools. Do not use shell/bash for those operations when write/read/edit/glob/grep/ls/delete tools are available.")
         } else if hasCompatibleTool("shell", in: tools) {
             transcript.append("A shell client tool is available as the fallback local execution route. For file creation through shell, use mkdir -p and a quoted heredoc.")
         }
@@ -1601,12 +1610,14 @@ public enum OpenAICompatibility {
         var sawToolResult = false
         var latestUserText = ""
         var mutationToolCallAfterLatestUser = false
+        var toolResultAfterLatestUser = false
 
         for item in currentMessages {
             let role = (item["role"] as? String) ?? "user"
             let text = contentText(item["content"], role: role)
             if role == "tool" {
                 sawToolResult = true
+                toolResultAfterLatestUser = true
                 let toolCallID = (item["tool_call_id"] as? String) ?? ""
                 let toolName = (item["name"] as? String) ?? rememberedToolCalls[toolCallID]?.name ?? ""
                 let label = [toolName.isEmpty ? nil : "name=\(toolName)", toolCallID.isEmpty ? nil : "tool_call_id=\(toolCallID)"]
@@ -1622,6 +1633,7 @@ public enum OpenAICompatibility {
                 if role == "user", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     latestUserText = text
                     mutationToolCallAfterLatestUser = false
+                    toolResultAfterLatestUser = false
                 }
             }
 
@@ -1646,7 +1658,7 @@ public enum OpenAICompatibility {
             transcript.append(toolResultContinuation)
         }
         let localToolRequired = shouldRequireLocalTool(for: latestUserText, tools: tools)
-        if localToolRequired, !mutationToolCallAfterLatestUser {
+        if localToolRequired, !mutationToolCallAfterLatestUser, !toolResultAfterLatestUser {
             appendRequiredLocalToolHint(&transcript, tools: tools, latestUserText: latestUserText)
         }
         appendOptions(&transcript, raw)
@@ -1668,7 +1680,7 @@ public enum OpenAICompatibility {
         let routes = sdkRoutingRecords(tools: tools, context: context)
         guard !routes.isEmpty else { return }
         transcript.append("SDK TOOL ROUTING MAP:")
-        transcript.append("Prefer routes marked preferred. They forward through SDK mcp to the exact client tool and argument schema.")
+        transcript.append("Prefer routes marked preferred. They forward to the exact client tool and argument schema.")
         for route in routes {
             if let data = try? JSONSerialization.data(withJSONObject: route, options: [.withoutEscapingSlashes]),
                let json = String(data: data, encoding: .utf8) {
@@ -1766,19 +1778,19 @@ public enum OpenAICompatibility {
             return
         }
         if hasDedicatedCompatibleTool(["write", "edit"], in: tools) {
-            transcript.append("For creating or updating files, use SDK mcp for an exact client write/edit file tool with matching arguments. Do not use shell/bash for file writes when a write/edit tool is available. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("For creating or updating files, call an exact client write/edit file tool with matching arguments. Do not use shell/bash for file writes when a write/edit tool is available. After the client returns a LOCAL TOOL RESULT, continue.")
         } else if hasCompatibleTool("shell", in: tools) {
-            transcript.append("Use SDK mcp for the client shell/bash tool. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("Call the client shell/bash tool. For creating or overwriting a file, run mkdir -p for the parent directory and write the file with a single quoted heredoc. After the client returns a LOCAL TOOL RESULT, continue.")
         } else {
-            transcript.append("For creating or overwriting a file, use SDK mcp for an exact client write/edit file tool with matching arguments. After the client returns a LOCAL TOOL RESULT, continue.")
+            transcript.append("For creating or overwriting a file, call an exact client write/edit file tool with matching arguments. After the client returns a LOCAL TOOL RESULT, continue.")
         }
     }
 
     private static func requestedToolHint(for toolName: String) -> String {
         if let mcpTarget = mcpTarget(forClientToolName: toolName, includeMapped: true) {
-            return "Use SDK mcp now with providerIdentifier \"\(mcpTarget.provider)\", toolName \"\(mcpTarget.toolName)\", and args matching the \(toolName) schema. Do not substitute another tool for this explicitly requested client tool."
+            return "\(requestedToolHintPrefix): \"\(mcpTarget.toolName)\" on \(mcpTarget.provider), with args matching the \(toolName) schema. Do not substitute another tool for this explicitly requested client tool."
         }
-        return "Use SDK mcp now with providerIdentifier \"client\", toolName \"\(toolName)\", and args matching the \(toolName) schema. Do not substitute a different tool."
+        return "\(requestedToolHintPrefix): \"\(toolName)\" on \(clientToolProvider), with args matching the \(toolName) schema. Do not substitute a different tool."
     }
 
     private static func explicitlyRequestedToolName(in text: String, tools: [OpenAIToolSpec]) -> String? {
@@ -1807,9 +1819,9 @@ public enum OpenAICompatibility {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         if isKnownMappedToolName(trimmed) {
-            return includeMapped ? (provider: "client", toolName: trimmed) : nil
+            return includeMapped ? (provider: clientToolProvider, toolName: trimmed) : nil
         }
-        return (provider: "client", toolName: trimmed)
+        return (provider: clientToolProvider, toolName: trimmed)
     }
 
     private static func isKnownMappedToolName(_ name: String) -> Bool {
