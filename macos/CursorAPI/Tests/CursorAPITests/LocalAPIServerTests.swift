@@ -288,6 +288,8 @@ final class LocalAPIServerTests: XCTestCase {
         let text = String(data: data, encoding: .utf8) ?? ""
         XCTAssertTrue(text.contains("composer-2.5"))
         XCTAssertTrue(text.contains("composer-2.5-fast"))
+        XCTAssertTrue(text.contains("grok-4.6"))
+        XCTAssertTrue(text.contains("grok-4.6-fast"))
         XCTAssertNil(object["models"])
         XCTAssertEqual(dataModels.compactMap { $0["id"] as? String }, ComposerModels.all.map(\.id))
         for model in dataModels {

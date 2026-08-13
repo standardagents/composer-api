@@ -710,7 +710,7 @@ if [ "$RUN_OPENCODE" -eq 1 ]; then
 }
 JSON
 
-  models_output="$(cd "$temp_project" && HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode --pure models cursorapi 2>&1)"
+  models_output="$(cd "$temp_project" && HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode models cursorapi 2>&1)"
   printf '%s\n' "$models_output"
   grep -F "cursorapi/composer-2.5-fast" <<<"$models_output" >/dev/null || fail "OpenCode did not list composer-2.5-fast"
 

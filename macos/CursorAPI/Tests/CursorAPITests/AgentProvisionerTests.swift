@@ -21,6 +21,8 @@ final class AgentProvisionerTests: XCTestCase {
         let models = try XCTUnwrap(cursorProvider["models"] as? [String: Any])
         let fast = try XCTUnwrap(models["composer-2.5-fast"] as? [String: Any])
         assertComposerMetadata(fast, inputCost: 3.0, outputCost: 15.0)
+        let grokFast = try XCTUnwrap(models["grok-4.6-fast"] as? [String: Any])
+        assertComposerMetadata(grokFast, inputCost: 4.0, outputCost: 12.0, contextWindow: 256_000)
         XCTAssertTrue(provisioner.status(for: .opencode, settings: settings).installed)
     }
 
@@ -535,6 +537,8 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(generatedText.contains("http://127.0.0.1:8787/v1"))
         XCTAssertTrue(generatedText.contains("composer-2.5"))
         XCTAssertTrue(generatedText.contains("composer-2.5-fast"))
+        XCTAssertTrue(generatedText.contains("grok-4.6"))
+        XCTAssertTrue(generatedText.contains("grok-4.6-fast"))
         XCTAssertTrue(generatedText.contains("grok-4.5"))
         XCTAssertTrue(generatedText.contains("grok-4.5-fast"))
         XCTAssertTrue(generatedText.contains("cursor-local"))
@@ -560,6 +564,8 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertTrue(generatedText.contains("http://127.0.0.1:8787/v1"))
         XCTAssertTrue(generatedText.contains("composer-2.5"))
         XCTAssertTrue(generatedText.contains("composer-2.5-fast"))
+        XCTAssertTrue(generatedText.contains("grok-4.6"))
+        XCTAssertTrue(generatedText.contains("grok-4.6-fast"))
         XCTAssertTrue(generatedText.contains("grok-4.5"))
         XCTAssertTrue(generatedText.contains("grok-4.5-fast"))
         XCTAssertTrue(generatedText.contains("cursor-local"))
@@ -777,6 +783,7 @@ final class AgentProvisionerTests: XCTestCase {
         _ metadata: [String: Any],
         inputCost: Double,
         outputCost: Double,
+        contextWindow: Int = 200_000,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -784,7 +791,7 @@ final class AgentProvisionerTests: XCTestCase {
         XCTAssertEqual((cost?["input"] as? NSNumber)?.doubleValue, inputCost, file: file, line: line)
         XCTAssertEqual((cost?["output"] as? NSNumber)?.doubleValue, outputCost, file: file, line: line)
         let limit = metadata["limit"] as? [String: Any]
-        XCTAssertEqual((limit?["context"] as? NSNumber)?.intValue, 200_000, file: file, line: line)
+        XCTAssertEqual((limit?["context"] as? NSNumber)?.intValue, contextWindow, file: file, line: line)
         XCTAssertEqual((limit?["output"] as? NSNumber)?.intValue, 65_536, file: file, line: line)
     }
 }

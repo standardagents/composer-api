@@ -1,6 +1,6 @@
 # API for Cursor
 
-Local OpenAI-compatible `chat.completions` and `responses` endpoints backed by Cursor models (Composer 2.5, Grok 4.5, and more).
+Local OpenAI-compatible `chat.completions` and `responses` endpoints backed by Cursor models (Composer 2.5, Grok 4.6, and more).
 
 Download site: https://api-for-cursor.standardagents.ai
 
@@ -22,6 +22,8 @@ Primary local model ids:
 
 - `composer-2.5`
 - `composer-2.5-fast`
+- `grok-4.6`
+- `grok-4.6-fast`
 - `grok-4.5`
 - `grok-4.5-fast`
 
@@ -89,7 +91,7 @@ These OpenAI features are intentionally rejected because Cursor does not expose 
 - OpenAI function/tool calls on the Responses API
 - background Responses API jobs
 
-Token usage is estimated from character counts because Cursor's stream does not return OpenAI token accounting on this path. For Composer 2.5, Composer 2.5 Fast, Grok 4.5, and Grok 4.5 Fast, `usage.cost` is estimated from Cursor's published per-million-token pricing.
+Token usage is estimated from character counts because Cursor's stream does not return OpenAI token accounting on this path. For Composer 2.5 and the listed Grok models, `usage.cost` is estimated from Cursor's published per-million-token pricing.
 
 ## OpenCode
 
@@ -196,6 +198,7 @@ wrangler secret put CURSOR_SDK_BRIDGE_TOKEN
 - Cursor SDK package: `@cursor/sdk@1.0.13`
 - Cursor SDK TypeScript docs: https://cursor.com/docs/api/sdk/typescript
 - Cursor Composer 2.5 changelog: https://cursor.com/changelog/composer-2-5
+- Cursor Grok 4.6 docs: https://cursor.com/docs/models/grok-4-6
 - Cursor Grok 4.5 docs: https://cursor.com/docs/models/grok-4-5
 - OpenAI Chat Completions reference: https://developers.openai.com/api/docs/api-reference/chat
 - OpenAI Responses reference: https://developers.openai.com/api/docs/api-reference/responses

@@ -95,6 +95,7 @@ struct ContentView: View {
             } else {
                 VStack(alignment: .leading, spacing: 16) {
                     EndpointPanel(model: model)
+                    AvailableModelsPanel()
                     SimpleIntegrationsPanel(model: model)
                 }
             }
@@ -116,6 +117,44 @@ struct ContentView: View {
 
     private var statusTone: StatusPill.Tone {
         model.hasCursorAPIKey && !model.needsKeychainPermission && model.sdkConfigured ? .ok : .warning
+    }
+}
+
+struct AvailableModelsPanel: View {
+    private let columns = [
+        GridItem(.adaptive(minimum: 142), spacing: 8, alignment: .leading)
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Available Models")
+                .font(.title3.weight(.semibold))
+
+            LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                ForEach(ComposerModels.all, id: \.id) { model in
+                    HStack(spacing: 7) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                        Text(model.id)
+                            .font(.system(.caption, design: .monospaced).weight(.medium))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(AppTheme.controlBackground.opacity(0.72))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(AppTheme.separator.opacity(0.7), lineWidth: 0.5)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Available model " + model.name)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

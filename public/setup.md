@@ -1,6 +1,6 @@
 # API for Cursor
 
-API for Cursor starts a local OpenAI-compatible server for Cursor models, including Composer 2.5 and Grok 4.5. Coding agents connect to the local `/v1` base URL and keep using their own project folders, shell tools, and file workflows.
+API for Cursor starts a local OpenAI-compatible server for Cursor models, including Composer 2.5 and Grok 4.6. Coding agents connect to the local `/v1` base URL and keep using their own project folders, shell tools, and file workflows.
 
 ## Local Endpoints
 
@@ -22,6 +22,8 @@ Local model ids exposed by the app:
 
 - `composer-2.5`
 - `composer-2.5-fast`
+- `grok-4.6`
+- `grok-4.6-fast`
 - `grok-4.5`
 - `grok-4.5-fast`
 
@@ -35,6 +37,8 @@ The model ids are:
 
 - `composer-2.5`
 - `composer-2.5-fast`
+- `grok-4.6`
+- `grok-4.6-fast`
 - `grok-4.5`
 - `grok-4.5-fast`
 
@@ -53,7 +57,7 @@ model = "composer-2.5"
 model_provider = "cursor-composer"
 
 [profiles.cursor-grok]
-model = "grok-4.5"
+model = "grok-4.6"
 model_provider = "cursor-composer"
 ```
 
@@ -65,4 +69,4 @@ Any client that supports an OpenAI-compatible base URL can use:
 http://127.0.0.1:8787/v1
 ```
 
-Use a model id such as `composer-2.5` or `grok-4.5`.
+Use a model id such as `composer-2.5` or `grok-4.6`.

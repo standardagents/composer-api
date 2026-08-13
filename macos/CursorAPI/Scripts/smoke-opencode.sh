@@ -12,7 +12,7 @@ usage() {
 Usage: $0 [--app PATH] [--timeout SECONDS]
 
 Launch the packaged macOS app, create an isolated OpenCode config for API for
-Cursor, verify OpenCode can read both Composer models, and verify OpenCode
+Cursor, verify OpenCode can read the supported Cursor models, and verify OpenCode
 surfaces the local API's locked-key response without touching user configs.
 
   --app PATH    App bundle to launch. Defaults to dist/API for Cursor.app.
@@ -102,6 +102,16 @@ cat > "$temp_config/opencode/opencode.json" <<JSON
           "name": "Composer 2.5 Fast",
           "cost": { "input": 3, "output": 15 },
           "limit": { "context": 200000, "output": 65536 }
+        },
+        "grok-4.6": {
+          "name": "Grok 4.6",
+          "cost": { "input": 2, "output": 6 },
+          "limit": { "context": 256000, "output": 65536 }
+        },
+        "grok-4.6-fast": {
+          "name": "Grok 4.6 Fast",
+          "cost": { "input": 4, "output": 12 },
+          "limit": { "context": 256000, "output": 65536 }
         }
       }
     }
@@ -109,17 +119,19 @@ cat > "$temp_config/opencode/opencode.json" <<JSON
 }
 JSON
 
-models_output="$(cd "$temp_project" && HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode --pure models cursorapi 2>&1)"
+models_output="$(cd "$temp_project" && HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode models cursorapi 2>&1)"
 printf '%s\n' "$models_output"
 grep -F "cursorapi/composer-2.5" <<<"$models_output" >/dev/null || fail "OpenCode did not list composer-2.5"
 grep -F "cursorapi/composer-2.5-fast" <<<"$models_output" >/dev/null || fail "OpenCode did not list composer-2.5-fast"
+grep -F "cursorapi/grok-4.6" <<<"$models_output" >/dev/null || fail "OpenCode did not list grok-4.6"
+grep -F "cursorapi/grok-4.6-fast" <<<"$models_output" >/dev/null || fail "OpenCode did not list grok-4.6-fast"
 
 if [ "$status" = "needs_unlock" ]; then
   run_output="$(mktemp "${TMPDIR:-/tmp}/api-for-cursor-opencode-run.XXXXXX")"
   TEMP_FILES+=("$run_output")
   (
     cd "$temp_project"
-    HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode --pure run --model cursorapi/composer-2.5 "say hello" >"$run_output" 2>&1
+    HOME="$temp_home" XDG_CONFIG_HOME="$temp_config" opencode run --model cursorapi/composer-2.5 "say hello" >"$run_output" 2>&1
   ) &
   run_pid=$!
   deadline=$((SECONDS + TIMEOUT_SECONDS))

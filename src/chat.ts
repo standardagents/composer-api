@@ -58,6 +58,8 @@ const MODELS = [
   { id: "gemini-2.5-flash", label: "gemini-2.5-flash" },
   { id: "grok-build-0.1", label: "grok-build-0.1" },
   { id: "grok-4.3", label: "grok-4.3" },
+  { id: "grok-4.6", label: "grok-4.6" },
+  { id: "grok-4.6-fast", label: "grok-4.6-fast" },
   { id: "grok-4.5", label: "grok-4.5" },
   { id: "grok-4.5-fast", label: "grok-4.5-fast" },
   { id: "kimi-k2.5", label: "kimi-k2.5" }

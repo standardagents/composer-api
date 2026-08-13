@@ -1205,6 +1205,8 @@ describe("Worker", () => {
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5")?.name).toBe("Composer 2.5");
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5-sdk")?.name).toBe("Composer 2.5 SDK Harness");
     expect(opencodeSdkBody.data.find((model) => model.id === "composer-2.5")?.cost).toEqual({ input: 0.5, output: 2.5 });
+    expect(opencodeSdkBody.data.find((model) => model.id === "grok-4.6")?.cost).toEqual({ input: 2, output: 6 });
+    expect(opencodeSdkBody.data.find((model) => model.id === "grok-4.6-fast")?.cost).toEqual({ input: 4, output: 12 });
   });
 
   it("streams SSE response events in direct mode for /v1/responses", async () => {
