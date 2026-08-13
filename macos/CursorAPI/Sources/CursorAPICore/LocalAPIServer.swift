@@ -399,7 +399,10 @@ public final class LocalAPIServer: @unchecked Sendable {
                         usage: usage
                     ))
                 }
-                let output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
+                var output = try await harness.complete(prepared: prepared, settings: settings, authorization: request.header("authorization"))
+                if let repaired = try? await repairedOutput(for: output, prepared: prepared, settings: settings, authorization: request.header("authorization")) {
+                    output = repaired
+                }
                 return try .response(withCORS(HTTPResponse.json(OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: output))))
             }
             if method == "POST", path == "/v1/responses" {
@@ -585,7 +588,17 @@ public final class LocalAPIServer: @unchecked Sendable {
                     let bufferTextUntilToolDecision = shouldBufferTextUntilToolDecision(prepared)
                     var emittedText = ""
                     var emittedToolCalls: [CursorToolCall] = []
+                    var emittedToolCallChunks = 0
                     var finalOutput: CursorSDKOutput?
+                    // A tool call that cannot be mapped to a client tool produces
+                    // no chunk. Counting it as emitted would close the stream with
+                    // finish_reason tool_calls and nothing in it.
+                    let yieldToolCall: (CursorToolCall, Int) -> Bool = { toolCall, index in
+                        let chunk = OpenAICompatibility.chatCompletionStreamToolCall(id: id, created: created, prepared: prepared, toolCall: toolCall, index: index)
+                        guard !chunk.isEmpty else { return false }
+                        continuation.yield(chunk)
+                        return true
+                    }
 
                     for try await event in harness.stream(prepared: prepared, settings: settings, authorization: authorization) {
                         switch event {
@@ -595,35 +608,49 @@ public final class LocalAPIServer: @unchecked Sendable {
                                 continuation.yield(OpenAICompatibility.chatCompletionStreamText(id: id, created: created, model: prepared.model, delta: delta))
                             }
                         case .toolCall(let toolCall):
-                            let index = emittedToolCalls.count
                             emittedToolCalls.append(toolCall)
-                            continuation.yield(OpenAICompatibility.chatCompletionStreamToolCall(id: id, created: created, prepared: prepared, toolCall: toolCall, index: index))
+                            if yieldToolCall(toolCall, emittedToolCallChunks) {
+                                emittedToolCallChunks += 1
+                            }
                         case .done(let output):
                             finalOutput = output
                         }
                     }
 
-                    let output = resolvedOutput(finalOutput: finalOutput, emittedText: emittedText, emittedToolCalls: emittedToolCalls)
+                    var output = resolvedOutput(finalOutput: finalOutput, emittedText: emittedText, emittedToolCalls: emittedToolCalls)
+                    if emittedToolCallChunks == 0,
+                       let repaired = try? await repairedOutput(for: output, prepared: prepared, settings: settings, authorization: authorization) {
+                        output = repaired
+                    }
                     usage?.set(Self.usage(fromObject: OpenAICompatibility.chatCompletionResponse(id: id, created: created, prepared: prepared, output: output)))
-                    let shouldEmitText = output.toolCalls.isEmpty
+                    if output.toolCalls.count > emittedToolCalls.count {
+                        for toolCall in output.toolCalls.dropFirst(emittedToolCalls.count) {
+                            if yieldToolCall(toolCall, emittedToolCallChunks) {
+                                emittedToolCallChunks += 1
+                            }
+                        }
+                    }
+                    let shouldEmitText = emittedToolCallChunks == 0
                     if shouldEmitText, output.text.count > emittedText.count, output.text.hasPrefix(emittedText) {
                         let suffix = String(output.text.dropFirst(emittedText.count))
                         continuation.yield(OpenAICompatibility.chatCompletionStreamText(id: id, created: created, model: prepared.model, delta: suffix))
                         emittedText += suffix
                     } else if shouldEmitText, (bufferTextUntilToolDecision || emittedText.isEmpty), !output.text.isEmpty {
                         continuation.yield(OpenAICompatibility.chatCompletionStreamText(id: id, created: created, model: prepared.model, delta: output.text))
+                        emittedText = output.text
                     }
-                    if output.toolCalls.count > emittedToolCalls.count {
-                        for (offset, toolCall) in output.toolCalls.dropFirst(emittedToolCalls.count).enumerated() {
-                            let index = emittedToolCalls.count + offset
-                            continuation.yield(OpenAICompatibility.chatCompletionStreamToolCall(id: id, created: created, prepared: prepared, toolCall: toolCall, index: index))
-                        }
+                    // Last line of defence: never close a stream that carries
+                    // neither content nor a usable tool call.
+                    if emittedToolCallChunks == 0, emittedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        let fallback = OpenAICompatibility.nonEmptyAssistantText(prepared: prepared, output: output)
+                        continuation.yield(OpenAICompatibility.chatCompletionStreamText(id: id, created: created, model: prepared.model, delta: fallback))
+                        emittedText = fallback
                     }
                     continuation.yield(OpenAICompatibility.chatCompletionStreamFinish(
                         id: id,
                         created: created,
                         model: prepared.model,
-                        emittedToolCallCount: max(emittedToolCalls.count, output.toolCalls.count)
+                        emittedToolCallCount: emittedToolCallChunks
                     ))
                     if prepared.streamIncludeUsage {
                         continuation.yield(OpenAICompatibility.chatCompletionStreamUsage(id: id, created: created, prepared: prepared, output: output))
@@ -755,6 +782,29 @@ public final class LocalAPIServer: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// One extra upstream run when the model called a tool the client cannot
+    /// execute, telling it which tools actually exist. Returns nil when a repair
+    /// is not warranted or did not improve on the original output.
+    private func repairedOutput(
+        for output: CursorSDKOutput,
+        prepared: PreparedChatRequest,
+        settings: CursorAPISettings,
+        authorization: String?
+    ) async throws -> CursorSDKOutput? {
+        guard OpenAICompatibility.needsToolCallRepair(output, prepared: prepared) else { return nil }
+        let attempted = OpenAICompatibility.unresolvableToolCallNames(output.toolCalls, prepared: prepared)
+        guard let repairedRequest = OpenAICompatibility.repairedRequest(prepared, attemptedToolNames: attempted) else { return nil }
+        let retried = try await harness.complete(prepared: repairedRequest, settings: settings, authorization: authorization)
+        if !retried.toolCalls.isEmpty,
+           OpenAICompatibility.unresolvableToolCallNames(retried.toolCalls, prepared: prepared).count < retried.toolCalls.count {
+            return retried
+        }
+        if retried.toolCalls.isEmpty, !retried.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return retried
+        }
+        return nil
     }
 
     private func resolvedOutput(

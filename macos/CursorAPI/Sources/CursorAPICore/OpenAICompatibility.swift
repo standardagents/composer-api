@@ -627,6 +627,61 @@ public enum OpenAICompatibility {
         ]
     }
 
+    /// Names of SDK tool calls that cannot be expressed as one of the client's
+    /// declared tools. Forwarding them as `tool_calls` would be rejected and
+    /// dropping them silently leaves an empty assistant turn, so callers use
+    /// this to decide between a repair run and a text fallback.
+    public static func unresolvableToolCallNames(_ toolCalls: [CursorToolCall], prepared: PreparedChatRequest) -> [String] {
+        toolCalls.compactMap { toolCall in
+            guard resolveToolCall(toolCall, tools: prepared.tools, context: prepared.toolContext) == nil else { return nil }
+            return normalizeSDKToolCall(toolCall).name
+        }
+    }
+
+    /// True when every tool call the model produced was unmappable, which is the
+    /// only case worth spending a second upstream run on.
+    public static func needsToolCallRepair(_ output: CursorSDKOutput, prepared: PreparedChatRequest) -> Bool {
+        guard !output.toolCalls.isEmpty else { return false }
+        return unresolvableToolCallNames(output.toolCalls, prepared: prepared).count == output.toolCalls.count
+    }
+
+    /// A copy of the request with a hint naming the client's actual tools, for
+    /// one retry after the model reached for a tool that does not exist here.
+    public static func repairedRequest(_ prepared: PreparedChatRequest, attemptedToolNames: [String]) -> PreparedChatRequest? {
+        guard !prepared.tools.isEmpty else { return nil }
+        let attempted = attemptedToolNames.filter { !$0.isEmpty }
+        let attemptedList = attempted.isEmpty ? "a tool" : attempted.map { "\"\($0)\"" }.joined(separator: ", ")
+        let hint = [
+            "",
+            "TOOL CALL NOT AVAILABLE:",
+            "Your last turn called \(attemptedList), which the outer client cannot execute.",
+            "Call one of these client tools instead, by exact name: \(prepared.tools.map(\.name).joined(separator: ", ")).",
+            "Emit exactly one client tool call with arguments matching that tool's schema, and no prose."
+        ].joined(separator: "\n")
+        var repaired = prepared
+        repaired.prompt += hint
+        // The bridge reuses `incrementalPrompt` whenever it already has a warm
+        // agent for this session, so the hint has to be present in both.
+        repaired.incrementalPrompt = (prepared.incrementalPrompt ?? prepared.prompt) + hint
+        repaired.promptCharacters = repaired.prompt.count
+        return repaired
+    }
+
+    /// Assistant text that is never empty. Clients treat a turn with no content
+    /// and no usable tool call as a provider failure, so the model's narration is
+    /// used when present and an explanation otherwise.
+    public static func nonEmptyAssistantText(prepared: PreparedChatRequest, output: CursorSDKOutput) -> String {
+        if !output.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return output.text
+        }
+        let attempted = unresolvableToolCallNames(output.toolCalls, prepared: prepared).filter { !$0.isEmpty }
+        if !attempted.isEmpty {
+            let names = attempted.map { "`\($0)`" }.joined(separator: ", ")
+            return "I tried to use \(names), which is not one of the tools available here, so nothing was run. Tell me to retry and I will use an available tool."
+        }
+        return "The upstream model returned no content for this turn. Nothing was run. Retrying usually resolves it."
+    }
+
     public static func chatCompletionResponse(
         id: String,
         created: Int,
@@ -634,7 +689,7 @@ public enum OpenAICompatibility {
         output: CursorSDKOutput
     ) -> [String: Any] {
         let toolCalls = toOpenAIToolCalls(output.toolCalls, tools: prepared.tools, responseID: id, context: prepared.toolContext)
-        let content: Any = toolCalls.isEmpty ? output.text : NSNull()
+        let content: Any = toolCalls.isEmpty ? nonEmptyAssistantText(prepared: prepared, output: output) : NSNull()
         return [
             "id": id,
             "object": "chat.completion",
