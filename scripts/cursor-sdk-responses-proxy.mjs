@@ -279,7 +279,7 @@ async function getAgent({ apiKey, model, previous }) {
 
 function buildPrompt({ instructions, inputText, previous, cwd }) {
   const parts = [
-    "You are running in agent mode through the Cursor SDK local runtime.",
+    "You are running in agent mode with local workspace tools available.",
     `Project directory: ${cwd}`,
     "When the request asks for project work, inspect, create, edit, and run files directly in that project.",
     "Do not tell the user to switch modes. Do not ask the user to paste files manually."

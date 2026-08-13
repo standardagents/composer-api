@@ -1446,7 +1446,7 @@ function bridgePrompt(prompt, clientTools = []) {
     : "No local MCP server tools are available on this turn.";
 
   return [
-    "You are running through the real Cursor SDK local runtime behind an OpenAI-compatible client.",
+    "You are running through a local tool-enabled runtime behind an OpenAI-compatible client.",
     "The outer client owns local tool execution. The bridge must forward local operations; it must not execute SDK built-in shell/read/write/edit/glob/grep/ls/delete tools inside the bridge runtime.",
     toolInstruction,
     mcpInstruction,

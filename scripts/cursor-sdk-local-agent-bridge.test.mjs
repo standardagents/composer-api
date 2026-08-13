@@ -1826,6 +1826,8 @@ describe("Cursor SDK local-agent bridge", () => {
       { name: "write" }
     ]);
 
+    expect(prompt).toContain("You are running through a local tool-enabled runtime behind an OpenAI-compatible client.");
+    expect(prompt).not.toContain("real Cursor SDK local runtime");
     expect(prompt).toContain("outer client tools are: bash, write");
     expect(prompt).toContain("Use SDK mcp with providerIdentifier \"client\" for every local operation");
     expect(prompt).toContain("client_shell");
