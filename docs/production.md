@@ -13,6 +13,69 @@ API for Cursor ships as a signed macOS DMG and updates through Sparkle.
 - The release workflow uploads the versioned DMG, latest DMG alias, and appcast to Cloudflare R2.
 - The Worker serves `/download`, `/releases/...`, and `/appcast.xml` from Cloudflare.
 
+## Local Bridge Lifecycle
+
+In the packaged macOS app the SDK bridge runs as a managed child process.
+
+**Ownership and shutdown sequence:**
+
+- The macOS app launches the bridge child and holds its lifetime.
+- The child polls the original parent PID at a configurable cadence (default 1000 ms;
+  `CURSOR_SDK_BRIDGE_PARENT_LOSS_POLL_INTERVAL_MS`). When the parent exits or the PID
+  changes, shutdown begins.
+- During shutdown the bridge rejects new incoming requests immediately.
+- In-flight request creation and any cached or pending SDK agents are drained with awaited
+  `Symbol.asyncDispose`; a synchronous `close()` call is used only when `asyncDispose` is
+  absent.
+- Node is given a bounded drain window (default 15000 ms;
+  `CURSOR_SDK_BRIDGE_SHUTDOWN_TIMEOUT_MS`) before exiting.
+- The run timeout is 180000 ms by default (`CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS`); the packaged
+  macOS app explicitly overrides this to 120000 ms.
+- The Swift app waits 16000 ms (the Node drain bound of 15000 ms plus 1000 ms extra grace)
+  before sending SIGKILL.
+
+**Recovery:**
+
+Two retry layers are active.
+
+Inside the bridge, SDK-run errors that occur before any event is emitted are retried up to
+`maxRunRetries` times (default 3; configurable via `CURSOR_SDK_BRIDGE_MAX_RUN_RETRIES`). The
+`attempt` counter starts at 0; retries continue while `attempt < maxRunRetries`, yielding at
+most 4 SDK-run attempts per bridge call.
+
+At the Swift app layer (`bridgeTransportAttempts = 2`), only retryable pre-output failures
+recycle the owned bridge once: transport-level failures and known
+`503`/`cursor_sdk_unavailable` stale-state errors that occur before any text or tool output
+has been produced. The recycled bridge handles one final attempt. If that also fails, the
+`CursorAPIError`/OpenAI-compatible error is returned unchanged.
+
+The bridge is shared by all local SDK sessions. Recycling it is therefore process-wide:
+shutdown disposes every cached agent and can interrupt unrelated concurrent requests.
+This is an intentional recovery trade-off for the local macOS service so stale or
+poisoned SDK process state is removed completely; interrupted callers receive the normal
+error contract and can retry.
+
+Auth failures, arbitrary upstream errors, and any failure after output has begun are never
+retried at either layer.
+
+**Verification:**
+
+- Node lifecycle suite: `npx vitest run scripts/cursor-sdk-local-agent-bridge.test.mjs`
+  must pass.
+- Swift build: `swift build -c release` from `macos/CursorAPI` (core and production-seam
+  typecheck green).
+- Swift XCTest: requires a full Xcode installation with the XCTest framework; Command Line
+  Tools alone cannot execute `.xctest` bundles. Run via Xcode or `xcodebuild test`.
+- No live credentialed model call was performed during lifecycle fix verification.
+
+**Dependency decision recorded 2026-07-12:**
+
+Lockfile remains at `@cursor/sdk 1.0.13`. Official `1.0.23` was evaluated: it retains a
+non-awaited `close()` path while `asyncDispose` correctly awaits, and it raises the Node
+engine requirement to `>=22.13`. The update was deferred; it does not fix the lifecycle root
+cause alone and requires a runtime version bump. No package or lockfile change was made.
+Re-evaluate this decision when changing the SDK lockfile or the bundled Node runtime.
+
 ## Required GitHub Secrets
 
 - `MACOS_DEVELOPER_ID_CERTIFICATE_BASE64`: base64-encoded Developer ID Application `.p12`.

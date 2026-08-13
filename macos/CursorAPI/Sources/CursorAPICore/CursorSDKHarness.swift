@@ -41,6 +41,43 @@ public extension CursorSDKHarness {
     }
 }
 
+enum CursorSDKRetryDecision {
+    case retry(recycleBridge: Bool)
+    case fail(any Error)
+}
+
+struct CursorSDKRetryExecutor {
+    static func execute<T>(
+        attempts: Int,
+        operation: (_ attempt: Int) async throws -> T,
+        actionForFailure: (_ error: any Error, _ attempt: Int) -> CursorSDKRetryDecision,
+        recycle: () async -> Void,
+        delay: () async -> Void
+    ) async throws -> T {
+        let totalAttempts = max(1, attempts)
+        var attempt = 1
+        while true {
+            do {
+                return try await operation(attempt)
+            } catch {
+                switch actionForFailure(error, attempt) {
+                case .retry(let recycleBridge):
+                    guard attempt < totalAttempts else {
+                        throw error
+                    }
+                    if recycleBridge {
+                        await recycle()
+                    }
+                    await delay()
+                    attempt += 1
+                case .fail(let terminalError):
+                    throw terminalError
+                }
+            }
+        }
+    }
+}
+
 public struct LocalCursorSDKHarness: CursorSDKHarness {
     private static let sessionStore = CursorSDKSessionStore(maxEntries: 512)
     private static let toolRetryAttempts = 3
@@ -62,6 +99,72 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         var output: CursorSDKOutput
         var emittedText: String
         var emittedToolCalls: [CursorToolCall]
+    }
+
+    struct BridgeRecoveryError: Error, Equatable, Sendable {
+        var outwardError: CursorAPIError
+        var status: Int?
+        var code: String?
+        var emittedOutput: Bool
+
+        init(outwardError: CursorAPIError, status: Int? = nil, code: String? = nil, emittedOutput: Bool = false) {
+            self.outwardError = outwardError
+            self.status = status
+            self.code = code
+            self.emittedOutput = emittedOutput
+        }
+
+        var normalizedCode: String? {
+            Self.normalizedCode(code)
+        }
+
+        func withEmittedOutput(_ value: Bool) -> BridgeRecoveryError {
+            var updated = self
+            updated.emittedOutput = emittedOutput || value
+            return updated
+        }
+
+        var isRetryableBeforeOutput: Bool {
+            guard !emittedOutput else { return false }
+            switch outwardError {
+            case .transport:
+                return true
+            case .upstream:
+                if normalizedCode == "bridge_shutting_down" {
+                    return false
+                }
+                return status == 503 || normalizedCode == "cursor_sdk_unavailable"
+            case .unauthorized:
+                return false
+            default:
+                return false
+            }
+        }
+
+        private static func normalizedCode(_ value: String?) -> String? {
+            let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized?.isEmpty == false ? normalized : nil
+        }
+    }
+
+    static func executeBridgeRecoveryRetry<T>(
+        operation: @escaping (_ attempt: Int) async throws -> T,
+        recycle: @escaping () async -> Void,
+        delay: @escaping () async -> Void
+    ) async throws -> T {
+        do {
+            return try await CursorSDKRetryExecutor.execute(
+                attempts: bridgeTransportAttempts,
+                operation: operation,
+                actionForFailure: { error, _ in
+                    bridgeRetryDecision(for: error)
+                },
+                recycle: recycle,
+                delay: delay
+            )
+        } catch {
+            throw outwardBridgeError(from: error)
+        }
     }
 
     public func validate(settings: CursorAPISettings, authorization: String?) throws {
@@ -245,32 +348,35 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         settings: CursorAPISettings,
         onEvent: @escaping @Sendable (CursorSDKStreamEvent) -> Void
     ) async throws -> BridgeRunResult {
-        var lastError: (any Error)?
-        for attempt in 1...Self.bridgeTransportAttempts {
-            let emittedDuringAttempt = LockedFlag()
-            do {
-                return try await runActualSDKBridgeRequest(
-                    apiKey: apiKey,
-                    agentID: agentID,
-                    runID: attempt == 1 ? runID : Self.newRunID(),
-                    prepared: prepared,
-                    settings: settings,
-                    onEvent: { event in
-                        emittedDuringAttempt.set()
-                        onEvent(event)
+        try await Self.executeBridgeRecoveryRetry(
+            operation: { attempt in
+                let emittedDuringAttempt = LockedFlag()
+                do {
+                    return try await runActualSDKBridgeRequest(
+                        apiKey: apiKey,
+                        agentID: agentID,
+                        runID: attempt == 1 ? runID : Self.newRunID(),
+                        prepared: prepared,
+                        settings: settings,
+                        onEvent: { event in
+                            emittedDuringAttempt.set()
+                            onEvent(event)
+                        }
+                    )
+                } catch {
+                    guard let failure = Self.bridgeRecoveryError(from: error) else {
+                        throw error
                     }
-                )
-            } catch {
-                lastError = error
-                guard attempt < Self.bridgeTransportAttempts,
-                      !emittedDuringAttempt.value(),
-                      isRetryableBridgeTransportError(error) else {
-                    throw error
+                    throw failure.withEmittedOutput(emittedDuringAttempt.value())
                 }
+            },
+            recycle: {
+                await CursorSDKBridgeServer.shared.recycle()
+            },
+            delay: {
                 try? await Task.sleep(nanoseconds: 150_000_000)
             }
-        }
-        throw lastError ?? CursorAPIError.transport("Cursor SDK bridge request failed.")
+        )
     }
 
     private func runActualSDKBridgeRequest(
@@ -305,22 +411,37 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         do {
             (bytes, response) = try await URLSession.shared.bytes(for: request)
         } catch {
-            throw CursorAPIError.transport("Cursor SDK bridge request failed: \(error.localizedDescription)")
+            throw BridgeRecoveryError(outwardError: .transport("Cursor SDK bridge request failed: \(error.localizedDescription)"))
         }
         guard let http = response as? HTTPURLResponse else {
-            throw CursorAPIError.transport("Cursor SDK bridge did not return an HTTP response.")
+            throw BridgeRecoveryError(outwardError: .transport("Cursor SDK bridge did not return an HTTP response."))
         }
         guard (200..<300).contains(http.statusCode) else {
             let data = try await collectData(bytes)
-            let text = String(data: data, encoding: .utf8) ?? "status \(http.statusCode)"
-            throw http.statusCode == 401 ? CursorAPIError.unauthorized : CursorAPIError.upstream(text)
+            throw bridgeHTTPError(statusCode: http.statusCode, data: data)
         }
         var emittedText = ""
         var emittedToolCalls: [CursorToolCall] = []
         var finalOutput: CursorSDKOutput?
         var line = Data()
-        for try await byte in bytes {
-            if byte == 10 {
+        do {
+            for try await byte in bytes {
+                if byte == 10 {
+                    try handleBridgeEventLine(
+                        line,
+                        agentID: agentID,
+                        runID: runID,
+                        emittedText: &emittedText,
+                        emittedToolCalls: &emittedToolCalls,
+                        finalOutput: &finalOutput,
+                        onEvent: onEvent
+                    )
+                    line.removeAll(keepingCapacity: true)
+                } else if byte != 13 {
+                    line.append(byte)
+                }
+            }
+            if !line.isEmpty {
                 try handleBridgeEventLine(
                     line,
                     agentID: agentID,
@@ -330,27 +451,15 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
                     finalOutput: &finalOutput,
                     onEvent: onEvent
                 )
-                line.removeAll(keepingCapacity: true)
-            } else if byte != 13 {
-                line.append(byte)
             }
-        }
-        if !line.isEmpty {
-            try handleBridgeEventLine(
-                line,
-                agentID: agentID,
-                runID: runID,
-                emittedText: &emittedText,
-                emittedToolCalls: &emittedToolCalls,
-                finalOutput: &finalOutput,
-                onEvent: onEvent
-            )
+        } catch {
+            throw Self.bridgeStreamReadFailure(from: error)
         }
         if finalOutput == nil, !emittedToolCalls.isEmpty {
             finalOutput = CursorSDKOutput(text: "", toolCalls: emittedToolCalls, agentID: agentID, runID: runID)
         }
         guard let finalOutput else {
-            throw CursorAPIError.transport("Cursor SDK bridge stream ended without a final output.")
+            throw BridgeRecoveryError(outwardError: .transport("Cursor SDK bridge stream ended without a final output."))
         }
         return BridgeRunResult(output: finalOutput, emittedText: emittedText, emittedToolCalls: emittedToolCalls)
     }
@@ -394,20 +503,25 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
             finalOutput = output
         case "error":
             let error = object["error"] as? [String: Any]
-            throw Self.bridgeStreamError(from: error)
+            throw Self.bridgeStreamFailure(from: error)
         default:
             break
         }
     }
 
     static func bridgeStreamError(from error: [String: Any]?) -> CursorAPIError {
+        bridgeStreamFailure(from: error).outwardError
+    }
+
+    private static func bridgeStreamFailure(from error: [String: Any]?) -> BridgeRecoveryError {
         let status = intValue(error?["status"])
-        let code = (error?["code"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let code = normalizedBridgeErrorCode(error?["code"])
         if status == 401 || code == "unauthorized" {
-            return .unauthorized
+            return BridgeRecoveryError(outwardError: .unauthorized, status: status, code: code)
         }
         let message = (error?["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return .upstream((message?.isEmpty == false ? message : nil) ?? "Cursor SDK bridge stream failed.")
+        let resolved = (message?.isEmpty == false ? message : nil) ?? "Cursor SDK bridge stream failed."
+        return BridgeRecoveryError(outwardError: .upstream(resolved), status: status, code: code)
     }
 
     private static func intValue(_ value: Any?) -> Int? {
@@ -415,6 +529,69 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         if let value = value as? NSNumber { return value.intValue }
         if let value = value as? String { return Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) }
         return nil
+    }
+
+    private static func normalizedBridgeErrorCode(_ value: Any?) -> String? {
+        let code = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return code?.isEmpty == false ? code : nil
+    }
+
+    private static func bridgeRecoveryError(from error: any Error) -> BridgeRecoveryError? {
+        if let failure = error as? BridgeRecoveryError {
+            return failure
+        }
+        if let cursorError = error as? CursorAPIError {
+            return BridgeRecoveryError(outwardError: cursorError)
+        }
+        return nil
+    }
+
+    static func bridgeStreamReadFailure(from error: any Error) -> any Error {
+        if error is CancellationError {
+            return error
+        }
+        if let failure = bridgeRecoveryError(from: error) {
+            return failure
+        }
+        return BridgeRecoveryError(
+            outwardError: .transport("Cursor SDK bridge stream failed: \(error.localizedDescription)")
+        )
+    }
+
+    private static func bridgeRetryDecision(for error: any Error) -> CursorSDKRetryDecision {
+        guard let failure = bridgeRecoveryError(from: error) else {
+            return .fail(error)
+        }
+        if failure.isRetryableBeforeOutput {
+            return .retry(recycleBridge: true)
+        }
+        return .fail(failure.outwardError)
+    }
+
+    private static func outwardBridgeError(from error: any Error) -> any Error {
+        if let failure = error as? BridgeRecoveryError {
+            return failure.outwardError
+        }
+        return error
+    }
+
+    private func bridgeHTTPError(statusCode: Int, data: Data) -> BridgeRecoveryError {
+        let code = Self.bridgeHTTPErrorCode(from: data)
+        if statusCode == 401 || code == "unauthorized" {
+            return BridgeRecoveryError(outwardError: .unauthorized, status: statusCode, code: code)
+        }
+        let text = String(data: data, encoding: .utf8) ?? "status \(statusCode)"
+        return BridgeRecoveryError(outwardError: .upstream(text), status: statusCode, code: code)
+    }
+
+    private static func bridgeHTTPErrorCode(from data: Data) -> String? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if let nested = object["error"] as? [String: Any] {
+            return normalizedBridgeErrorCode(nested["code"])
+        }
+        return normalizedBridgeErrorCode(object["code"])
     }
 
     private func bridgeOutput(from value: Any?, agentID: String, runID: String) -> CursorSDKOutput? {
@@ -433,13 +610,6 @@ public struct LocalCursorSDKHarness: CursorSDKHarness {
         }
         let arguments = (object["arguments"] as? [String: Any] ?? [:]).mapValues(JSONValue.from)
         return CursorToolCall(name: name, arguments: arguments)
-    }
-
-    private func isRetryableBridgeTransportError(_ error: any Error) -> Bool {
-        if case .transport = error as? CursorAPIError {
-            return true
-        }
-        return false
     }
 
     private static func bridgeToolObjects(_ prepared: PreparedChatRequest) -> [[String: Any]] {

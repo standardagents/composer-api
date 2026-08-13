@@ -8,22 +8,58 @@ struct CursorSDKBridgeEndpoint: Sendable {
     var token: String
 }
 
+struct CursorSDKBridgeServerDependencies: Sendable {
+    var portIsOpen: (@Sendable (UInt16) async -> Bool)?
+    var launch: (@Sendable (URL, UInt16, CursorAPISettings) throws -> Void)?
+    var healthCheck: (@Sendable (URL) async -> Bool)?
+    var sleep: (@Sendable () async throws -> Void)?
+
+    init(
+        portIsOpen: (@Sendable (UInt16) async -> Bool)? = nil,
+        launch: (@Sendable (URL, UInt16, CursorAPISettings) throws -> Void)? = nil,
+        healthCheck: (@Sendable (URL) async -> Bool)? = nil,
+        sleep: (@Sendable () async throws -> Void)? = nil
+    ) {
+        self.portIsOpen = portIsOpen
+        self.launch = launch
+        self.healthCheck = healthCheck
+        self.sleep = sleep
+    }
+}
+
 actor CursorSDKBridgeServer {
     static let shared = CursorSDKBridgeServer()
+    static let bridgeShutdownTimeoutMilliseconds = 15_000
+    static let forceTerminationExtraGraceMilliseconds = 1_000
+    static let forceTerminationGraceMilliseconds = bridgeShutdownTimeoutMilliseconds + forceTerminationExtraGraceMilliseconds
 
     private var process: Process?
     private var endpoint: CursorSDKBridgeEndpoint?
     private var logHandle: FileHandle?
+    private var isStopping = false
+    private var shutdownRequested = false
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
     private let token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    private let portPreference: CursorSDKBridgePortPreference
+    private let dependencies: CursorSDKBridgeServerDependencies
+
+    init(
+        portPreference: CursorSDKBridgePortPreference = CursorSDKBridgePortPreference(),
+        dependencies: CursorSDKBridgeServerDependencies = CursorSDKBridgeServerDependencies()
+    ) {
+        self.portPreference = portPreference
+        self.dependencies = dependencies
+    }
 
     func endpoint(settings: CursorAPISettings) async throws -> CursorSDKBridgeEndpoint {
-        if let endpoint, process?.isRunning == true {
-            return endpoint
+        await waitForInFlightStop()
+        if shutdownRequested {
+            throw CursorAPIError.transport("Cursor SDK bridge is shutting down.")
         }
         if let endpoint, await isHealthy(endpoint.healthURL) {
             return endpoint
         }
-        stop()
+        await stop()
         let script = try bridgeScriptURL()
         let port = try await start(script: script, settings: settings)
         let endpoint = CursorSDKBridgeEndpoint(
@@ -35,25 +71,46 @@ actor CursorSDKBridgeServer {
         return endpoint
     }
 
-    private func start(script: URL, settings: CursorAPISettings) async throws -> UInt16 {
+    func start(script: URL, settings: CursorAPISettings) async throws -> UInt16 {
         var lastError: (any Error)?
-        for port in 8792...8892 {
-            guard let candidate = UInt16(exactly: port), await !tcpPortIsOpen(candidate) else {
+        for candidate in portPreference.candidatePorts() {
+            let isOpen: Bool
+            if let portIsOpen = dependencies.portIsOpen {
+                isOpen = await portIsOpen(candidate)
+            } else {
+                isOpen = await tcpPortIsOpen(candidate)
+            }
+            guard !isOpen else {
                 continue
             }
             do {
-                try launch(script: script, port: candidate, settings: settings)
+                if let launch = dependencies.launch {
+                    try launch(script, candidate, settings)
+                } else {
+                    try launch(script: script, port: candidate, settings: settings)
+                }
                 let health = URL(string: "http://127.0.0.1:\(candidate)/health")!
                 for _ in 0..<40 {
-                    if await isHealthy(health) {
+                    let healthy: Bool
+                    if let healthCheck = dependencies.healthCheck {
+                        healthy = await healthCheck(health)
+                    } else {
+                        healthy = await isHealthy(health)
+                    }
+                    if healthy {
+                        portPreference.recordSuccessfulPort(candidate)
                         return candidate
                     }
-                    try await Task.sleep(nanoseconds: 50_000_000)
+                    if let sleep = dependencies.sleep {
+                        try await sleep()
+                    } else {
+                        try await Task.sleep(nanoseconds: 50_000_000)
+                    }
                 }
-                stop()
+                await stop()
                 lastError = CursorAPIError.transport("Cursor SDK bridge did not become ready.")
             } catch {
-                stop()
+                await stop()
                 lastError = error
             }
         }
@@ -70,6 +127,7 @@ actor CursorSDKBridgeServer {
         environment["CURSOR_SDK_BRIDGE_PORT"] = String(port)
         environment["CURSOR_SDK_BRIDGE_TOKEN"] = token
         environment["CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS"] = "120000"
+        environment["CURSOR_SDK_BRIDGE_SHUTDOWN_TIMEOUT_MS"] = String(Self.bridgeShutdownTimeoutMilliseconds)
         process.environment = environment
         process.currentDirectoryURL = script.deletingLastPathComponent()
         let logHandle = try bridgeLogHandle()
@@ -121,27 +179,89 @@ actor CursorSDKBridgeServer {
         return URL(fileURLWithPath: path)
     }
 
-    func shutdown() {
-        stop()
+    func shutdown() async {
+        shutdownRequested = true
+        await stop()
     }
 
-    private func stop() {
+    func recycle() async {
+        await stop()
+    }
+
+    func resetShutdownStateForTesting() {
+        shutdownRequested = false
+    }
+
+    static func waitForExitPolling(
+        timeoutNanoseconds: UInt64,
+        pollIntervalNanoseconds: UInt64 = 20_000_000,
+        isRunning: () -> Bool,
+        sleep: (_ durationNanoseconds: UInt64) async -> Void
+    ) async -> Bool {
+        let pollInterval = max(1, pollIntervalNanoseconds)
+        var elapsed: UInt64 = 0
+        while isRunning() {
+            guard elapsed < timeoutNanoseconds else {
+                return false
+            }
+            let remaining = timeoutNanoseconds - elapsed
+            let delay = min(pollInterval, remaining)
+            await sleep(delay)
+            elapsed += delay
+        }
+        return true
+    }
+
+    private func stop() async {
+        if isStopping {
+            await waitForInFlightStop()
+            return
+        }
+        isStopping = true
         let process = self.process
+        let logHandle = self.logHandle
         self.process = nil
-        endpoint = nil
+        self.endpoint = nil
+        self.logHandle = nil
+        defer { finishStop() }
+
         if let process, process.isRunning {
             process.terminate()
-            let deadline = Date().addingTimeInterval(1)
-            while process.isRunning, Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-            if process.isRunning {
+            let timeoutNanoseconds = UInt64(Self.forceTerminationGraceMilliseconds) * 1_000_000
+            let exited = await Self.waitForExitPolling(
+                timeoutNanoseconds: timeoutNanoseconds,
+                isRunning: { process.isRunning },
+                sleep: Self.cooperativeSleep
+            )
+            if !exited && process.isRunning {
                 Darwin.kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
             }
         }
+
         try? logHandle?.close()
-        logHandle = nil
+    }
+
+    private func waitForInFlightStop() async {
+        guard isStopping else { return }
+        await withCheckedContinuation { continuation in
+            stopWaiters.append(continuation)
+        }
+    }
+
+    private func finishStop() {
+        isStopping = false
+        let waiters = stopWaiters
+        stopWaiters.removeAll(keepingCapacity: false)
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    private static func cooperativeSleep(_ durationNanoseconds: UInt64) async {
+        do {
+            try await Task.sleep(nanoseconds: durationNanoseconds)
+        } catch {}
     }
 
     private func bridgeLogHandle() throws -> FileHandle {
