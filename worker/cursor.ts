@@ -988,8 +988,14 @@ function protoField(fieldNumber: number, wireType: 0 | 2, value: string | number
 }
 
 function encodeVarint(value: number): Uint8Array {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`encodeVarint: expected non-negative integer, got ${value}`);
+  }
+  if (value >= 2 ** 32) {
+    throw new Error(`encodeVarint: value ${value} exceeds 32-bit unsigned limit`);
+  }
   const bytes: number[] = [];
-  let current = value >>> 0;
+  let current = value;
   while (current >= 0x80) {
     bytes.push((current & 0x7f) | 0x80);
     current >>>= 7;
