@@ -80,7 +80,9 @@ export async function createCursorCompletion(
 
 export const cursorTestExports = {
   encodeCursorChatRequest,
-  parseComposerToolCalls
+  parseComposerToolCalls,
+  cursorIdentityCache,
+  evictExpiredCacheEntries
 };
 
 export type CursorTextEvent =
@@ -280,6 +282,8 @@ async function getCursorAccountIdentity(env: Env, deps: Deps, apiKey: string): P
   const now = deps.now().getTime();
   const cached = cursorIdentityCache.get(apiKeyHash);
   if (cached && cached.expiresAt > now) return cached.identity;
+  // Lazy eviction: remove the expired entry so the cache stays bounded.
+  if (cached) cursorIdentityCache.delete(apiKeyHash);
 
   const me = await verifyCursorApiKey(env, deps, apiKey);
   const identity =
@@ -290,7 +294,16 @@ async function getCursorAccountIdentity(env: Env, deps: Deps, apiKey: string): P
         : `cursor-key:${apiKeyHash}`;
 
   cursorIdentityCache.set(apiKeyHash, { identity, expiresAt: now + 60 * 60 * 1000 });
+  // Periodic sweep: evict any other expired entries to prevent unbounded growth
+  // from keys that are never looked up again.
+  evictExpiredCacheEntries(now);
   return identity;
+}
+
+function evictExpiredCacheEntries(now: number): void {
+  for (const [key, entry] of cursorIdentityCache.entries()) {
+    if (entry.expiresAt <= now) cursorIdentityCache.delete(key);
+  }
 }
 
 async function cursorPublicJson<T>(
