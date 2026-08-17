@@ -131,6 +131,20 @@ The bridge process also accepts `CURSOR_SDK_BRIDGE_RUN_TIMEOUT_MS`; the default 
 Release packages prefer a bundled Node runtime for the local SDK bridge and fall
 back to Bun when Node is unavailable.
 
+### macOS app development
+
+Two helper scripts live under `scripts/` for iterating on the local macOS app:
+
+- `scripts/run-dev.sh` — kills any running instance and runs the Swift package
+  directly with `swift run`. Fastest for UI or API changes, but does not build a
+  signed app bundle.
+- `scripts/build-app.sh` — builds a development app bundle with
+  `macos/CursorAPI/Scripts/package-app.sh --development` and opens it. Requires
+  Node/Bun for the bundled SDK bridge step.
+
+Both scripts assume the macOS app is named `API for Cursor` and kill the running
+instance before launching so the new build can bind to the configured port.
+
 ## Cloudflare
 
 The Worker uses Cloudflare Vite and D1.
