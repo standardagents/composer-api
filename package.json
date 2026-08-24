@@ -34,9 +34,12 @@
     "cloudflare-workers"
   ],
   "license": "MIT",
+  "overrides": {
+    "undici": "^8.9.0"
+  },
   "dependencies": {
     "@cloudflare/containers": "^0.3.4",
-    "@cursor/sdk": "^1.0.13",
+    "@cursor/sdk": "^1.0.26",
     "lucide": "^0.557.0"
   },
   "devDependencies": {
