@@ -118,6 +118,11 @@ public final class LocalAPIServer: @unchecked Sendable {
         let endpointPort = NWEndpoint.Port(rawValue: port)!
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: endpointPort)
+        // Sockets from the previous run can linger after a restart. Without
+        // endpoint reuse the rebind fails, the fallback picks the next port, and
+        // that new port gets persisted, so every restart moves the API and
+        // breaks anything configured against it.
+        parameters.allowLocalEndpointReuse = true
         let listener = try NWListener(using: parameters)
         let startResult = ListenerStartResult(port: port)
         listener.newConnectionHandler = { [weak self] connection in
